@@ -1,0 +1,54 @@
+[project]
+name = "sccm"
+version = "0.0.1"
+description = "OpenGraph collector for sccm using OpenHound"
+readme = "README.md"
+requires-python = "<=3.14,>=3.13"
+authors = [
+  {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
+]
+dependencies = [
+    # LDAP client used by the LDAP collection phase (clients/ad.py).
+    "ldap3>=2.9.1",
+    # Used by impacket-based per-host phases (Phase 3); landed here so `uv sync` resolves
+    # the wheels once and the next session can start from a working venv.
+    "impacket>=0.11.0",
+    # MSSQL EPA prelogin probe + AdminService HTTP client (Phase 3).
+    "requests>=2.28.0",
+    "requests-ntlm>=1.2.0",
+    # DNS SRV / ADIDNS lookups for the DNS phase (Phase 2).
+    "dnspython>=2.4.0",
+    # Crypto helpers for NAA / collection variable decryption (Phase 2).
+    "pycryptodome>=3.19.0",
+    "cryptography>=41.0.0",
+]
+
+[tool.uv]
+# Prefer system / official Pythons over uv-managed (python-build-standalone) on
+# Windows: their libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim,
+# so any TLS handshake aborts the process. On Linux this preference is harmless
+# (the bug doesn't exist there).
+python-preference = "only-system"
+
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openhound_sccm"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"extension.yaml" = "openhound_sccm/extension.yaml"
+
+[dependency-groups]
+dev = [
+    "openhound @ git+https://github.com/SpecterOps/openhound.git",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.1",
+    "ruff>=0.15.5",
+    "mypy>=1.19.1",
+    "zensical>=0.0.27",
+]
+
+[project.entry-points."openhound.sources"]
+sccm = "openhound_sccm.main:app"

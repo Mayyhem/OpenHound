@@ -1,0 +1,112 @@
+"""User node model.
+
+Reads from the ``ldap_users`` DLT table. Yields one User node per AD user
+account, with kinds=[User, Base] to match ConfigManBearPig output.
+
+Edges emitted from this model are limited to relationships that derive *only*
+from a single user's own attributes. Cross-cutting edges (MemberOf,
+HasSession, etc.) live in ``models/group_membership.py`` and ``models/derived/``
+and consume materialised SQL views.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import ClassVar, Optional
+
+from dlt.common.libs.pydantic import DltConfig
+from openhound.core.asset import BaseAsset, NodeDef
+from pydantic import ConfigDict
+
+from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
+from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.main import app
+
+
+@dataclass
+class UserProperties(SCCMNodeProperties):
+    """Properties carried on every User node.
+
+    Field names match the camelCase used by ConfigManBearPig's output so the
+    test runner's wildcard patterns match unchanged.
+    """
+
+    userPrincipalName: Optional[str] = field(default=None, metadata={"description": "AD userPrincipalName"})
+    objectGuid: Optional[str] = field(default=None, metadata={"description": "AD objectGUID"})
+    servicePrincipalName: Optional[list[str]] = field(default=None, metadata={"description": "AD SPNs"})
+    Type: Optional[str] = field(default="User", metadata={"description": "Marker matching CMBP property"})
+    domain: Optional[str] = field(default=None, metadata={"description": "AD domain (NetBIOS or DNS)"})
+    SCCMInfra: Optional[bool] = field(default=None, metadata={"description": "True when this User appears in SMS_R_User (i.e. AdminService discovered them)"})
+
+
+@app.asset(
+    description="AD User node",
+    node=NodeDef(
+        kind=nk.USER,
+        description="Active Directory user account discovered via LDAP",
+        icon="user",
+        properties=UserProperties,
+    ),
+    edges=[],
+)
+class User(BaseAsset):
+    """User asset — one row per AD user account from ``ldap_users``."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    dlt_config: ClassVar[DltConfig] = {"return_validated_models": True}
+
+    # Raw fields from ldap_users JSONL
+    object_sid: str
+    object_guid: Optional[str] = None
+    sam_account_name: Optional[str] = None
+    user_principal_name: Optional[str] = None
+    name: Optional[str] = None
+    display_name: Optional[str] = None
+    distinguished_name: Optional[str] = None
+    enabled: Optional[bool] = None
+    member_of_dns: Optional[list[str]] = None
+    primary_group_id: Optional[int] = None
+    service_principal_names: Optional[list[str]] = None
+    domain: Optional[str] = None
+
+    @property
+    def as_node(self) -> SCCMNode:
+        display = self.display_name or self.sam_account_name or self.object_sid
+        # Tag SCCMInfra=True when this User appears in
+        # adminservice_r_user_security_groups (i.e. SMS_R_User found
+        # them). Drives the output-stage prune so AdminService-known
+        # users keep their MemberOf edges even when no other anchor
+        # path pulls them in.
+        sccm_infra: Optional[bool] = None
+        lookup = getattr(self, "_lookup", None)
+        if lookup is not None and hasattr(lookup, "user_is_sccm_infra"):
+            try:
+                sccm_infra = lookup.user_is_sccm_infra(self.object_sid) or None
+            except Exception:
+                sccm_infra = None
+        return SCCMNode(
+            kinds=[nk.USER, nk.BASE],
+            properties=UserProperties(
+                node_id=self.object_sid,
+                name=display,
+                displayname=display,
+                environmentid=self.domain or "",
+                samAccountName=self.sam_account_name,
+                distinguishedName=self.distinguished_name,
+                objectGuid=self.object_guid,
+                userPrincipalName=self.user_principal_name,
+                enabled=self.enabled,
+                servicePrincipalName=self.service_principal_names,
+                isDomainPrincipal=True,
+                collectionSource=["LDAP"],
+                Type="User",
+                domain=self.domain,
+                SCCMInfra=sccm_infra,
+            ),
+        )
+
+    @property
+    def edges(self):
+        # User-only edges (none right now; MemberOf comes from group_membership.py;
+        # cross-cutting edges live in models/derived/).
+        return iter(())
