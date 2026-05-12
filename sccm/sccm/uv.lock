@@ -1562,6 +1562,7 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "requests" },
     { name = "requests-ntlm" },
+    { name = "winkerberos", marker = "sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
@@ -1583,6 +1584,7 @@ requires-dist = [
     { name = "pycryptodome", specifier = ">=3.19.0" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "requests-ntlm", specifier = ">=1.2.0" },
+    { name = "winkerberos", marker = "sys_platform == 'win32'", specifier = ">=0.10.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -1880,6 +1882,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/dd/b2/381be8cfdee792dd117872481b6e378f85c957dd7c5bca38897b08f765fd/werkzeug-3.1.8.tar.gz", hash = "sha256:9bad61a4268dac112f1c5cd4630a56ede601b6ed420300677a869083d70a4c44", size = 875852, upload-time = "2026-04-02T18:49:14.268Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/93/8c/2e650f2afeb7ee576912636c23ddb621c91ac6a98e66dc8d29c3c69446e1/werkzeug-3.1.8-py3-none-any.whl", hash = "sha256:63a77fb8892bf28ebc3178683445222aa500e48ebad5ec77b0ad80f8726b1f50", size = 226459, upload-time = "2026-04-02T18:49:12.72Z" },
+]
+
+[[package]]
+name = "winkerberos"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ca/6c/455f043bc28694a278125d1fc2ab7cbf0ce0953c97bbe1021f08fd19c7b8/winkerberos-0.13.0.tar.gz", hash = "sha256:f3fbb67346fe8ed697e125724b0699d5c2a15b9a5f9151d25a1be88df8dac427", size = 35677, upload-time = "2025-12-03T14:17:29.882Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/83/b1f52594cc2c3ce18c67a04aecb0cb4fb3f4769c268d194cc5f4863150fa/winkerberos-0.13.0-cp313-cp313-win32.whl", hash = "sha256:38fefdfc77a7f82c3cc9f83c7d1b6f242e6d3ea200bfde9b640f7dfe9fdf9bda", size = 25671, upload-time = "2025-12-03T14:17:23.235Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/26/b17649b0707e4d8cd9d0d4ceadcef06eff2fc76fcb444cb187763158ae63/winkerberos-0.13.0-cp313-cp313-win_amd64.whl", hash = "sha256:c45e84a35a3b87b88d0e6d7b55d40712dc021f80af3cb9e81091651e6a73510d", size = 27941, upload-time = "2025-12-03T14:17:24.627Z" },
+    { url = "https://files.pythonhosted.org/packages/80/d9/d12d310fdf9ace70f7469ecfd9f112dc39cb7e1f77348228c06a6bd72c57/winkerberos-0.13.0-cp314-cp314-win32.whl", hash = "sha256:46cc29fa95744076a0dd2a167158574826509a5e4aa052b81a2b535aab4af14a", size = 26185, upload-time = "2025-12-03T14:17:25.63Z" },
+    { url = "https://files.pythonhosted.org/packages/97/7c/5a418e8d292e3fea1012ccf029b38fae430542fab1beaf6fc60cf138cc08/winkerberos-0.13.0-cp314-cp314-win_amd64.whl", hash = "sha256:5d5add54d10e31671f7c28c90ccafe98b45cec6d7519949ba30add51e34aee9a", size = 28476, upload-time = "2025-12-03T14:17:26.629Z" },
+    { url = "https://files.pythonhosted.org/packages/29/ba/cd8186479046b7a749cee8d4d9fd50e3ce3330d8ea611efe4b8b741f0c3b/winkerberos-0.13.0-cp314-cp314t-win32.whl", hash = "sha256:5bc5e40a816d94d4a5abd665fe62088c1ee91ee9a1f5d787032a63004842fedf", size = 26500, upload-time = "2025-12-03T14:17:27.873Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/a6/cc5f24b3f1a46a826b7e30ef56fdc1fe22315fef96de8e22afbdd5d98e7a/winkerberos-0.13.0-cp314-cp314t-win_amd64.whl", hash = "sha256:441884c0bda4bee0125fdbd7fee6a232dab58b4a64be8950eb17a8a7404a5440", size = 28715, upload-time = "2025-12-03T14:17:28.813Z" },
 ]
 
 [[package]]

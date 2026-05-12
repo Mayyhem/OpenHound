@@ -26,6 +26,7 @@ _FRAMEWORK_ARGS = {
     "columns",
     "data_type",
     "verbose",
+    "debug",
 }
 
 
@@ -65,14 +66,14 @@ def test_path_flag_sets_env_var_as_str_path():
 
 
 def test_bool_true_sets_lowercase_true():
-    _apply_env_overrides({"ldaps": True})
-    assert os.environ["SOURCES__SCCM__USE_SSL"] == "true"
+    _apply_env_overrides({"enable_bad_opsec": True})
+    assert os.environ["SOURCES__SCCM__ENABLE_BAD_OPSEC"] == "true"
 
 
 def test_bool_false_does_not_leak():
     # Default-False booleans should leave the env var untouched.
-    _apply_env_overrides({"ldaps": False, "enable_bad_opsec": False})
-    assert "SOURCES__SCCM__USE_SSL" not in os.environ
+    _apply_env_overrides({"disable_possible_edges": False, "enable_bad_opsec": False})
+    assert "SOURCES__SCCM__DISABLE_POSSIBLE_EDGES" not in os.environ
     assert "SOURCES__SCCM__ENABLE_BAD_OPSEC" not in os.environ
 
 

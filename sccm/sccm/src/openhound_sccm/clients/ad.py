@@ -7,14 +7,20 @@ via NTAccount fallback chains, group membership traversal) is convert-time
 post-processing that has moved to ``transforms.py`` SQL views and ``lookup.py``.
 
 What stays here:
-  - `ADClient.bind()` — opens an authenticated ldap3 connection.
+  - `ADClient.bind()` — opens an authenticated ldap3 connection, auto-detecting
+    the right transport + signing/CBT combo (no CLI knobs, no lockouts).
   - `ADClient.paged_search(filter, attributes, base=None)` — uses ldap3's paged search,
     yields each entry's attributes as a flat dict; binary SIDs/GUIDs are decoded.
   - `bytes_to_sid(b)` and `bytes_to_guid(b)` — public helpers used by source.py.
 
-If full ad_resolver feature parity is needed later (e.g. for runtime SID->name
-translation that's not derivable from a single LDAP record), revisit by either
-vendoring the rest of ad_resolver.py or adding ConfigManBearPig as a path-dep.
+Auto-detection is lockout-safe: only AD's ``data 52e`` family of LDAP result-49
+sub-codes (bad/locked/expired/disabled credentials) increment ``badPwdCount``.
+Protocol-level rejections — ``strongerAuthRequired`` (result 8), CBT mismatch
+(``data 80090346``), TLS handshake / connect failures — are returned *before*
+the password is validated, so retrying with a different transport profile after
+one of those does not advance the lockout counter. ``bind()`` therefore tries
+each profile in order, propagating immediately on a credential-class failure
+and continuing only on protocol/transport errors.
 """
 
 from __future__ import annotations
@@ -28,7 +34,9 @@ from ldap3 import (
     ALL,
     AUTO_BIND_NO_TLS,
     AUTO_BIND_TLS_BEFORE_BIND,
+    KERBEROS,
     NTLM,
+    SASL,
     SUBTREE,
     Connection,
     Server,
@@ -47,59 +55,71 @@ except ImportError:  # pragma: no cover - belt & braces for older ldap3
     ENCRYPT = "ENCRYPT"
     TLS_CHANNEL_BINDING = "TLS_CHANNEL_BINDING"
 
+
+# Integrated auth (SASL GSSAPI / Kerberos) requires the OS Kerberos backend.
+# ldap3 picks ``gssapi`` on POSIX and ``winkerberos`` on Windows; both are
+# optional installs. We try-import both up-front so ``bind()`` can skip the
+# Kerberos profile cleanly when no backend is available, rather than crashing
+# inside ldap3's SASL state machine.
+def _integrated_auth_available() -> bool:
+    try:
+        import gssapi  # noqa: F401  (Linux/macOS path)
+        return True
+    except ImportError:
+        pass
+    try:
+        import winkerberos  # noqa: F401  (Windows path)
+        return True
+    except ImportError:
+        pass
+    return False
+
+
+_INTEGRATED_AUTH_AVAILABLE = _integrated_auth_available()
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# LDAP security mode normalisation. CMBP's ``-ls / --ldap-signing`` and
-# ``-cb / --ldap-channel-binding`` flags accept ``auto`` / ``required`` /
-# ``disabled`` plus a handful of legacy aliases (true/yes/on for required,
-# false/no/off for disabled). Centralising the coercion makes the bind
-# logic readable.
+# Bind-error classification. AD returns LDAP result code 49 (invalidCredentials)
+# with an embedded ``data XXXX`` substring identifying the reason. Only the
+# credential-class codes below increment ``badPwdCount`` (the lockout counter);
+# treating any of them as "retry with a different transport profile" risks
+# locking the account out across our attempt chain, so we propagate immediately.
+# Everything else (strongerAuthRequired, CBT mismatch, TLS issues) is returned
+# before the password is validated and is safe to retry.
 # ---------------------------------------------------------------------------
 
-_LDAP_SECURITY_ALIASES: dict[str, str] = {
-    "auto": "auto",
-    "default": "auto",
-    "true": "required",
-    "yes": "required",
-    "y": "required",
-    "1": "required",
-    "on": "required",
-    "required": "required",
-    "require": "required",
-    "enabled": "required",
-    "enable": "required",
-    "false": "disabled",
-    "no": "disabled",
-    "n": "disabled",
-    "0": "disabled",
-    "off": "disabled",
-    "disabled": "disabled",
-    "disable": "disabled",
-}
+# https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-status_codes
+# 52e  ERROR_LOGON_FAILURE        — bad password (only this increments badPwdCount)
+# 532  ERROR_PASSWORD_EXPIRED
+# 533  ERROR_ACCOUNT_DISABLED
+# 701  ERROR_ACCOUNT_EXPIRED
+# 773  ERROR_PASSWORD_MUST_CHANGE
+# 775  ERROR_ACCOUNT_LOCKED_OUT  — already locked; don't keep poking it
+_CREDENTIAL_FAILURE_SUBCODES = {"52e", "532", "533", "701", "773", "775"}
 
 
-def _normalize_ldap_security_mode(
-    value: str | bool | None,
-    *,
-    name: str,
-    default: str = "auto",
-) -> str:
-    """Coerce ``value`` to one of ``auto`` / ``required`` / ``disabled``."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return "required" if value else "disabled"
-    mode = _LDAP_SECURITY_ALIASES.get(str(value).strip().lower())
-    if not mode:
-        raise ValueError(f"{name} must be one of: auto, required, disabled")
-    return mode
+def _bind_error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}".lower()
+
+
+def _is_credential_failure(exc: BaseException) -> bool:
+    """Stop-the-chain check: True for any bind error tied to the credential
+    itself (bad password, locked, expired, disabled). Returning True here
+    means "do not retry against another transport — we'd just rack up
+    badPwdCount increments without changing the outcome."
+    """
+    text = _bind_error_text(exc)
+    if "invalidcredentials" not in text:
+        return False
+    return any(f"data {code}" in text for code in _CREDENTIAL_FAILURE_SUBCODES)
 
 
 def _is_stronger_auth_required(exc: BaseException) -> bool:
-    """Detect AD DC ``strongerAuthRequired`` bind rejections (signing required)."""
-    text = f"{type(exc).__name__}: {exc}".lower()
+    """True when the DC rejected the bind because signing/sealing is required
+    (LDAP result code 8). Safe to retry with hardened transport."""
+    text = _bind_error_text(exc)
     return (
         "strongerauthrequired" in text
         or "stronger auth" in text
@@ -157,38 +177,50 @@ class ADCredentials:
     domain_controller: str | None = None
     username: str | None = None
     password: str | None = None
-    use_ssl: bool = False
+    # Optional port override. ``None`` lets ``ADClient.bind()`` auto-detect the
+    # transport (LDAPS 636 → StartTLS 389 → LDAP 389+sign/seal). Setting a
+    # value pins the port and narrows the attempt chain accordingly: 636/3269
+    # → LDAPS; everything else → LDAP (with NTLM sign/seal when creds are
+    # supplied, falling back to plain LDAP only as a last resort).
     port: int | None = None
-    # CMBP-style LDAP transport hardening knobs. ``start_tls`` upgrades a plain
-    # LDAP connection to TLS before binding. ``ldap_signing`` controls NTLM
-    # sign-and-seal; ``ldap_channel_binding`` controls TLS channel binding
-    # tokens. Each accepts ``auto`` / ``required`` / ``disabled``.
-    start_tls: bool = False
-    ldap_signing: str = "auto"
-    ldap_channel_binding: str = "auto"
+
+
+# Attempt profile for ADClient.bind(). Each entry encodes a (transport,
+# hardening, auth_mode) tuple; bind() walks them in order until one binds
+# successfully or until a credential-class failure stops the chain.
+#
+# auth_mode controls the SASL/bind mechanism:
+#   "ntlm"        — NTLM bind with explicit username/password. Required for
+#                   session_security (sign/seal) and CBT.
+#   "kerberos"    — SASL GSSAPI / Kerberos using the OS credential cache
+#                   (winkerberos on Windows, gssapi on POSIX). No explicit
+#                   creds; uses the current user's TGT. CBT is supplied by
+#                   ldap3's SASL Kerberos path when on TLS.
+#   "anonymous"   — Last-ditch fallback. AD blocks every meaningful search
+#                   from anonymous so we only emit this profile when nothing
+#                   else is possible (and we log a clear warning).
+@dataclass(frozen=True)
+class _BindAttempt:
+    label: str
+    use_ssl: bool
+    port: int
+    start_tls: bool
+    session_security: bool  # NTLM sign+seal — requires NTLM credentials
+    channel_binding: bool   # TLS CBT — requires TLS + NTLM credentials
+    auth_mode: str = "ntlm"
 
 
 class ADClient:
     """Thin ldap3 wrapper used by OpenHound source resources.
 
-    Uses a single bound connection. Callers iterate `paged_search` for each LDAP
-    query they need; results come back as plain dicts, with binary SIDs/GUIDs
-    pre-decoded into strings.
+    Auto-detects the LDAP transport and security envelope at ``bind()`` time:
+    LDAPS:636 + CBT → StartTLS:389 + CBT → LDAP:389 + NTLM sign/seal. The walk
+    is lockout-safe — see the module docstring and ``_is_credential_failure``.
     """
 
     def __init__(self, credentials: ADCredentials):
-        if credentials.use_ssl and credentials.start_tls:
-            raise ValueError("Use either LDAPS or LDAP StartTLS, not both.")
         self.creds = credentials
         self.base_dn = ",".join(f"DC={part}" for part in credentials.domain.split("."))
-        # Normalise the security-mode strings once so every bind call sees
-        # canonical ``auto``/``required``/``disabled`` values.
-        self._signing_mode = _normalize_ldap_security_mode(
-            credentials.ldap_signing, name="ldap_signing"
-        )
-        self._cbt_mode = _normalize_ldap_security_mode(
-            credentials.ldap_channel_binding, name="ldap_channel_binding"
-        )
         self._conn: Connection | None = None
 
     # ------------------------------------------------------------------ bind --
@@ -198,53 +230,234 @@ class ADClient:
             return self._conn
 
         host = self.creds.domain_controller or self.creds.domain
-        port = self.creds.port or (636 if self.creds.use_ssl else 389)
-        channel_binding = self._should_use_channel_binding()
+        attempts = self._build_attempt_plan()
+        self._log_credential_summary(attempts)
 
-        # Try without NTLM sign-and-seal first when the policy is ``auto``;
-        # retry with signing on after a ``strongerAuthRequired`` rejection.
-        # ``required`` skips straight to signing-on; ``disabled`` never
-        # enables it.
-        attempts = [False]
-        if self._should_require_session_security():
-            attempts = [True]
-        elif self._can_retry_with_session_security():
-            attempts.append(True)
-
-        last_exc: LDAPException | None = None
-        for use_session_security in attempts:
+        last_exc: BaseException | None = None
+        for attempt in attempts:
             try:
-                conn = self._open_connection(
-                    host=host,
-                    port=port,
-                    use_session_security=use_session_security,
-                    use_channel_binding=channel_binding,
-                )
-                self._conn = conn
+                self._conn = self._open_connection(host=host, attempt=attempt)
                 logger.info(
-                    "LDAP connected: %s:%d (user=%s, transport=%s, session_security=%s, channel_binding=%s)",
+                    "LDAP connected: %s:%d (auth=%s, profile=%s, principal=%s)",
                     host,
-                    port,
-                    self.creds.username or "<kerberos>",
-                    self._transport_label(),
-                    "encrypt" if use_session_security else "off",
-                    "on" if channel_binding else "off",
+                    attempt.port,
+                    attempt.auth_mode,
+                    attempt.label,
+                    self._principal_label(attempt.auth_mode),
                 )
-                return conn
+                return self._conn
             except LDAPException as exc:
+                if _is_credential_failure(exc):
+                    # Bad / locked / expired / disabled credentials. Falling
+                    # through to another transport would just keep advancing
+                    # badPwdCount without ever succeeding.
+                    raise
                 last_exc = exc
-                if not use_session_security and _is_stronger_auth_required(exc):
-                    logger.warning(
-                        "LDAP bind to %s:%d requires signing/sealing; retrying with NTLM session security",
-                        host,
-                        port,
-                    )
-                    continue
-                raise
+                logger.debug(
+                    "LDAP bind via %s failed (%s); trying next profile",
+                    attempt.label,
+                    exc,
+                )
+                continue
+            except OSError as exc:
+                # socket.gaierror, ConnectionRefused, TLS handshake — port
+                # closed, DNS miss, or cert problem. No auth was attempted;
+                # safe to fall through.
+                last_exc = exc
+                logger.debug(
+                    "LDAP transport to %s:%d (%s) failed: %s; trying next profile",
+                    host,
+                    attempt.port,
+                    attempt.label,
+                    exc,
+                )
+                continue
 
         if last_exc:
             raise last_exc
         raise RuntimeError("LDAP connection failed before bind was attempted")
+
+    def _principal_label(self, auth_mode: str) -> str:
+        if auth_mode == "ntlm":
+            return self.creds.username or "<ntlm-no-user>"
+        if auth_mode == "kerberos":
+            # ldap3 / winkerberos read the principal from the OS Kerberos
+            # cache (Windows LSA / klist). Looking up which principal that
+            # actually is would require querying SSPI; surface "current user"
+            # as the human-readable hint and rely on `klist` for diagnostics.
+            return "current OS user (Kerberos TGT)"
+        return "anonymous"
+
+    def _log_credential_summary(self, attempts: list[_BindAttempt]) -> None:
+        """Announce which auth mode the upcoming bind attempts will use.
+
+        We log this before the first attempt so that operators reading the
+        log can immediately see whether NTLM, Kerberos, or anonymous is in
+        play — important because each has different failure modes (NTLM:
+        wrong password → lockout; Kerberos: missing TGT → bind fails; anon:
+        bind succeeds but every search returns ``operationsError``).
+        """
+        modes = {a.auth_mode for a in attempts}
+        if modes == {"anonymous"}:
+            if not _INTEGRATED_AUTH_AVAILABLE:
+                logger.warning(
+                    "LDAP auth: no credentials supplied and no Kerberos "
+                    "backend is installed (winkerberos on Windows, gssapi "
+                    "on POSIX) — falling back to anonymous bind. AD rejects "
+                    "every meaningful search from anonymous binds. Install "
+                    "winkerberos (`uv add winkerberos`) or pass --username "
+                    "and --password."
+                )
+            else:
+                # We shouldn't actually hit this branch — when integrated
+                # auth is available we always emit a Kerberos profile — but
+                # keep the warning as a safety net in case the planning rules
+                # change in the future.
+                logger.warning(
+                    "LDAP auth: falling back to anonymous bind. Searches "
+                    "will fail with `operationsError` until credentials or "
+                    "a valid Kerberos TGT are available."
+                )
+            return
+        if "kerberos" in modes:
+            if self.creds.username and not self.creds.password:
+                logger.info(
+                    "LDAP auth: integrated (Kerberos via OS cred cache). "
+                    "Configured username '%s' has no password — ignoring it "
+                    "and using the current OS user's TGT instead. Set "
+                    "--password / SOURCES__SCCM__PASSWORD to force NTLM "
+                    "with that account.",
+                    self.creds.username,
+                )
+            else:
+                logger.info(
+                    "LDAP auth: integrated (Kerberos via OS cred cache; "
+                    "principal taken from the current user's TGT)."
+                )
+        elif "ntlm" in modes:
+            logger.info("LDAP auth: NTLM as %s", self.creds.username)
+
+    # ------------------------------------------------------------- planning --
+
+    def _build_attempt_plan(self) -> list[_BindAttempt]:
+        """Build the ordered list of bind attempts.
+
+        Picks between three auth modes:
+          * NTLM (when explicit ``username`` + ``password`` are set)
+          * Kerberos (when no creds and the OS Kerberos backend is importable
+            — winkerberos on Windows, gssapi on POSIX). Uses the current user's
+            TGT / cred cache; perfect for domain-joined collectors.
+          * Anonymous (last resort, when neither of the above applies; AD
+            rejects every meaningful search so this is logged loudly).
+
+        Per-mode profile order:
+          NTLM   : LDAPS:636+CBT → StartTLS:389+CBT → LDAP:389+sign/seal
+          Kerb   : LDAPS:636+CBT → LDAP:389  (Kerberos provides signing on the
+                   wire; we still prefer LDAPS for confidentiality and CBT)
+          Anon   : LDAPS:636 → LDAP:389
+
+        With ``creds.port`` set, narrows the chain to that port (636/3269 →
+        LDAPS, anything else → LDAP). Same auth-mode selection rules apply.
+        """
+        has_ntlm = self._has_explicit_ntlm_credentials()
+        # When the user only sets a username (no password — common when an
+        # env file partially fills SOURCES__SCCM__USERNAME), the NTLM bind
+        # path is unreachable. Fall back to integrated auth so the current
+        # OS user's Kerberos TGT is used; the configured username is logged
+        # as a hint but doesn't drive Kerberos (TGT identity comes from the
+        # cred cache, not from an explicit arg).
+        has_kerberos = (not has_ntlm) and _INTEGRATED_AUTH_AVAILABLE
+        pinned = self.creds.port
+
+        if has_ntlm:
+            auth_mode = "ntlm"
+            transport_label = "NTLM"
+        elif has_kerberos:
+            auth_mode = "kerberos"
+            transport_label = "Kerberos"
+        else:
+            auth_mode = "anonymous"
+            transport_label = "anonymous"
+
+        # CBT requires the credential to carry signing material — NTLM creds
+        # or a Kerberos TGT. Anonymous binds can't sign and therefore can't
+        # be channel-bound.
+        cbt_capable = auth_mode in ("ntlm", "kerberos")
+
+        def _ldaps(port: int) -> _BindAttempt:
+            return _BindAttempt(
+                label=f"LDAPS+CBT+{transport_label}" if cbt_capable else f"LDAPS+{transport_label}",
+                use_ssl=True,
+                port=port,
+                start_tls=False,
+                session_security=False,
+                channel_binding=cbt_capable,
+                auth_mode=auth_mode,
+            )
+
+        def _starttls(port: int) -> _BindAttempt:
+            return _BindAttempt(
+                label=f"StartTLS+CBT+{transport_label}",
+                use_ssl=False,
+                port=port,
+                start_tls=True,
+                session_security=False,
+                channel_binding=True,
+                auth_mode=auth_mode,
+            )
+
+        def _ldap_signed(port: int) -> _BindAttempt:
+            # NTLM-only profile — Kerberos sign/seal happens automatically as
+            # part of the SASL exchange, not as an ldap3 ``session_security``
+            # keyword, so this attempt only makes sense for NTLM.
+            return _BindAttempt(
+                label="LDAP+sign/seal+NTLM",
+                use_ssl=False,
+                port=port,
+                start_tls=False,
+                session_security=True,
+                channel_binding=False,
+                auth_mode="ntlm",
+            )
+
+        def _ldap_plain(port: int) -> _BindAttempt:
+            return _BindAttempt(
+                label=f"LDAP+{transport_label}",
+                use_ssl=False,
+                port=port,
+                start_tls=False,
+                session_security=False,
+                channel_binding=False,
+                auth_mode=auth_mode,
+            )
+
+        if pinned is not None:
+            if pinned in (636, 3269):
+                return [_ldaps(pinned)]
+            attempts: list[_BindAttempt] = []
+            if auth_mode == "ntlm":
+                attempts.append(_ldap_signed(pinned))
+            else:
+                # Kerberos binds carry their own signing; a plain LDAP bind is
+                # safe over the wire because SASL wraps subsequent operations.
+                attempts.append(_ldap_plain(pinned))
+            if auth_mode == "ntlm":
+                # NTLM fallback to plain LDAP only if the DC rejects signing
+                # (rare); for Kerberos and anonymous we already have the
+                # plain profile above.
+                attempts.append(_ldap_plain(pinned))
+            return attempts
+
+        attempts = [_ldaps(636)]
+        if auth_mode == "ntlm":
+            attempts.append(_starttls(389))
+            attempts.append(_ldap_signed(389))
+        else:
+            # Kerberos / anonymous: no NTLM session_security, no StartTLS+CBT
+            # (CBT needs Kerberos to wrap it; ldap3's SASL Kerberos already
+            # supplies CBT for the LDAPS attempt above).
+            attempts.append(_ldap_plain(389))
+        return attempts
 
     # ---------------------------------------------------------------- helpers --
 
@@ -252,30 +465,23 @@ class ADClient:
         self,
         *,
         host: str,
-        port: int,
-        use_session_security: bool,
-        use_channel_binding: bool,
+        attempt: _BindAttempt,
     ) -> Connection:
         """Open and bind one Connection with the requested security settings."""
-        if use_session_security and not self._has_explicit_ntlm_credentials():
-            raise ValueError(
-                "LDAP signing/sealing without LDAPS or StartTLS requires explicit NTLM credentials."
-            )
-
         server = Server(
             host,
-            port=port,
-            use_ssl=self.creds.use_ssl,
+            port=attempt.port,
+            use_ssl=attempt.use_ssl,
             get_info=ALL,
             connect_timeout=5,
         )
 
         kwargs: dict[str, Any] = {
-            "auto_bind": AUTO_BIND_TLS_BEFORE_BIND if self.creds.start_tls else AUTO_BIND_NO_TLS,
+            "auto_bind": AUTO_BIND_TLS_BEFORE_BIND if attempt.start_tls else AUTO_BIND_NO_TLS,
             "read_only": True,
             "receive_timeout": 30,
         }
-        if self.creds.username and self.creds.password:
+        if attempt.auth_mode == "ntlm":
             kwargs.update(
                 {
                     "user": self.creds.username,
@@ -283,9 +489,20 @@ class ADClient:
                     "authentication": NTLM,
                 }
             )
-        if use_session_security:
+        elif attempt.auth_mode == "kerberos":
+            kwargs.update(
+                {
+                    "authentication": SASL,
+                    "sasl_mechanism": KERBEROS,
+                }
+            )
+        # "anonymous" → leave authentication unset (ldap3 default is ANONYMOUS).
+        # ldap3 SASL Kerberos handles CBT internally via the OS GSSAPI/winkerberos
+        # backend, so the explicit `channel_binding` kwarg is only relevant for
+        # NTLM binds.
+        if attempt.session_security:
             kwargs["session_security"] = ENCRYPT
-        if use_channel_binding:
+        if attempt.channel_binding and attempt.auth_mode == "ntlm":
             kwargs["channel_binding"] = TLS_CHANNEL_BINDING
 
         try:
@@ -295,7 +512,7 @@ class ADClient:
             # channel_binding kwargs. The dependency floor in pyproject.toml
             # avoids this in practice; the explicit message just makes the
             # failure mode actionable for anyone running an older venv.
-            if use_session_security or use_channel_binding:
+            if attempt.session_security or attempt.channel_binding:
                 raise RuntimeError(
                     "LDAP signing / channel binding requires ldap3 with "
                     "session_security and channel_binding support. "
@@ -305,41 +522,6 @@ class ADClient:
 
     def _has_explicit_ntlm_credentials(self) -> bool:
         return bool(self.creds.username and self.creds.password)
-
-    def _should_require_session_security(self) -> bool:
-        if self.creds.use_ssl or self.creds.start_tls:
-            # Over TLS the wire is already encrypted; NTLM sign-and-seal
-            # would be redundant and ldap3 rejects the combination.
-            return False
-        return self._signing_mode == "required"
-
-    def _can_retry_with_session_security(self) -> bool:
-        return (
-            self._signing_mode == "auto"
-            and not self.creds.use_ssl
-            and not self.creds.start_tls
-            and self._has_explicit_ntlm_credentials()
-        )
-
-    def _should_use_channel_binding(self) -> bool:
-        if self._cbt_mode == "disabled":
-            return False
-        if not (self.creds.use_ssl or self.creds.start_tls):
-            if self._cbt_mode == "required":
-                raise ValueError("LDAP channel binding requires LDAPS or LDAP StartTLS.")
-            return False
-        if not self._has_explicit_ntlm_credentials():
-            if self._cbt_mode == "required":
-                raise ValueError("LDAP channel binding requires explicit NTLM credentials.")
-            return False
-        return True
-
-    def _transport_label(self) -> str:
-        if self.creds.use_ssl:
-            return "LDAPS"
-        if self.creds.start_tls:
-            return "StartTLS"
-        return "LDAP"
 
     def close(self) -> None:
         if self._conn is not None:
@@ -363,9 +545,16 @@ class ADClient:
 
         `attributes` is a positive list — `*` is permitted for "all". SIDs/GUIDs are
         decoded to strings if present; arrays come through as Python lists.
+
+        Per-search progress goes to DEBUG (one line per search at start, one at
+        end with the entry count); each LDAP search would otherwise flood INFO.
+        Use ``-v`` for source-level summaries, ``--debug`` to see every search.
         """
         conn = self.bind()
         base_dn = base or self.base_dn
+        logger.debug("LDAP search: base=%s filter=%s", base_dn, search_filter)
+        total = 0
+        page = 0
         try:
             cookie = None
             while True:
@@ -377,11 +566,29 @@ class ADClient:
                     paged_size=500,
                     paged_cookie=cookie,
                 )
+                # LDAP server-side error surfaces in `conn.result['description']`
+                # without raising — e.g. ``noSuchObject`` for a missing
+                # ``CN=System Management`` container. Surface those so the
+                # caller doesn't see a silent 0-result.
+                result = conn.result or {}
+                desc = result.get("description")
+                if desc and desc.lower() not in ("success", "sizelimitexceeded"):
+                    logger.warning(
+                        "LDAP search returned %s (base=%s filter=%s): %s",
+                        desc,
+                        base_dn,
+                        search_filter,
+                        result.get("message") or "",
+                    )
+                    break
+                page += 1
+                page_count = len(conn.entries)
+                total += page_count
                 for entry in conn.entries:
                     yield self._entry_to_dict(entry)
                 # ldap3 paged-cookie extraction
                 cookie = (
-                    conn.result.get("controls", {})
+                    result.get("controls", {})
                     .get("1.2.840.113556.1.4.319", {})
                     .get("value", {})
                     .get("cookie")
@@ -390,6 +597,14 @@ class ADClient:
                     break
         except LDAPException as e:
             logger.warning("LDAP search failed (filter=%s, base=%s): %s", search_filter, base_dn, e)
+        finally:
+            logger.debug(
+                "LDAP search complete: base=%s filter=%s entries=%d pages=%d",
+                base_dn,
+                search_filter,
+                total,
+                page,
+            )
 
     @staticmethod
     def _entry_to_dict(entry) -> dict[str, Any]:

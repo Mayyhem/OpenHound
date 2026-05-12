@@ -13,6 +13,13 @@ dependencies = [
     # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
     # LDAP channel binding tokens against signing-required DCs.
     "ldap3>=2.10.2rc4",
+    # Windows-only Kerberos backend for ldap3 SASL GSSAPI. Drives the
+    # "no explicit creds → bind with the current user's TGT via SSPI"
+    # path in clients/ad.py. Wheels exist for CPython 3.13/3.14 on Windows
+    # x64; on Linux/macOS this package is ignored (and ldap3 falls back to
+    # the `gssapi` package, which we don't bundle — Linux collectors that
+    # need integrated auth should `pip install gssapi[kerberos]`).
+    "winkerberos>=0.10.0; sys_platform == 'win32'",
     # Used by impacket-based per-host phases (Phase 3); landed here so `uv sync` resolves
     # the wheels once and the next session can start from a working venv.
     "impacket>=0.11.0",
@@ -39,9 +46,6 @@ build-backend = 'hatchling.build'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openhound_sccm"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"extension.yaml" = "openhound_sccm/extension.yaml"
 
 [dependency-groups]
 dev = [

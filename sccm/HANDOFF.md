@@ -6,6 +6,110 @@ enumeration tool, "CMBP") into the OpenHound DLT extension at `sccm/sccm/`. The 
 histogram for three users (`MAYYHEM\lowpriv`, `MAYYHEM\roanalyst`, `MAYYHEM\domainadmin`)
 between the CMBP zip and the new OpenHound zip.
 
+## Project status (2026-05-06, eighteenth session — CLI port: cobra-style flags + justfile)
+
+**Headline:** every `configmanbearpig.py` CLI option is now exposed as a real
+`--flag` on `openhound collect sccm`, `openhound preprocess sccm`, and
+`openhound convert sccm`. The framework's `@app.collect()` / `@app.preproc()` /
+`@app.convert()` convenience decorators are bypassed; the extension registers
+its own commands directly on `openhound.cli.{collect, preproc, convert}` Typer
+groups with the full CMBP flag surface (and the framework's standard
+arguments preserved alongside for backwards-compat). Each flag also has a
+`SOURCES__SCCM__*` env-var equivalent (loaded automatically from `.env` via
+the supplied `justfile`'s `set dotenv-load := true`).
+
+```pwsh
+uv run openhound collect sccm output/ -u 'MAYYHEM\domainadmin' -p password -d mayyhem.com -m LDAP,SMB,WMI
+```
+
+works today. So does the env-var-only invocation, the `.env`-driven `just
+all output/`, and any mix of flags + env vars (flags win because they're
+applied last).
+
+### Files this session
+
+- `sccm/sccm/src/openhound_sccm/main.py` — rewritten. Direct registration on
+  the framework's Typer groups with ~20 new `--flag` options on `collect`.
+  `_FLAG_TO_ENV` mapping + `_apply_env_overrides` helper.
+- `sccm/sccm/src/openhound_sccm/source.py` — `source()` factory keeps its
+  four dlt-bound credentials and reads every other CMBP-equivalent value
+  from `os.environ` via small `_env*` helpers. New fields on
+  `SourceContext` (collection_methods, computers, computer_file,
+  sms_provider, site_codes, threads, disable_possible_edges,
+  enable_bad_opsec, show_cleartext_passwords, mssql_introspect,
+  machine_name/_pass, client_name, create_machine_account, use_altauth,
+  registration_sleep, socks_proxy). New `ctx.method_enabled(name)` helper.
+  New `ctx.explicit_target_hosts()` helper backing `-c / --computers` and
+  `-cf / --computer-file`. SMS-provider pinning in
+  `adminservice_payloads()`. Site-codes override in
+  `dns_management_points()`. Every `OPENHOUND_SCCM_DISABLE_*` env-var
+  check replaced with `ctx.method_enabled(...)`.
+- `sccm/sccm/src/openhound_sccm/models/derived/aggregator.py` — `_emit_edge`
+  gains an `is_possible` parameter; gated by
+  `SOURCES__SCCM__DISABLE_POSSIBLE_EDGES`.
+- `sccm/sccm/justfile` (new) — OpenGraph-maintainer pattern with
+  `set dotenv-load := true`. Tasks: `all`, `collect`, `preprocess`,
+  `convert`, `package`, `sweep`, `sync`, `clean`, `clean-sweep`.
+- `sccm/sccm/.env.example` (new) — every env var with its CMBP flag
+  equivalent in a comment.
+- `sccm/sccm/extension.yaml` — refreshed with real credentials and
+  parameters (replaces the skeleton). Metadata-only at runtime, but
+  inspected by `openhound create` / doc generators.
+- `sccm/sccm/README.md` — full CLI reference section.
+- `sccm/sccm/tests/test_flag_to_env_translation.py` (new) — 23 tests.
+- `sccm/sccm/tests/test_collection_methods_gating.py` (new) — 26 tests.
+
+All 49 new unit tests pass.
+
+### Removed env vars
+
+The following `OPENHOUND_SCCM_DISABLE_*` / `OPENHOUND_SCCM_ENABLE_*` env vars
+no longer have any effect and should be removed from any wrapper scripts:
+
+- `OPENHOUND_SCCM_DISABLE_ADMINSERVICE` → use `-m All,-AdminService` (or
+  exclude `AdminService` from `-m`).
+- `OPENHOUND_SCCM_DISABLE_WMI` → exclude `WMI` from `-m`.
+- `OPENHOUND_SCCM_DISABLE_HTTP` → exclude `HTTP` from `-m`.
+- `OPENHOUND_SCCM_DISABLE_SMB` → exclude `SMB` from `-m`.
+- `OPENHOUND_SCCM_DISABLE_MSSQL_INTROSPECT` → set
+  `SOURCES__SCCM__MSSQL_INTROSPECT=false` (the new opt-in default).
+- `OPENHOUND_SCCM_ENABLE_MSSQL_INTROSPECT` → set
+  `SOURCES__SCCM__MSSQL_INTROSPECT=true`.
+
+### Verification gap — lab DC hardening
+
+**Live three-user sweep could NOT be re-run this session.** The MAYYHEM DC
+now requires LDAP signing/sealing and rejects unsigned NTLM binds with
+`strongerAuthRequired`. CMBP's `lib/ad_resolver.py` uses the same
+ldap3 + NTLM pattern as OpenHound's `clients/ad.py` and fails identically
+(confirmed via direct test). Both collectors are still in sync — neither
+can connect at all currently. The 49 unit tests cover the new code paths
+and pass. The cobra-style CLI surface is verified live via
+`openhound collect sccm --help`.
+
+To re-run the live sweep, one of the following is needed:
+
+- (a) Lab-side: roll back the DC's signing requirement (a Group Policy
+  setting on Domain Controllers OU).
+- (b) Code-side: extend both collectors' `ldap3.Connection` calls to use
+  SASL GSS-SPNEGO (Kerberos) or LDAPS (port 636 + valid TLS cert on the
+  DC). Per the bug-fix rule, this fix lands in both
+  `clients/ad.py` and `lib/ad_resolver.py`.
+
+The v12 parity result (143/478/36, 31/85/35, 143/469/36 — bit-identical to
+CMBP for all three users) was captured before this lab hardening landed
+and remains the canonical reference.
+
+### Open items for the next session
+
+- Live three-user sweep verification once lab DC bind is restored. Expect
+  bit-identical parity with v12 baselines because the CLI port is
+  config-only (no graph-side logic changed).
+- LDAP signing support in both collectors (option (b) above) if the lab
+  state can't be reverted.
+
+## Project status (2026-05-04, seventeenth session — true parity achieved)
+
 Read this file in full, then read the master plan at
 `C:/Users/domainadmin/.claude/plans/parallel-puzzling-newt.md` before touching anything.
 

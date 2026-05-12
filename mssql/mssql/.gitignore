@@ -1,23 +1,13 @@
 # Custom
 *.duckdb
 ui_catalog.db
-site/
-addons/
-collectors/
-output*
-openhound-github/
-openhound-okta/
-
-# Notebooks/output
 notebooks
+site/
 output
 graph
 logs
 dbt_packages
-
-# Ignore editor settings
 .vscode
-.idea
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

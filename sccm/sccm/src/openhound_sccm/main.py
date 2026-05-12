@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import platform
+import socket
 from typing import List, Optional
 
 # Disable DLT anonymous telemetry before `dlt` is imported. The DLT-internal
@@ -77,10 +79,6 @@ _FLAG_TO_ENV: dict[str, str] = {
     "username": "SOURCES__SCCM__USERNAME",
     "password": "SOURCES__SCCM__PASSWORD",
     "ldap_port": "SOURCES__SCCM__LDAP_PORT",
-    "ldaps": "SOURCES__SCCM__USE_SSL",
-    "ldap_start_tls": "SOURCES__SCCM__LDAP_START_TLS",
-    "ldap_signing": "SOURCES__SCCM__LDAP_SIGNING",
-    "ldap_channel_binding": "SOURCES__SCCM__LDAP_CHANNEL_BINDING",
     # Collection
     "collection_methods": "SOURCES__SCCM__COLLECTION_METHODS",
     "computers": "SOURCES__SCCM__COMPUTERS",
@@ -128,11 +126,141 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
             os.environ[env_name] = str(value)
 
 
-def _apply_verbose(verbose: bool) -> None:
-    """Bump logging to DEBUG when ``-v`` / ``--verbose`` is set."""
-    if verbose:
-        os.environ.setdefault("OPENHOUND_LOG_LEVEL", "DEBUG")
-        logging.getLogger().setLevel(logging.DEBUG)
+def _apply_log_level(verbose: bool, debug: bool) -> None:
+    """Adjust console logging when ``-v`` / ``--verbose`` or ``--debug`` is set.
+
+    ``-v``      → INFO (status messages like auto-detected domain / resolved DC).
+    ``--debug`` → DEBUG (everything, including dlt and ldap3 internals).
+    Both        → DEBUG wins.
+    Neither     → leave the framework's default (CLI level ERROR).
+
+    The openhound framework configures the root logger and its RichHandler at
+    *import* time (``openhound.core.logging`` runs ``logger_override.setup()``
+    on load) with ``cli_level`` defaulting to ERROR. By the time this Typer
+    command callback runs, those handlers already exist and each one filters
+    at its own level — so setting the root-logger level alone isn't enough,
+    the RichHandler still drops anything below ERROR. We lower every existing
+    handler too, on both the root logger and the ``dlt`` logger (which the
+    framework configures separately).
+    """
+    if debug:
+        level_name, level = "DEBUG", logging.DEBUG
+    elif verbose:
+        level_name, level = "INFO", logging.INFO
+    else:
+        return
+    os.environ["RUNTIME__LOG_LEVEL"] = level_name
+    os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
+    for log in (logging.getLogger(), logging.getLogger("dlt")):
+        log.setLevel(level)
+        for handler in log.handlers:
+            handler.setLevel(level)
+
+
+def _detect_windows_domain() -> Optional[str]:
+    """Derive the AD domain from the current Windows user context.
+
+    Mirrors ``ConfigManBearPig.ps1``'s order:
+      1. ``$env:USERDNSDOMAIN`` (set by the LSA at logon for a domain-joined
+         session).
+      2. DNS suffix of ``socket.getfqdn()`` (the computer's domain), used as
+         a fallback when USERDNSDOMAIN is missing.
+
+    Returns ``None`` on non-Windows or when discovery fails — callers should
+    treat the field as still-unset and surface a clear required-flag error.
+    """
+    if platform.system() != "Windows":
+        return None
+    domain = os.environ.get("USERDNSDOMAIN")
+    if not domain:
+        fqdn = socket.getfqdn()
+        if "." in fqdn:
+            domain = fqdn.split(".", 1)[1]
+    if not domain:
+        return None
+    return domain.strip().rstrip(".").lower()
+
+
+def _resolve_dc_via_dns(domain: str) -> Optional[str]:
+    """Resolve a domain controller FQDN from the domain via DNS SRV.
+
+    Looks up ``_ldap._tcp.dc._msdcs.<domain>`` — the path .NET's
+    ``Domain.FindDomainController()`` ultimately takes via DC Locator.
+    Cross-platform: works wherever the host has DNS reachability to the AD
+    DNS zone, not just Windows.
+    """
+    try:
+        import dns.resolver  # type: ignore[import-not-found]
+
+        answers = dns.resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV", lifetime=5)
+        srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
+        if srvs:
+            return str(srvs[0].target).rstrip(".")
+    except Exception as exc:  # dnspython errors, timeouts, no SRV records
+        logger.debug("DNS SRV lookup for domain controller failed: %s", exc)
+    return None
+
+
+def _apply_connection_context(flag_kwargs: dict) -> None:
+    """Backfill domain (Windows current-user context) and domain controller
+    (DNS SRV from the resolved domain) when those values weren't supplied
+    via flag or env.
+
+    Domain auto-detection is Windows-only — Linux/macOS users must pass
+    ``-d`` / ``--domain`` explicitly. DC resolution is cross-platform: as
+    long as the domain is known (from flag, env, or Windows auto-detect),
+    we try to resolve the DC via DNS SRV before failing.
+    """
+    has_domain = bool(flag_kwargs.get("domain")) or bool(os.environ.get("SOURCES__SCCM__DOMAIN"))
+    has_dc = bool(flag_kwargs.get("domain_controller")) or bool(
+        os.environ.get("SOURCES__SCCM__DOMAIN_CONTROLLER")
+    )
+
+    if not has_domain:
+        domain = _detect_windows_domain()
+        if domain:
+            os.environ["SOURCES__SCCM__DOMAIN"] = domain
+            logger.info("Auto-detected domain from current user context: %s", domain)
+            has_domain = True
+
+    if has_domain and not has_dc:
+        # Prefer flag value, then env (already set above if auto-detected).
+        domain = (
+            flag_kwargs.get("domain")
+            or os.environ.get("SOURCES__SCCM__DOMAIN")
+            or ""
+        ).strip().rstrip(".").lower()
+        if domain:
+            dc = _resolve_dc_via_dns(domain)
+            if dc:
+                os.environ["SOURCES__SCCM__DOMAIN_CONTROLLER"] = dc
+                logger.info("Resolved domain controller via DNS SRV: %s", dc)
+
+
+def _require_domain_or_explain(flag_kwargs: dict) -> None:
+    """Fail fast with a clear message if ``domain`` is still unresolved.
+
+    On Linux/macOS this is the dominant failure mode (no Windows current-user
+    context to fall back on). Surfacing it before dlt's config-resolver fires
+    avoids the noisy ``ConfigFieldMissingException`` traceback.
+    """
+    if flag_kwargs.get("domain") or os.environ.get("SOURCES__SCCM__DOMAIN"):
+        return
+    if platform.system() == "Windows":
+        msg = (
+            "Could not auto-detect the Active Directory domain from the current "
+            "user context (USERDNSDOMAIN unset and FQDN has no DNS suffix). "
+            "Pass -d / --domain explicitly."
+        )
+    else:
+        msg = (
+            "Running on a non-Windows host: -d / --domain is required "
+            "(auto-detection of the current user's domain context is Windows-only). "
+            "-dc / --domain-controller will be resolved from the domain via DNS SRV "
+            "if omitted. -u / --username and -p / --password are also required for "
+            "any phase that needs AD/SCCM auth."
+        )
+    raise typer.BadParameter(msg, param_hint="--domain")
 
 
 # ---------------------------------------------------------------------------
@@ -151,15 +279,11 @@ def collect_sccm(
     columns: Contract = typer.Option(Contract.evolve, help="Contract for unknown fields."),
     data_type: Contract = typer.Option(Contract.freeze, help="Contract for type mismatches."),
     # ---- Connection (CMBP -d/-dc/-u/-p/--ldap-port/--ldaps) ----
-    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com)."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP."),
+    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN; on Linux/macOS this flag is required."),
+    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username", help="DOMAIN\\\\user for explicit auth."),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password for explicit auth."),
-    ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="LDAP port (default 389; 636 for LDAPS)."),
-    ldaps: bool = typer.Option(False, "--ldaps", help="Use LDAPS (SSL)."),
-    ldap_start_tls: bool = typer.Option(False, "--ldap-start-tls", help="Upgrade LDAP to TLS before binding (mutually exclusive with --ldaps)."),
-    ldap_signing: str = typer.Option("auto", "-ls", "--ldap-signing", help="NTLM LDAP signing/sealing: auto (retry on strongerAuthRequired), required, or disabled."),
-    ldap_channel_binding: str = typer.Option("auto", "-cb", "--ldap-channel-binding", help="LDAP channel binding tokens over TLS: auto, required, or disabled."),
+    ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389+sign/seal). 636/3269 → LDAPS; any other port → LDAP."),
     # ---- Collection (CMBP -m/-c/-cf/-sms/-sc) ----
     collection_methods: Optional[str] = typer.Option(
         None, "-m", "--collection-methods",
@@ -183,14 +307,17 @@ def collect_sccm(
     registration_sleep: int = typer.Option(10, "--registration-sleep", help="Seconds to wait post-registration before policy request. Not yet implemented."),
     # ---- Network (CMBP --socks-proxy) ----
     socks_proxy: Optional[str] = typer.Option(None, "--socks-proxy", help="SOCKS5 proxy HOST:PORT for DHCP/TFTP collection."),
-    # ---- General (CMBP -v / --verbose) ----
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable verbose (DEBUG-level) output."),
+    # ---- General (CMBP -v / --verbose, --debug) ----
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
-    _apply_verbose(verbose)
-    _apply_env_overrides(locals())
+    _apply_log_level(verbose, debug)
+    flag_kwargs = locals()
+    _apply_env_overrides(flag_kwargs)
+    _apply_connection_context(flag_kwargs)
+    _require_domain_or_explain(flag_kwargs)
 
     collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
-    app.collector = collect_sccm  # noqa: F841 — keep framework introspection happy
     ctx = CollectContext(pipeline=collector)
     from .source import source as sccm_source
 
@@ -198,6 +325,13 @@ def collect_sccm(
     if not src:
         return None
     return collector.run(src)
+
+
+# Set at module scope so `CollectorManager.validate_extension` (which runs at
+# import time, before any command is invoked) sees a non-None hook. The
+# `@app.collect()` convenience decorator would do this for us, but we register
+# directly on the framework's Typer group to keep CMBP-style flag surface.
+app.collector = collect_sccm
 
 
 # ---------------------------------------------------------------------------
@@ -211,14 +345,18 @@ def preprocess_sccm(
     input_path: InputPath,
     output_file: pathlib.Path = typer.Argument(DEFAULT_LOOKUP_FILE, help="Path to write the DuckDB lookup file."),
     progress: Progress = typer.Option(Progress.tqdm, help="Progress tracker."),
-    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). Also accepts SOURCES__SCCM__DOMAIN."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller"),
+    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN. Required on Linux/macOS."),
+    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable verbose (DEBUG-level) output."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt internals)."),
 ) -> Optional[LoadInfo]:
-    _apply_verbose(verbose)
-    _apply_env_overrides(locals())
+    _apply_log_level(verbose, debug)
+    flag_kwargs = locals()
+    _apply_env_overrides(flag_kwargs)
+    _apply_connection_context(flag_kwargs)
+    _require_domain_or_explain(flag_kwargs)
 
     preprocessor = PreProcessor(
         name=app.name,
@@ -227,10 +365,12 @@ def preprocess_sccm(
         progress=progress,
         transformer=transforms,
     )
-    app.preprocessor = preprocess_sccm  # noqa: F841
 
     resource_list = _preproc_table_map()
     return preprocessor.run(resources=resource_list)
+
+
+app.preprocessor = preprocess_sccm
 
 
 def _preproc_table_map() -> dict[str, str]:
@@ -310,16 +450,20 @@ def convert_sccm(
     output_path: OutputPath,
     progress: Progress = typer.Option(Progress.tqdm, help="Progress tracker."),
     lookup_file: pathlib.Path = typer.Option(DEFAULT_LOOKUP_FILE, "--lookup-file", help="DuckDB lookup file path."),
-    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). Also accepts SOURCES__SCCM__DOMAIN."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller"),
+    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN. Required on Linux/macOS."),
+    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Enable verbose (DEBUG-level) output."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt internals)."),
 ) -> Optional[LoadInfo]:
     import duckdb
 
-    _apply_verbose(verbose)
-    _apply_env_overrides(locals())
+    _apply_log_level(verbose, debug)
+    flag_kwargs = locals()
+    _apply_env_overrides(flag_kwargs)
+    _apply_connection_context(flag_kwargs)
+    _require_domain_or_explain(flag_kwargs)
 
     client = duckdb.connect(str(lookup_file), read_only=True)
     lookup_session = SCCMLookup(client)
@@ -332,7 +476,6 @@ def convert_sccm(
         progress=progress,
         method=Method.write,
     )
-    app.converter = convert_sccm  # noqa: F841
 
     from .source import source as sccm_source
 
@@ -342,6 +485,9 @@ def convert_sccm(
         graph_resources=app.assets,
         extra_context={},
     )
+
+
+app.converter = convert_sccm
 
 
 # ---------------------------------------------------------------------------

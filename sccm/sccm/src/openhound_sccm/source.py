@@ -214,15 +214,19 @@ class SourceContext:
             return self._ldap_computer_hosts
         explicit = self.explicit_target_hosts()
         out: list[dict[str, Any]] = []
+        raw_count = 0
+        disabled_count = 0
         try:
             for entry in self.ad.paged_search(
                 search_filter="(&(objectCategory=computer)(objectClass=computer))",
                 attributes=["objectSid", "sAMAccountName", "dNSHostName", "name", "userAccountControl"],
             ):
+                raw_count += 1
                 # Skip disabled accounts — they're not reachable hosts.
                 uac = entry.get("userAccountControl")
                 try:
                     if uac is not None and (int(uac) & 0x2):
+                        disabled_count += 1
                         continue
                 except (TypeError, ValueError):
                     pass
@@ -243,6 +247,32 @@ class SourceContext:
         except Exception as e:  # noqa: BLE001
             logger.warning("ldap_computer_hosts: LDAP enumeration failed: %s", e)
         self._ldap_computer_hosts = out
+        if explicit:
+            logger.info(
+                "ldap_computer_hosts: %d enabled hosts kept "
+                "(LDAP returned %d, %d disabled, filtered to %d explicit targets)",
+                len(out),
+                raw_count,
+                disabled_count,
+                len(explicit),
+            )
+        else:
+            logger.info(
+                "ldap_computer_hosts: %d enabled hosts "
+                "(LDAP returned %d total, %d disabled)",
+                len(out),
+                raw_count,
+                disabled_count,
+            )
+        if raw_count == 0:
+            logger.warning(
+                "ldap_computer_hosts: LDAP `(&(objectCategory=computer)"
+                "(objectClass=computer))` under %s returned 0 entries — "
+                "either the bound account cannot read computer objects, or "
+                "the domain genuinely has none. All per-host phases (MSSQL, "
+                "RemoteRegistry, WMI, HTTP, SMB) will emit no rows.",
+                self.ad.base_dn,
+            )
         return out
 
     # ---- AdminService payload cache ----------------------------------------
@@ -439,17 +469,34 @@ class SourceContext:
             return self._sccm_discovered_hosts
 
         out: set[str] = set()
+        # Per-channel host counts (FQDNs only — short-name dupes elided) so
+        # the summary line tells the user which channel(s) contributed and
+        # which came up empty. Empty across the board → no SCCM deployment
+        # in this domain (or insufficient privileges to read its objects).
+        channel_counts: dict[str, int] = {
+            "SMS-provider-LDAP": 0,
+            "naming-pattern-LDAP": 0,
+            "mSSMSManagementPoint-LDAP": 0,
+            "AdminService": 0,
+        }
 
-        def _add(name: Optional[str]) -> None:
+        def _add(channel: str, name: Optional[str]) -> None:
             if not name:
                 return
             n = name.strip().lower()
             if not n:
                 return
+            # Count the host against this channel only on its first appearance
+            # (any channel) and only in FQDN form, so totals reflect distinct
+            # hosts rather than 2× (FQDN + short) and the same host isn't
+            # double-counted across channels.
+            is_new_fqdn = "." in n and n not in out
             out.add(n)
             short = n.split(".", 1)[0]
             if short and short != n:
                 out.add(short)
+            if is_new_fqdn:
+                channel_counts[channel] += 1
 
         # 1. SMS Provider hostnames (sAMAccountName ends in -pss / -sms)
         try:
@@ -465,9 +512,9 @@ class SourceContext:
                     sam = (entry.get("sAMAccountName") or "").rstrip("$")
                     if sam:
                         dns = f"{sam}.{self.domain}"
-                _add(dns)
+                _add("SMS-provider-LDAP", dns)
         except Exception as e:  # noqa: BLE001
-            logger.debug("sccm_discovered_hosts: SMS-provider LDAP failed: %s", e)
+            logger.warning("sccm_discovered_hosts: SMS-provider LDAP failed: %s", e)
 
         # 2. SCCM-naming-pattern hostnames — mirror of CMBP's
         # _analyze_naming_patterns (sccm/mecm/mcm/memcm/configm/cfgm/sms).
@@ -491,9 +538,9 @@ class SourceContext:
                     sam = (entry.get("sAMAccountName") or "").rstrip("$")
                     if sam:
                         dns = f"{sam}.{self.domain}"
-                _add(dns)
+                _add("naming-pattern-LDAP", dns)
         except Exception as e:  # noqa: BLE001
-            logger.debug("sccm_discovered_hosts: name-pattern LDAP failed: %s", e)
+            logger.warning("sccm_discovered_hosts: name-pattern LDAP failed: %s", e)
 
         # 3. mSSMSManagementPoint records under the System Management container
         # (the LDAP-mSSMSManagementPoint discovery channel).
@@ -508,9 +555,13 @@ class SourceContext:
                     or entry.get("mSSMSMPName")
                     or entry.get("name")
                 )
-                _add(dns)
+                _add("mSSMSManagementPoint-LDAP", dns)
         except Exception as e:  # noqa: BLE001
-            logger.debug("sccm_discovered_hosts: MP-LDAP failed: %s", e)
+            logger.warning(
+                "sccm_discovered_hosts: mSSMSManagementPoint LDAP search under %s failed: %s",
+                self.system_management_dn,
+                e,
+            )
 
         # 4. DNS-SRV management points — skipped here. Adding a DNS sweep
         # would duplicate work the ``dns_management_points`` resource already
@@ -524,24 +575,42 @@ class SourceContext:
                 # SMS_SCI_SysResUse: per-site role hosts (Site Server, SMS
                 # Provider, MP, DP, Reporting SP, etc.)
                 for ss in payload.get("site_systems", []) or []:
-                    _add(ss.get("hostname"))
+                    _add("AdminService", ss.get("hostname"))
                 # SMS_SCI_SiteDefinition surfaces ``SQLServerName`` (the DB
                 # host for each primary). CMBP adds these as targets via
                 # ``add_device(sql_server, source="AdminService-SMS_SCI_SiteDefinition")``
                 # so we need to recognise them as SCCM-discovered.
                 for sd in payload.get("site_definitions", []) or []:
-                    _add(sd.get("SQLServerName"))
+                    _add("AdminService", sd.get("SQLServerName"))
                 # SMS_Site SiteServerName (the primary site server).
                 for site in payload.get("sites", []) or []:
-                    _add(site.get("SiteServerName"))
+                    _add("AdminService", site.get("SiteServerName"))
         except Exception as e:  # noqa: BLE001
-            logger.debug("sccm_discovered_hosts: AdminService failed: %s", e)
+            logger.warning("sccm_discovered_hosts: AdminService failed: %s", e)
 
         self._sccm_discovered_hosts = out
+        total = len({h for h in out if "." in h})
+        per_channel = ", ".join(f"{k}={v}" for k, v in channel_counts.items())
         logger.info(
-            "sccm_discovered_hosts: %d hosts discovered via SCCM channels",
-            len({h for h in out if "." in h}),
+            "sccm_discovered_hosts: %d hosts discovered (%s)",
+            total,
+            per_channel,
         )
+        if total == 0:
+            logger.warning(
+                "sccm_discovered_hosts: 0 hosts — every SCCM discovery channel "
+                "returned empty. Likely causes: "
+                "(1) no SCCM deployment in this domain (no SMS Provider host, "
+                "no mSSMSManagementPoint object under %s, no SCCM-named "
+                "computers, no AdminService reachable); "
+                "(2) calling account lacks read on the System Management "
+                "container; "
+                "(3) collector cannot reach AdminService on TCP/443 to a "
+                "provider host. "
+                "With 0 discovered hosts, per-host phases (MSSQL, AdminService, "
+                "WMI, HTTP, SMB, RemoteRegistry) emit no rows.",
+                self.system_management_dn,
+            )
         return out
 
 
@@ -1194,19 +1263,17 @@ def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
 # ---- DNS collector --------------------------------------------------------
 
-# Common SCCM site codes to probe when no LDAP-discovered site codes are available.
-# Matches CMBP fallback list in ``lib/collectors/dns_collector.py``.
-_DNS_FALLBACK_SITE_CODES = ("CAS", "PS1", "PS2", "SEC", "SS1")
-
-
 @app.resource(name="dns_management_points", parallelized=False)
 def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     """Yield rows for management points discovered via SRV records.
 
     For each known site code, queries ``_mssms_mp_<sitecode>._tcp.<domain>``.
     Site codes come from the LDAP-discovered ``mSSMSSite`` objects (re-ran here
-    against the same AD client; cheap) plus a small fallback list for greenfield
-    domains. Falls back to ADIDNS via LDAP if dnspython is unavailable.
+    against the same AD client; cheap) plus anything passed via
+    ``-sc / --site-codes``. If neither LDAP nor the CLI flag yields a code,
+    the resource skips — there is no hardcoded fallback list (it used to mirror
+    CMBP's ``CAS/PS1/PS2/SEC/SS1`` greenfield guesses, which produced misleading
+    SRV traffic against environments that have no SCCM deployment at all).
 
     CMBP reference: ``lib/collectors/dns_collector.py``.
     """
@@ -1259,8 +1326,14 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
             site_codes = cli_codes
 
     if not site_codes:
-        site_codes = set(_DNS_FALLBACK_SITE_CODES)
-        logger.info("dns_management_points: no LDAP sites; falling back to %s", sorted(site_codes))
+        logger.warning(
+            "dns_management_points: no site codes available "
+            "(LDAP mSSMSSite search under %s returned 0; --site-codes / "
+            "SOURCES__SCCM__SITE_CODES not set) — skipping DNS SRV probe. "
+            "Pass --site-codes PS1,CAS,... to probe specific codes.",
+            ctx.system_management_dn,
+        )
+        return
 
     if has_dnspython:
         resolver = dns.resolver.Resolver()
@@ -4337,11 +4410,12 @@ def source(
 
     # Defaults for every CMBP-equivalent flag the source factory honours.
     # ``_env*`` helpers below override these from the matching env var.
-    use_ssl: bool = False
+    # Note: ``use_ssl`` / ``start_tls`` / ``ldap_signing`` / ``ldap_channel_binding``
+    # are intentionally absent — the LDAP transport + hardening combo is
+    # auto-detected by ``ADClient.bind()`` in a lockout-safe way (see
+    # ``clients/ad.py``). ``LDAP_PORT`` survives only as an explicit pin
+    # for the rare case where 636/389 isn't appropriate.
     ldap_port: int | None = None
-    ldap_start_tls: bool = False
-    ldap_signing: str = "auto"
-    ldap_channel_binding: str = "auto"
     collection_methods: str = "All"
     computers: str | None = None
     computer_file: str | None = None
@@ -4379,18 +4453,14 @@ def source(
         except ValueError:
             return fallback
 
-    use_ssl = _env_bool("SOURCES__SCCM__USE_SSL", use_ssl)
-    # Preserve None when no env var is set so ADClient picks its native default
-    # (389 / 636 from use_ssl). Only override when explicit.
+    # Preserve None when no env var is set so ADClient auto-detects the
+    # transport (LDAPS 636 → StartTLS 389 → LDAP 389 with NTLM sign/seal).
     _ldap_port_env = os.environ.get("SOURCES__SCCM__LDAP_PORT")
     if _ldap_port_env not in (None, ""):
         try:
             ldap_port = int(_ldap_port_env)
         except ValueError:
             pass
-    ldap_start_tls = _env_bool("SOURCES__SCCM__LDAP_START_TLS", ldap_start_tls)
-    ldap_signing = _env("SOURCES__SCCM__LDAP_SIGNING", ldap_signing) or "auto"
-    ldap_channel_binding = _env("SOURCES__SCCM__LDAP_CHANNEL_BINDING", ldap_channel_binding) or "auto"
     collection_methods = _env("SOURCES__SCCM__COLLECTION_METHODS", collection_methods) or "All"
     computers = _env("SOURCES__SCCM__COMPUTERS", computers)
     computer_file = _env("SOURCES__SCCM__COMPUTER_FILE", computer_file)
@@ -4414,11 +4484,7 @@ def source(
         domain_controller=domain_controller,
         username=username,
         password=password,
-        use_ssl=use_ssl,
         port=ldap_port,
-        start_tls=ldap_start_tls,
-        ldap_signing=ldap_signing,
-        ldap_channel_binding=ldap_channel_binding,
     )
     ctx = SourceContext(
         ad=ADClient(creds),

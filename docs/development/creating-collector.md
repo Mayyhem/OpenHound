@@ -22,7 +22,7 @@ uv tool install openhound
 Create a new collector using the "create collector" command, which will prompt you for the required details.
 
 ```console
-openhound create collector
+openhound create collector <name>
 ```
 
 ## 4. Done

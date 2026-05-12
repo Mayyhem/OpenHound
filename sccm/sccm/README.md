@@ -93,18 +93,29 @@ CMBP flag reference.
 | `-dc`, `--domain-controller` | `SOURCES__SCCM__DOMAIN_CONTROLLER` | `-dc / --domain-controller` | *(required)* |
 | `-u`, `--username` | `SOURCES__SCCM__USERNAME` | `-u / --username` | current Kerberos session |
 | `-p`, `--password` | `SOURCES__SCCM__PASSWORD` | `-p / --password` | — |
-| `--ldap-port` | `SOURCES__SCCM__LDAP_PORT` | `--ldap-port` | 389 |
-| `--ldaps` | `SOURCES__SCCM__USE_SSL` | `--ldaps` | false |
-| `--ldap-start-tls` | `SOURCES__SCCM__LDAP_START_TLS` | `--ldap-start-tls` | false |
-| `-ls`, `--ldap-signing` | `SOURCES__SCCM__LDAP_SIGNING` | `-ls / --ldap-signing` | `auto` |
-| `-cb`, `--ldap-channel-binding` | `SOURCES__SCCM__LDAP_CHANNEL_BINDING` | `-cb / --ldap-channel-binding` | `auto` |
+| `--ldap-port` | `SOURCES__SCCM__LDAP_PORT` | `--ldap-port` | *(auto)* |
 
-`--ldap-signing` and `--ldap-channel-binding` accept `auto` (default — retry
-with NTLM sign-and-seal / CBT on `strongerAuthRequired`), `required` (always
-on), or `disabled` (never use). With `auto`, plain-LDAP binds against DCs
-that require signing succeed transparently after one re-bind. Channel
-binding additionally requires LDAPS or `--ldap-start-tls`. ldap3 >= 2.10.2rc4
-is required for these knobs to take effect.
+LDAP transport (LDAPS / StartTLS / plain) and hardening (NTLM signing,
+channel binding) are **auto-detected at bind time** — there are no
+`--ldaps` / `--ldap-start-tls` / `--ldap-signing` / `--ldap-channel-binding`
+knobs. `ADClient.bind()` walks profiles in this order:
+
+1. LDAPS:636 + CBT *(when NTLM credentials are supplied)*
+2. StartTLS:389 + CBT *(when NTLM credentials are supplied)*
+3. LDAP:389 + NTLM sign / seal *(when NTLM credentials are supplied)*
+4. Plain LDAPS:636 or LDAP:389 *(anonymous / SASL fallback)*
+
+The walk is **lockout-safe**: only AD's credential-class `invalidCredentials`
+sub-codes (`data 52e/532/533/701/773/775` — bad password, expired, disabled,
+locked) propagate immediately. Protocol-level rejections (`strongerAuthRequired`,
+CBT mismatch `data 80090346`, TLS / connect errors) happen *before* the
+password is validated, so falling through to the next profile never advances
+`badPwdCount` of a real account. ldap3 >= 2.10.2rc4 is required for signing
+and CBT support; the dependency floor in `pyproject.toml` enforces this.
+
+Pin `--ldap-port` only when 636 / 389 isn't appropriate (Global Catalog
+port 3269, custom firewall mapping, etc.). 636 / 3269 → LDAPS profile; any
+other value → LDAP profile chain.
 
 ### Collection
 
@@ -156,7 +167,7 @@ emitted graph until that work lands.
 
 | Flag | Env var | CMBP equivalent | Default |
 |---|---|---|---|
-| `-v`, `--verbose` | `OPENHOUND_LOG_LEVEL=DEBUG` | `-v / --verbose` | false |
+| `-v`, `--verbose` | `RUNTIME__LOG_LEVEL=DEBUG` + `RUNTIME__LOG_CLI_LEVEL=DEBUG` | `-v / --verbose` | false |
 
 ### OpenHound-specific (no CMBP equivalent)
 

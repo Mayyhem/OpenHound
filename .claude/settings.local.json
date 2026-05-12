@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat \"C:/Users/domainadmin/AppData/Roaming/uv/tools/openhound/Lib/site-packages/openhound/cli/collect.py\" 2>&1 | head -60)",
+      "Read(//c/Users/domainadmin/AppData/Roaming/uv/tools/openhound/Lib/site-packages/openhound/cli/**)"
+    ]
+  }
+}
