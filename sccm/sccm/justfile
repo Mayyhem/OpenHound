@@ -1,0 +1,47 @@
+set dotenv-load := true
+
+# Default target — run the full collect → preprocess → convert → package pipeline.
+default: all
+
+# Run the entire pipeline.
+all output='output/':
+    just collect    {{output}}
+    just preprocess {{output}}
+    just convert    {{output}}
+    just package    {{output}}
+
+# Collect SCCM resources into <output>/. Pass CMBP-style flags after the output dir, e.g.
+#   just collect output/ -u 'MAYYHEM\domainadmin' -p password -d mayyhem.com -m LDAP,SMB
+collect output='output/' *args='':
+    uv run openhound collect sccm {{output}} {{args}}
+
+# Build the DuckDB lookup from collected JSONL.
+preprocess output='output/' *args='':
+    uv run openhound preprocess sccm {{output}} {{output}}lookup.duckdb {{args}}
+
+# Convert collected JSONL + DuckDB lookup into OpenGraph nodes/edges.
+convert output='output/' *args='':
+    uv run openhound convert sccm {{output}}sccm {{output}}graph --lookup-file {{output}}lookup.duckdb {{args}}
+
+# Package convert output into a BloodHound-compatible ZIP.
+package output='output/':
+    uv run python -m openhound_sccm.main package --graph-dir {{output}}graph --output-dir {{output}}
+
+# Three-user verification sweep — runs the full pipeline as each lab user.
+# Override SOURCES__SCCM__PASSWORD in `.env` (all three lab users use the literal "password").
+sweep:
+    SOURCES__SCCM__USERNAME='MAYYHEM\\domainadmin' just all output_da/
+    SOURCES__SCCM__USERNAME='MAYYHEM\\lowpriv'     just all output_lp/
+    SOURCES__SCCM__USERNAME='MAYYHEM\\roanalyst'   just all output_ra/
+
+# Sync dependencies.
+sync:
+    uv sync --group dev
+
+# Clean a single user's output dir (defaults to ./output/).
+clean output='output/':
+    rm -rf {{output}}
+
+# Clean all per-user sweep dirs.
+clean-sweep:
+    rm -rf output_da output_lp output_ra

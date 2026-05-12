@@ -1,6 +1,6 @@
 name: "sccm"
 version: 0.0.1
-description: "OpenHound collector for sccm"
+description: "OpenGraph collector for Microsoft Endpoint Configuration Manager (SCCM). Ports ConfigManBearPig's enumeration surface end-to-end."
 authors:
   - name: "Chris Thompson (@_Mayyhem)"
     email: "cthompson@specterops.io"
@@ -10,17 +10,114 @@ license: MIT
 homepage: TBD
 references:
   - name: OpenHound
-    url: TBD
+    url: https://github.com/SpecterOps/openhound
+  - name: ConfigManBearPig
+    url: ./../ConfigManBearPig/README.md
 
+# Credentials are accepted as flags on `openhound collect sccm` (cobra-style)
+# or as `SOURCES__SCCM__*` env vars (read via dlt.config.value / dlt.secrets.value).
 credentials:
-  - name: example
-    description: Example credential
+  - name: domain
+    description: "Active Directory domain (e.g. mayyhem.com). Flag: -d / --domain. Env: SOURCES__SCCM__DOMAIN."
+    required: true
+  - name: domain_controller
+    description: "Domain controller hostname or IP. Flag: -dc / --domain-controller. Env: SOURCES__SCCM__DOMAIN_CONTROLLER."
+    required: true
+  - name: username
+    description: "DOMAIN\\user for explicit auth. Flag: -u / --username. Env: SOURCES__SCCM__USERNAME."
+    required: false
+  - name: password
+    description: "Password for explicit auth. Flag: -p / --password. Env: SOURCES__SCCM__PASSWORD."
     required: false
 
 parameters:
-  - name: size
-    description: An example parameter specifying batch size for fetching data
+  # --- Connection -----------------------------------------------------------
+  - name: ldap_port
+    description: "LDAP port (389 default; 636 for LDAPS). Flag: --ldap-port. Env: SOURCES__SCCM__LDAP_PORT."
     required: false
-    default: 10000
+    default: 389
+  - name: ldaps
+    description: "Use LDAPS (SSL). Flag: --ldaps. Env: SOURCES__SCCM__USE_SSL."
+    required: false
+    default: false
+  - name: ldap_start_tls
+    description: "Upgrade LDAP to TLS before binding (mutually exclusive with ldaps). Flag: --ldap-start-tls. Env: SOURCES__SCCM__LDAP_START_TLS."
+    required: false
+    default: false
+  - name: ldap_signing
+    description: "NTLM LDAP signing / sealing policy: auto | required | disabled. Flag: -ls / --ldap-signing. Env: SOURCES__SCCM__LDAP_SIGNING."
+    required: false
+    default: "auto"
+  - name: ldap_channel_binding
+    description: "LDAP channel binding tokens (over TLS) policy: auto | required | disabled. Flag: -cb / --ldap-channel-binding. Env: SOURCES__SCCM__LDAP_CHANNEL_BINDING."
+    required: false
+    default: "auto"
 
-tags: ["sccm", "extension", "opengraph", "bloodhound"]
+  # --- Collection -----------------------------------------------------------
+  - name: collection_methods
+    description: "Comma-separated method list. Flag: -m / --collection-methods. Env: SOURCES__SCCM__COLLECTION_METHODS."
+    required: false
+    default: "All"
+  - name: computers
+    description: "Comma-separated computer targets for per-host phases. Flag: -c / --computers. Env: SOURCES__SCCM__COMPUTERS."
+    required: false
+  - name: computer_file
+    description: "File containing computer targets (one per line). Flag: -cf / --computer-file. Env: SOURCES__SCCM__COMPUTER_FILE."
+    required: false
+  - name: sms_provider
+    description: "Pin AdminService discovery to one host. Flag: -sms / --sms-provider. Env: SOURCES__SCCM__SMS_PROVIDER."
+    required: false
+  - name: site_codes
+    description: "Site codes for DNS collection (CSV or file path). Flag: -sc / --site-codes. Env: SOURCES__SCCM__SITE_CODES."
+    required: false
+
+  # --- Behavior flags -------------------------------------------------------
+  - name: disable_possible_edges
+    description: "Suppress edges CMBP labels as 'possible' (inferred). Flag: --disable-possible-edges. Env: SOURCES__SCCM__DISABLE_POSSIBLE_EDGES."
+    required: false
+    default: false
+  - name: enable_bad_opsec
+    description: "Enable bad-opsec operations (NAA decryption, cleartext credential collection). Flag: --enable-bad-opsec. Env: SOURCES__SCCM__ENABLE_BAD_OPSEC."
+    required: false
+    default: false
+  - name: threads
+    description: "Per-host phase parallelism (sequential today; flag is accepted for forward compatibility). Flag: -t / --threads. Env: SOURCES__SCCM__THREADS."
+    required: false
+    default: 1
+  - name: show_cleartext_passwords
+    description: "Display cleartext passwords when discovered. Flag: --show-cleartext-passwords. Env: SOURCES__SCCM__SHOW_CLEARTEXT_PASSWORDS."
+    required: false
+    default: false
+  - name: mssql_introspect
+    description: "Opt-in authenticated MSSQL TDS introspection. Off by default because impacket TDS wedges on CBT-enforcing servers. Env: SOURCES__SCCM__MSSQL_INTROSPECT."
+    required: false
+    default: false
+
+  # --- Machine Account / CRED-2 (flag surface only — chain not implemented) -
+  - name: machine_name
+    description: "DOMAIN\\MACHINE$ for SCCM client registration. CRED-2 chain not yet implemented. Flag: --machine-name."
+    required: false
+  - name: machine_pass
+    description: "Machine account password. CRED-2 chain not yet implemented. Flag: --machine-pass."
+    required: false
+  - name: client_name
+    description: "Client FQDN to register. CRED-2 chain not yet implemented. Flag: --client-name."
+    required: false
+  - name: create_machine_account
+    description: "Auto-create a machine account ('auto' or NAME). CRED-2 chain not yet implemented. Flag: --create-machine-account."
+    required: false
+  - name: use_altauth
+    description: "Use ccm_system_altauth endpoint (bypass mTLS). CRED-2 chain not yet implemented. Flag: --use-altauth."
+    required: false
+    default: false
+  - name: registration_sleep
+    description: "Seconds to wait post-registration before policy request. CRED-2 chain not yet implemented. Flag: --registration-sleep."
+    required: false
+    default: 10
+
+  # --- Network --------------------------------------------------------------
+  - name: socks_proxy
+    description: "SOCKS5 proxy HOST:PORT for DHCP / TFTP collection. Flag: --socks-proxy. Env: SOURCES__SCCM__SOCKS_PROXY."
+    required: false
+
+tags: ["sccm", "configmgr", "configmanager", "extension", "opengraph", "bloodhound"]

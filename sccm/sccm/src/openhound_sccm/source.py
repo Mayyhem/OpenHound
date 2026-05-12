@@ -84,6 +84,33 @@ class SourceContext:
     domain: str
     username: Optional[str] = None
     password: Optional[str] = None
+    # ---- CMBP-equivalent CLI knobs (set via SOURCES__SCCM__* env vars by
+    # the Typer commands in ``main.py``, or directly by the user). ----------
+    # Collection (-m / --collection-methods)
+    collection_methods: str = "All"
+    # Targets / filters (-c / -cf / -sms / -sc)
+    computers: Optional[str] = None
+    computer_file: Optional[str] = None
+    sms_provider: Optional[str] = None
+    site_codes: Optional[str] = None
+    # Behavior flags
+    disable_possible_edges: bool = False
+    enable_bad_opsec: bool = False
+    threads: int = 1
+    show_cleartext_passwords: bool = False
+    # OpenHound-specific: opt-in authenticated MSSQL TDS introspection. The
+    # impacket TDS path can wedge for many minutes against EPA-enforcing
+    # servers, so this stays off by default even when `-m MSSQL` is enabled.
+    mssql_introspect: bool = False
+    # Machine Account / CRED-2 (flags accepted; implementation chain deferred)
+    machine_name: Optional[str] = None
+    machine_pass: Optional[str] = None
+    client_name: Optional[str] = None
+    create_machine_account: Optional[str] = None
+    use_altauth: bool = False
+    registration_sleep: int = 10
+    # Network
+    socks_proxy: Optional[str] = None
     # ---- Per-host target enumeration (Phase 3a) ----------------------------
     # The Phase 3 per-host phases (RemoteRegistry / MSSQL / AdminService / WMI /
     # HTTP / SMB) need a list of hostnames before preproc has built ``sccm.targets``.
@@ -129,14 +156,63 @@ class SourceContext:
     def system_management_dn(self) -> str:
         return f"CN=System Management,CN=System,{self.ad.base_dn}"
 
+    # ---- Collection method gating (CMBP -m / --collection-methods) --------
+
+    def method_enabled(self, method: str) -> bool:
+        """Return True when ``method`` (e.g. "AdminService", "WMI", "SMB") is
+        enabled by the current ``collection_methods`` setting.
+
+        The value is a comma-separated list of method names (case-insensitive),
+        matching CMBP's ``-m`` flag. ``"All"`` (the default) enables every
+        method. Unknown method names are ignored so callers can pass in
+        arbitrary labels without crashing the pipeline.
+        """
+        if not self.collection_methods:
+            return True
+        wanted = {m.strip().lower() for m in self.collection_methods.split(",") if m.strip()}
+        if "all" in wanted:
+            return True
+        return method.lower() in wanted
+
+    # ---- Per-host target filtering (CMBP -c / -cf) ------------------------
+
+    def explicit_target_hosts(self) -> Optional[set[str]]:
+        """Return the user-supplied set of target hostnames (lowercased),
+        or ``None`` if no filter is active.
+
+        Combines ``--computers`` (CSV) and ``--computer-file`` (one host per
+        line; ``#`` comments stripped). The file is read once per source run.
+        """
+        targets: set[str] = set()
+        if self.computers:
+            for piece in self.computers.split(","):
+                piece = piece.strip().lower()
+                if piece:
+                    targets.add(piece)
+        if self.computer_file:
+            try:
+                with open(self.computer_file, encoding="utf-8") as fh:
+                    for line in fh:
+                        host = line.split("#", 1)[0].strip().lower()
+                        if host:
+                            targets.add(host)
+            except OSError as exc:
+                logger.warning("computer_file %s unreadable: %s", self.computer_file, exc)
+        return targets or None
+
+
     def ldap_computer_hosts(self) -> list[dict[str, Any]]:
         """Return cached list of (sid, sam, dnshostname, name) dicts for AD computers.
 
         Hits LDAP exactly once per source run. Hostname is lowercased; entries
-        without a ``dnsHostName`` fall back to ``<sam>.<domain>``.
+        without a ``dnsHostName`` fall back to ``<sam>.<domain>``. If
+        ``--computers`` / ``--computer-file`` is set, the result is filtered
+        to that allowlist (FQDN or short-name match) so per-host phases only
+        iterate the user-selected targets.
         """
         if self._ldap_computer_hosts is not None:
             return self._ldap_computer_hosts
+        explicit = self.explicit_target_hosts()
         out: list[dict[str, Any]] = []
         try:
             for entry in self.ad.paged_search(
@@ -155,6 +231,8 @@ class SourceContext:
                 if not dns and sam:
                     dns = f"{sam.lower()}.{self.domain.lower()}"
                 if not dns:
+                    continue
+                if explicit and not (dns in explicit or dns.split(".", 1)[0] in explicit):
                     continue
                 out.append({
                     "sid": entry.get("object_sid"),
@@ -190,13 +268,13 @@ class SourceContext:
         triggers an ``OPENSSL_Uplink: no OPENSSL_Applink`` process abort on
         any TLS handshake (see HANDOFF.md Risk 8). curl uses Schannel and
         sidesteps the issue entirely. To force-disable the AdminService phase
-        regardless, set ``OPENHOUND_SCCM_DISABLE_ADMINSERVICE=1``.
+        regardless, pass ``-m All,-AdminService`` (or omit it from ``-m``).
         """
         if self._adminservice_payloads is not None:
             return self._adminservice_payloads
 
-        if os.environ.get("OPENHOUND_SCCM_DISABLE_ADMINSERVICE", "").lower() in ("1", "true", "yes"):
-            logger.info("adminservice_payloads: disabled via OPENHOUND_SCCM_DISABLE_ADMINSERVICE")
+        if not self.method_enabled("AdminService"):
+            logger.info("adminservice_payloads: disabled via --collection-methods")
             self._adminservice_payloads = {}
             return self._adminservice_payloads
 
@@ -233,6 +311,13 @@ class SourceContext:
                 seen.add(h)
                 ordered.append(h)
 
+        # ``-sms / --sms-provider`` pins the discovery to exactly one host.
+        if self.sms_provider:
+            pinned = self.sms_provider.strip().lower()
+            ordered = [h for h in ordered if h == pinned or h.split(".", 1)[0] == pinned]
+            if not ordered:
+                logger.warning("adminservice_payloads: --sms-provider %s matched no LDAP-discovered providers", self.sms_provider)
+
         for host in ordered:
             try:
                 payload = _collect_adminservice_data(host, self.username, self.password)
@@ -259,22 +344,21 @@ class SourceContext:
 
         **Opt-in.** Disabled by default because impacket's TDS path can wedge
         for many minutes when the SQL server enforces channel-binding tokens
-        (the MAYYHEM lab does on PS1-PSV). Set
-        ``OPENHOUND_SCCM_ENABLE_MSSQL_INTROSPECT=1`` to attempt the sweep.
-        Even when enabled, ``OPENHOUND_SCCM_DISABLE_MSSQL_INTROSPECT=1`` wins
-        as a kill-switch.
+        (the MAYYHEM lab does on PS1-PSV). Set ``ctx.mssql_introspect = True``
+        (via ``SOURCES__SCCM__MSSQL_INTROSPECT=true``) AND have ``MSSQL`` in
+        ``--collection-methods`` to attempt the sweep.
         """
         if self._mssql_introspection is not None:
             return self._mssql_introspection
 
-        if os.environ.get("OPENHOUND_SCCM_DISABLE_MSSQL_INTROSPECT", "").lower() in ("1", "true", "yes"):
-            logger.info("mssql_introspection: disabled via OPENHOUND_SCCM_DISABLE_MSSQL_INTROSPECT")
+        if not self.method_enabled("MSSQL"):
+            logger.info("mssql_introspection: disabled (MSSQL not in --collection-methods)")
             self._mssql_introspection = {}
             return self._mssql_introspection
 
-        if os.environ.get("OPENHOUND_SCCM_ENABLE_MSSQL_INTROSPECT", "").lower() not in ("1", "true", "yes"):
+        if not self.mssql_introspect:
             logger.info(
-                "mssql_introspection: opt-in (set OPENHOUND_SCCM_ENABLE_MSSQL_INTROSPECT=1 to enable)"
+                "mssql_introspection: opt-in (set SOURCES__SCCM__MSSQL_INTROSPECT=true to enable)"
             )
             self._mssql_introspection = {}
             return self._mssql_introspection
@@ -715,8 +799,8 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     # endpoint. We share the SMB-share results with smb_site_servers /
     # smb_distribution_points via ``ctx.smb_shares()`` so this loop pays
     # zero extra SMB cost when the smb_* resources are also enabled
-    # (they always are unless OPENHOUND_SCCM_DISABLE_SMB is set, in which
-    # case this branch is also skipped to keep behaviour consistent).
+    # (they always are unless SMB is removed from --collection-methods,
+    # in which case this branch is also skipped to keep behaviour consistent).
     #
     # Gating: we only fold in SCCM_Sites for hosts that are *also* in
     # ``ctx.sccm_discovered_hosts()`` — i.e. hosts CMBP would have
@@ -725,7 +809,7 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     # For low-priv users that means OH would surface SEC (via ps1-sec's
     # SMS_SITE share) where CMBP wouldn't, since ps1-sec isn't in
     # CMBP's lowpriv target list.
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_SMB", "").lower() not in ("1", "true", "yes"):
+    if ctx.method_enabled("SMB"):
         discovered = ctx.sccm_discovered_hosts()
         try:
             for host in ctx.ldap_computer_hosts():
@@ -989,6 +1073,8 @@ def local_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     The CRED-4 CIM-repository scraping from the same module is *not* ported
     here — that path emits SCCM_Secret nodes which are a Phase 4 concern.
     """
+    if not ctx.method_enabled("Local"):
+        return
     if platform.system() != "Windows":
         logger.debug("local_management_points: not on Windows, yielding 0 rows")
         return
@@ -1054,6 +1140,8 @@ def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     CMBP reference: ``lib/collectors/local_collector.py::_parse_sccm_logs``.
     """
+    if not ctx.method_enabled("Local"):
+        return
     if platform.system() != "Windows":
         return
 
@@ -1122,6 +1210,8 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     CMBP reference: ``lib/collectors/dns_collector.py``.
     """
+    if not ctx.method_enabled("DNS"):
+        return
     try:
         import dns.exception
         import dns.resolver
@@ -1145,6 +1235,28 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 site_codes.add(sc)
     except Exception as e:  # noqa: BLE001
         logger.debug("dns_management_points: LDAP site enumeration failed: %s", e)
+
+    # CMBP `-sc / --site-codes` augments / overrides the auto-discovered set.
+    # Accepts a CSV value OR a path to a file with one site code per line.
+    if ctx.site_codes:
+        cli_codes: set[str] = set()
+        sc_val = ctx.site_codes.strip()
+        if sc_val:
+            try:
+                from pathlib import Path as _Path
+                p = _Path(sc_val)
+                if p.exists() and p.is_file():
+                    for line in p.read_text(encoding="utf-8").splitlines():
+                        code = line.split("#", 1)[0].strip()
+                        if code:
+                            cli_codes.add(code.upper())
+                else:
+                    cli_codes.update(c.strip().upper() for c in sc_val.split(",") if c.strip())
+            except OSError as exc:
+                logger.warning("dns_management_points: --site-codes %s unreadable: %s", sc_val, exc)
+        if cli_codes:
+            logger.info("dns_management_points: using user-supplied site codes %s", sorted(cli_codes))
+            site_codes = cli_codes
 
     if not site_codes:
         site_codes = set(_DNS_FALLBACK_SITE_CODES)
@@ -1244,6 +1356,9 @@ def dhcp_pxe_dps(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     import random
     import struct
     import time
+
+    if not ctx.method_enabled("DHCP"):
+        return
 
     if not _have_udp_broadcast_priv():
         logger.info("dhcp_pxe_dps: no UDP broadcast permission; skipping (run elevated for PXE discovery)")
@@ -1686,6 +1801,8 @@ def registry_sccm_components(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     A successful read (even if the keys are empty) implies this host is the
     SCCM site server. Hosts without the SCCM key tree silently yield nothing.
     """
+    if not ctx.method_enabled("RemoteRegistry"):
+        return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
         with _RegistryProbe(hostname, ctx.domain, ctx.username, ctx.password) as probe:
@@ -1724,6 +1841,8 @@ def registry_sccm_databases(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     row in that case; the registry path doesn't reveal a remote DB host).
     Populated subkey = the listed FQDN(s) are SQL servers hosting the site DB.
     """
+    if not ctx.method_enabled("RemoteRegistry"):
+        return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
         with _RegistryProbe(hostname, ctx.domain, ctx.username, ctx.password) as probe:
@@ -1762,6 +1881,8 @@ def registry_current_users(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     registry, surfacing a phantom ``DC -> domainadmin`` HasSession edge
     that CMBP never produces.
     """
+    if not ctx.method_enabled("RemoteRegistry"):
+        return
     discovered = ctx.sccm_discovered_hosts()
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -1924,6 +2045,8 @@ def mssql_epa_flags(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     AdminService access would still see CAS-DB / PS1-DB nodes via raw
     LDAP-walk + 1433 scan, while CMBP correctly emits zero such nodes.
     """
+    if not ctx.method_enabled("MSSQL"):
+        return
     discovered = ctx.sccm_discovered_hosts()
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3277,8 +3400,8 @@ def wmi_clients(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     CMBP reference: ``wmi_collector.py`` (gap-filler client enumeration).
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_WMI", "").lower() in ("1", "true", "yes"):
-        logger.info("wmi_clients: disabled via OPENHOUND_SCCM_DISABLE_WMI")
+    if not ctx.method_enabled("WMI"):
+        logger.info("wmi_clients: disabled via --collection-methods")
         return
     seen = _adminservice_hosts_seen(ctx)
     for host in ctx.ldap_computer_hosts():
@@ -3320,7 +3443,7 @@ def wmi_users_seen(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     CMBP reference: ``wmi_collector.py::_get_combined_device_resources_via_wmi``.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_WMI", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("WMI"):
         return
     seen = _adminservice_hosts_seen(ctx)
     for host in ctx.ldap_computer_hosts():
@@ -3361,7 +3484,7 @@ def wmi_sql_service_accounts(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     Only queries hosts that responded to the MSSQL EPA TDS PRELOGIN probe -
     most computers don't run a SQL service so the WMI call would be wasted.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_WMI", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("WMI"):
         return
 
     # Build a quick set of hosts that look like SQL servers based on the
@@ -3509,8 +3632,8 @@ def http_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     CMBP reference: ``http_collector.py``.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_HTTP", "").lower() in ("1", "true", "yes"):
-        logger.info("http_management_points: disabled via OPENHOUND_SCCM_DISABLE_HTTP")
+    if not ctx.method_enabled("HTTP"):
+        logger.info("http_management_points: disabled via --collection-methods")
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3553,7 +3676,7 @@ def http_smsproviders(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     role is present even if creds aren't sufficient. Complements
     ``adminservice_admins`` which only fires when creds *are* sufficient.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_HTTP", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("HTTP"):
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3589,7 +3712,7 @@ def http_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     Hits ``/SMS_DP_SMSPKG$/Datalib/`` and ``/SMS_DP_SMSPKG$/`` over both
     schemes.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_HTTP", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("HTTP"):
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3759,8 +3882,8 @@ def smb_site_servers(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     ``"SMS Site <code>"`` comment. The site_code is parsed out of the
     comment when present.
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_SMB", "").lower() in ("1", "true", "yes"):
-        logger.info("smb_site_servers: disabled via OPENHOUND_SCCM_DISABLE_SMB")
+    if not ctx.method_enabled("SMB"):
+        logger.info("smb_site_servers: disabled via --collection-methods")
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3798,7 +3921,7 @@ def smb_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     DP indicators: ``SMS_DP$``, ``SCCMContentLib$``, ``REMINST`` (PXE).
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_SMB", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("SMB"):
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -3850,7 +3973,7 @@ def smb_signing_status(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
          CoerceAndRelayToSMB candidates like ``ps1-psv`` (the PS1 passive
          site server).
     """
-    if os.environ.get("OPENHOUND_SCCM_DISABLE_SMB", "").lower() in ("1", "true", "yes"):
+    if not ctx.method_enabled("SMB"):
         return
     for host in ctx.ldap_computer_hosts():
         hostname = host["hostname"]
@@ -4191,19 +4314,101 @@ def derived_nodes(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
 @app.source(name="sccm", max_table_nesting=0)
 def source(
+    # ---- Connection (CMBP -d/-dc/-u/-p) — dlt-bound from SOURCES__SCCM__* env vars ----
     domain: str = dlt.config.value,
     domain_controller: str | None = dlt.config.value,
     username: str | None = dlt.secrets.value,
     password: str | None = dlt.secrets.value,
-    use_ssl: bool = False,
-    ldap_port: int | None = None,
 ):
     """Build the LDAP-driven SCCM data source.
 
-    All credentials may be set via env vars: ``SOURCES__SCCM__USERNAME``,
-    ``SOURCES__SCCM__PASSWORD``, ``SOURCES__SCCM__DOMAIN``,
-    ``SOURCES__SCCM__DOMAIN_CONTROLLER``.
+    The four parameters above bind via dlt's config/secrets system (so the
+    `SOURCES__SCCM__{DOMAIN,DOMAIN_CONTROLLER,USERNAME,PASSWORD}` env vars
+    are read automatically). Every other CMBP-equivalent flag is read from
+    ``os.environ`` inside the body via the ``_env*`` helpers — declaring
+    them as dlt-bound parameters causes dlt to eagerly coerce them from
+    config providers in ways that produce confusing runtime errors (e.g.
+    a missing or unset env value tripping bool/int coercion). Keeping the
+    dlt-bound surface to the four credentials matches the pre-CLI-port
+    factory shape and lets the CMBP-style flags on
+    ``openhound collect|preprocess|convert sccm`` drive everything else
+    via the env vars they set in ``main.py``.
     """
+
+    # Defaults for every CMBP-equivalent flag the source factory honours.
+    # ``_env*`` helpers below override these from the matching env var.
+    use_ssl: bool = False
+    ldap_port: int | None = None
+    ldap_start_tls: bool = False
+    ldap_signing: str = "auto"
+    ldap_channel_binding: str = "auto"
+    collection_methods: str = "All"
+    computers: str | None = None
+    computer_file: str | None = None
+    sms_provider: str | None = None
+    site_codes: str | None = None
+    disable_possible_edges: bool = False
+    enable_bad_opsec: bool = False
+    threads: int = 1
+    show_cleartext_passwords: bool = False
+    mssql_introspect: bool = False
+    machine_name: str | None = None
+    machine_pass: str | None = None
+    client_name: str | None = None
+    create_machine_account: str | None = None
+    use_altauth: bool = False
+    registration_sleep: int = 10
+    socks_proxy: str | None = None
+
+    def _env(name: str, fallback):
+        v = os.environ.get(name)
+        return v if v not in (None, "") else fallback
+
+    def _env_bool(name: str, fallback: bool) -> bool:
+        v = os.environ.get(name)
+        if v is None or v == "":
+            return fallback
+        return v.lower() in ("1", "true", "yes", "on")
+
+    def _env_int(name: str, fallback: int) -> int:
+        v = os.environ.get(name)
+        if v is None or v == "":
+            return fallback
+        try:
+            return int(v)
+        except ValueError:
+            return fallback
+
+    use_ssl = _env_bool("SOURCES__SCCM__USE_SSL", use_ssl)
+    # Preserve None when no env var is set so ADClient picks its native default
+    # (389 / 636 from use_ssl). Only override when explicit.
+    _ldap_port_env = os.environ.get("SOURCES__SCCM__LDAP_PORT")
+    if _ldap_port_env not in (None, ""):
+        try:
+            ldap_port = int(_ldap_port_env)
+        except ValueError:
+            pass
+    ldap_start_tls = _env_bool("SOURCES__SCCM__LDAP_START_TLS", ldap_start_tls)
+    ldap_signing = _env("SOURCES__SCCM__LDAP_SIGNING", ldap_signing) or "auto"
+    ldap_channel_binding = _env("SOURCES__SCCM__LDAP_CHANNEL_BINDING", ldap_channel_binding) or "auto"
+    collection_methods = _env("SOURCES__SCCM__COLLECTION_METHODS", collection_methods) or "All"
+    computers = _env("SOURCES__SCCM__COMPUTERS", computers)
+    computer_file = _env("SOURCES__SCCM__COMPUTER_FILE", computer_file)
+    sms_provider = _env("SOURCES__SCCM__SMS_PROVIDER", sms_provider)
+    site_codes = _env("SOURCES__SCCM__SITE_CODES", site_codes)
+    disable_possible_edges = _env_bool("SOURCES__SCCM__DISABLE_POSSIBLE_EDGES", disable_possible_edges)
+    enable_bad_opsec = _env_bool("SOURCES__SCCM__ENABLE_BAD_OPSEC", enable_bad_opsec)
+    threads = _env_int("SOURCES__SCCM__THREADS", threads)
+    show_cleartext_passwords = _env_bool("SOURCES__SCCM__SHOW_CLEARTEXT_PASSWORDS", show_cleartext_passwords)
+    mssql_introspect = _env_bool("SOURCES__SCCM__MSSQL_INTROSPECT", mssql_introspect)
+    machine_name = _env("SOURCES__SCCM__MACHINE_NAME", machine_name)
+    machine_pass = _env("SOURCES__SCCM__MACHINE_PASS", machine_pass)
+    client_name = _env("SOURCES__SCCM__CLIENT_NAME", client_name)
+    create_machine_account = _env("SOURCES__SCCM__CREATE_MACHINE_ACCOUNT", create_machine_account)
+    use_altauth = _env_bool("SOURCES__SCCM__USE_ALTAUTH", use_altauth)
+    registration_sleep = _env_int("SOURCES__SCCM__REGISTRATION_SLEEP", registration_sleep)
+    socks_proxy = _env("SOURCES__SCCM__SOCKS_PROXY", socks_proxy)
+
     creds = ADCredentials(
         domain=domain,
         domain_controller=domain_controller,
@@ -4211,8 +4416,33 @@ def source(
         password=password,
         use_ssl=use_ssl,
         port=ldap_port,
+        start_tls=ldap_start_tls,
+        ldap_signing=ldap_signing,
+        ldap_channel_binding=ldap_channel_binding,
     )
-    ctx = SourceContext(ad=ADClient(creds), domain=domain, username=username, password=password)
+    ctx = SourceContext(
+        ad=ADClient(creds),
+        domain=domain,
+        username=username,
+        password=password,
+        collection_methods=collection_methods or "All",
+        computers=computers,
+        computer_file=computer_file,
+        sms_provider=sms_provider,
+        site_codes=site_codes,
+        disable_possible_edges=bool(disable_possible_edges),
+        enable_bad_opsec=bool(enable_bad_opsec),
+        threads=int(threads) if threads else 1,
+        show_cleartext_passwords=bool(show_cleartext_passwords),
+        mssql_introspect=bool(mssql_introspect),
+        machine_name=machine_name,
+        machine_pass=machine_pass,
+        client_name=client_name,
+        create_machine_account=create_machine_account,
+        use_altauth=bool(use_altauth),
+        registration_sleep=int(registration_sleep) if registration_sleep else 10,
+        socks_proxy=socks_proxy,
+    )
 
     return (
         # Phase 1 — LDAP once-phases

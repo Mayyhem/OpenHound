@@ -31,6 +31,7 @@ with ``app.assets`` for OpenGraph documentation purposes.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
@@ -86,7 +87,13 @@ def _trav_props(reason: str | None = None) -> EdgeProperties:
     return EdgeProperties(traversable=True)
 
 
-def _emit_edge(start: str, end: str, kind: str, collection_source: str | None = None) -> Edge | None:
+def _emit_edge(
+    start: str,
+    end: str,
+    kind: str,
+    collection_source: str | None = None,
+    is_possible: bool = False,
+) -> Edge | None:
     """Defensive Edge factory — drops empty endpoints to avoid framework errors.
 
     When ``collection_source`` is supplied the edge gets a SCCMEdgeProperties
@@ -95,8 +102,17 @@ def _emit_edge(start: str, end: str, kind: str, collection_source: str | None = 
     so distinct discovery paths produce distinct JSON edge rows — mirroring
     CMBP's ``rename_node`` duplicate-retention behaviour for SCCM_HasClient
     and similar edges.
+
+    ``is_possible=True`` marks edges that CMBP labels as "possible" (inferred
+    rather than directly observed). When ``SOURCES__SCCM__DISABLE_POSSIBLE_EDGES``
+    is true these edges are suppressed entirely, matching CMBP's
+    ``--disable-possible-edges`` flag.
     """
     if not start or not end:
+        return None
+    if is_possible and os.environ.get(
+        "SOURCES__SCCM__DISABLE_POSSIBLE_EDGES", ""
+    ).lower() in ("1", "true", "yes"):
         return None
     if collection_source:
         props: EdgeProperties = SCCMEdgeProperties(

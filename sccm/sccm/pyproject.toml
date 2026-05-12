@@ -9,7 +9,10 @@ authors = [
 ]
 dependencies = [
     # LDAP client used by the LDAP collection phase (clients/ad.py).
-    "ldap3>=2.9.1",
+    # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
+    # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
+    # LDAP channel binding tokens against signing-required DCs.
+    "ldap3>=2.10.2rc4",
     # Used by impacket-based per-host phases (Phase 3); landed here so `uv sync` resolves
     # the wheels once and the next session can start from a working venv.
     "impacket>=0.11.0",
