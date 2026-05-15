@@ -27,10 +27,36 @@ class SCCMNodeProperties(BaseProperties):
     `id`. For AD-derived nodes this is the SID; for SCCM_Site it's the site code; for
     MSSQL_Server it's `<HOSTNAME>:1433`; for SCCM_ClientDevice it's `GUID:<resource-guid>`.
 
+    `environmentid` follows a per-namespace root convention (documented in README.md
+    under "Deviations from .agents/standards/openhound.md"): AD-namespace kinds
+    (Computer/User/Group/Base) set it to the AD `domain`; SCCM-namespace kinds set it
+    to the `site_code`; MSSQL-namespace kinds set it to the MSSQL server identifier.
+    Each kind belongs to its own extension's environment root.
+
     Many extra properties from the original CMBP collector flow through `extra` because
     OpenGraph's NodeProperties allows arbitrary additional fields (`model_config = extra="allow"`).
+
+    Attributes:
+        node_id: Stable identifier used as the OpenGraph node id.
+        environmentid: Per-namespace root id (AD domain / SCCM site_code / MSSQL server).
+        samAccountName: AD sAMAccountName.
+        dNSHostName: AD dNSHostName / FQDN of the host.
+        distinguishedName: AD distinguishedName.
+        objectClass: AD objectClass list.
+        operatingSystem: Operating system reported by AD.
+        enabled: Whether the AD account is enabled.
+        siteCode: SCCM site code this object belongs to.
+        rootSiteCode: Root site code in the hierarchy.
+        parentSiteCode: Parent site code (for child sites).
+        siteType: CAS / Primary / Secondary.
+        collectionSource: List of collection sources that contributed to this node.
+        isDomainPrincipal: Whether this principal is sourced from AD.
     """
 
+    # `environmentid` is inherited from the framework `BaseProperties` (it has no
+    # default there, so re-declaring it here with a default would violate dataclass
+    # field-order rules vs. the required `node_id` field below). The per-namespace
+    # root convention is documented in the class docstring's Attributes section.
     node_id: str = field(metadata={"description": "Stable identifier used as the OpenGraph node id."})
     # Optional AD/SCCM-extracted attributes (kept loose; populated where available)
     samAccountName: str | None = field(default=None, metadata={"description": "AD sAMAccountName"})
@@ -53,7 +79,7 @@ class SCCMNodeProperties(BaseProperties):
 class SCCMNode(BaseNode):
     """OpenGraph node for SCCM-extension entities. ``id`` is derived from ``properties.node_id``."""
 
-    properties: SCCMNodeProperties  # type: ignore[assignment]
+    properties: SCCMNodeProperties
     kinds: list[str]
     id: str = field(init=False)
 
@@ -78,6 +104,7 @@ class SCCMEdgeProperties(EdgeProperties):
     queryComposition: str | None = field(default=None, metadata={"description": "Optional Cypher composition for derived edges"})
     scope: str | None = field(default=None, metadata={"description": "Permission scope for SCCM role-assignment edges"})
     collectionSource: list[str] | None = field(default=None, metadata={"description": "List of discovery paths that produced this edge — used for output-stage dedup"})
+    SCCMInfra: bool | None = field(default=None, metadata={"description": "Marker that the edge is part of SCCM infrastructure traversal (PS1: set on SCCM_IsMappedTo etc.)"})
 
     def to_extra(self) -> dict[str, Any]:
         """Return only non-default fields so JSON output is minimal."""
@@ -92,4 +119,6 @@ class SCCMEdgeProperties(EdgeProperties):
             out["scope"] = self.scope
         if self.collectionSource:
             out["collectionSource"] = self.collectionSource
+        if self.SCCMInfra is not None:
+            out["SCCMInfra"] = self.SCCMInfra
         return out

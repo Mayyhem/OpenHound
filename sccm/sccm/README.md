@@ -78,6 +78,13 @@ All three produce a `output/bloodhound-sccm-<ts>.zip` matching CMBP's 5-file
 layout (`computers.json` / `groups.json` / `users.json` / `sccm.json` /
 `seed_data.json`).
 
+> ⚠️ **`preprocess` must run between `collect` and `convert`.** Every model in
+> this collector uses `self._lookup` to resolve cross-table data (SIDs, hierarchy
+> roots, role aggregations, etc.). Running `convert` against a missing or stale
+> lookup DB silently produces partial / empty graphs. The `just all` recipe and
+> the four-step usage examples above already chain them in the right order; only
+> skip `preprocess` if you have a reason and know what you're losing.
+
 ## CLI reference
 
 Every flag below works on `uv run openhound collect sccm <output>/ …` (it's the
@@ -169,12 +176,6 @@ emitted graph until that work lands.
 |---|---|---|---|
 | `-v`, `--verbose` | `RUNTIME__LOG_LEVEL=DEBUG` + `RUNTIME__LOG_CLI_LEVEL=DEBUG` | `-v / --verbose` | false |
 
-### OpenHound-specific (no CMBP equivalent)
-
-| Env var | Default | Notes |
-|---|---|---|
-| `SOURCES__SCCM__MSSQL_INTROSPECT` | false | Opt-in authenticated MSSQL TDS introspection. Off by default because impacket's TDS path can wedge against EPA-enforcing servers. |
-
 ### Framework arguments (inherited from `openhound`)
 
 Each pipeline subcommand still accepts the framework's standard arguments:
@@ -210,6 +211,109 @@ mode selection.
   packager dedupes by `(start, end, kind, collectionSource)`, which preserves
   the right count by treating distinct discovery paths as distinct edges.
 
+## Deviations from `.agents/standards/openhound.md`
+
+The agent standards under `.agents/standards/openhound.md` describe the
+"skeleton" collector shape (one `source.py`, one `graph.py`, one `lookup.py`,
+…). This collector is larger than the skeleton anticipates because it has to
+match CMBP's enumeration surface end-to-end. The deviations below are
+intentional; do not "fix" them back to the skeleton without reading the
+rationale first.
+
+- **`src/openhound_sccm/collectors/`** — per-protocol resource modules. CMBP
+  enumerates via 11 protocols (LDAP, Local, DNS, DHCP, RemoteRegistry, MSSQL,
+  AdminService, WMI, HTTP, SMB, derived). Inlining all of them into one
+  `source.py` would create a ~3,000-line module. The `@app.resource` decorators
+  still register on the single `app` instance from `main.py`; `source.py`
+  re-imports them so DLT sees the same module-level registrations as the
+  skeleton pattern.
+- **`src/openhound_sccm/clients/`** — protocol clients (`ad.py` for LDAP with
+  NTLM signing / channel binding, `adminservice.py` for SPNEGO-over-HTTPS,
+  `sccm.py` for the SMS Provider DCOM surface, `sccm_crypto.py` for NAA secret
+  decryption, etc.). These are load-bearing for CMBP parity and don't belong in
+  `source.py`.
+- **`src/openhound_sccm/context.py`** — `SourceContext` wraps the authenticated
+  AD client plus the full CMBP-equivalent CLI knob surface. The skeleton's
+  `SourceContext` only carries a `RESTClient`; SCCM needs much more.
+- **`src/openhound_sccm/cve_table.py`** — static version → CVE lookup for SCCM
+  site versions (used by `SCCMSite.as_node` to populate `versionCVEs`). A
+  small Python dict is cleaner than threading another DuckDB table through
+  preproc.
+- **`src/openhound_sccm/log_context.py`** — phase / target log-prefix filter so
+  the multi-threaded per-host collection output is readable.
+- **`src/openhound_sccm/output.py`** — post-convert BloodHound ZIP packaging
+  exposed as a `package` Typer subcommand. The framework has no post-convert
+  hook for this.
+- **Direct Typer-group registration in `main.py`** (`app.collector =
+  collect_sccm`, etc.) instead of the `@app.collect()` / `@app.preproc()` /
+  `@app.convert()` decorators. Needed so the CMBP-equivalent `-d` / `-dc` /
+  `-u` / `-p` / `-m` / ... flag surface can sit on the framework's public Typer
+  groups. The convenience decorators don't expose a way to add arbitrary Typer
+  arguments. (See [`main.py:51-57`](src/openhound_sccm/main.py#L51-L57) for the
+  inline rationale.)
+- **Dual-root `environmentid`.** The skeleton expects every collected node to
+  share one environment root, but this collector co-collects nodes whose
+  *kinds* are owned by other extensions. AD-namespace kinds
+  (`Computer` / `User` / `Group` / `Base`) carry `environmentid=self.domain`
+  because they belong to the AD environment, not SCCM's. SCCM-namespace kinds
+  set `environmentid=self.site_code` (currently still `self.domain` on several
+  nodes pending follow-up — see below). MSSQL-namespace kinds belong under the
+  MSSQL extension's root (server `host:port`) — also pending follow-up.
+
+### Known follow-ups on the dual-root work
+
+`environmentid` currently defaults to `self.domain or None` on most non-`SCCMSite`
+nodes (e.g. [`sccm_admin_user.py`](src/openhound_sccm/models/sccm_admin_user.py),
+[`sccm_collection.py`](src/openhound_sccm/models/sccm_collection.py), and the
+`mssql_*` family). The semantically correct values are:
+
+- `SCCMAdminUser` / `SCCMClientDevice` / `SCCMCollection` / `SCCMSecurityRole` →
+  `self.site_code` (these are SCCM-namespace kinds; `SCCM_Site` is their
+  environment per CMBP's `schema.json`).
+- `MSSQLServer` / `MSSQLLogin` / `MSSQLDatabase` / `MSSQLDatabaseRole` /
+  `MSSQLDatabaseUser` / `MSSQLServerRole` → the MSSQL server identifier (e.g.
+  `host:1433`), or whatever the MSSQL extension defines as its environment root.
+
+CMBP does not emit `environmentid`, so there is no parity baseline to match;
+the change is unverifiable from `tests/test_parity.py` alone and needs an
+end-to-end smoke against a BloodHound-with-OpenGraph deployment before
+landing.
+
+### Known follow-up: collect-time same-table writeback
+
+[`collectors/adminservice.py::ldap_sites_admin_extra`](src/openhound_sccm/collectors/adminservice.py)
+and [`collectors/smb.py::ldap_sites_smb_extra`](src/openhound_sccm/collectors/smb.py)
+both use DLT's `table_name="ldap_sites"` override to write back into the
+`ldap_sites` JSONL table at collect time, sharing a Python `seen_codes` set
+across resources for dedup. The agent standards
+(`.agents/skills/openhound/references/source-collection.md`) want collect to
+write raw per-source JSONL only; cross-source merges belong in preproc SQL.
+
+Unwinding this requires either (a) triple-binding the `SCCMSite` Pydantic
+model to three separate tables (DLT semantics for this aren't documented), or
+(b) building a `DerivedSite` aggregator that emits `SCCMSite` nodes from a
+preproc-built `sccm.sites_union` view (parallel to the existing
+`DerivedNode` pattern in
+[`models/derived/derived_node.py`](src/openhound_sccm/models/derived/derived_node.py)).
+The current pattern works correctly and is bit-identical to CMBP, but the
+parity tests don't cover the AdminService-only or SMB-only site paths, so any
+refactor here needs end-to-end smoke against a live SCCM lab. Deferred.
+
+### Known follow-up: remaining per-site lookups
+
+[`SCCMLookup.extra_collection_sources_for_site`](src/openhound_sccm/lookup.py),
+[`admin_enrichment_for_site`](src/openhound_sccm/lookup.py),
+[`stored_account_labels_for_site`](src/openhound_sccm/lookup.py), and
+[`admin_user_logon_names_for_site`](src/openhound_sccm/lookup.py) still do
+multi-table joins or 7-table probes per call. Each is `@lru_cache`-decorated
+so the cost is paid once per unique `site_code`, making the per-call
+amortised cost small. If a future profile shows convert-phase site-emission
+spending real time in these methods, lift each into a precomputed
+`sccm.site_*_by_site` view following the pattern set by
+[`sccm.computer_sccm_infra` / `host_site_system_roles` / `ad_principals`](src/openhound_sccm/transforms.py)
+(see `_build_computer_sccm_infra` et al. and the corresponding lookup
+rewrites for the indexed `WHERE ... = ?` shape).
+
 ## Parity status (2026-05-06)
 
 Per-user totals against CMBP (full AdminService, python.org Python 3.13):
@@ -225,3 +329,83 @@ histogram) when the same defaults are used.
 
 See `sccm/HANDOFF.md` for the multi-session implementation history and the
 diagnoses that led to true parity.
+
+## Running parity tests
+
+Two layers cover parity regressions:
+
+### 1. In-CI unit tests (`tests/test_parity.py`)
+
+Nineteen tests cover three plumbing layers — node-property surface, lookup
+methods (in-memory DuckDB), and edge-aggregator emission. Run from this
+directory:
+
+```pwsh
+uv run pytest tests/test_parity.py -v
+```
+
+The suite includes regression guards that fail CI if a future change drops a
+``collection_source`` column, renames a CMBP-canonical field, or changes the
+``traversable``/``SCCMInfra`` hints away from PS1's choices.
+
+### 2. Three-way live diff (`utils/compare_nodes_and_edges.py`)
+
+For full property-level parity validation against PowerShell `ConfigManBearPig.ps1`
+and Python CMBP, run all three collectors against the same lab with
+**possible/inferred edges disabled** on each side so only directly-observed data
+is compared:
+
+```pwsh
+# OpenHound (this extension)
+$env:SOURCES__SCCM__USERNAME='MAYYHEM\domainadmin'
+$env:SOURCES__SCCM__PASSWORD='password'
+$env:SOURCES__SCCM__DOMAIN='mayyhem.com'
+$env:SOURCES__SCCM__DISABLE_POSSIBLE_EDGES='1'
+uv run openhound collect sccm output/parity_da
+uv run openhound preprocess sccm output/parity_da output/parity_da/lookup.duckdb
+uv run openhound convert sccm output/parity_da/sccm output/parity_da/graph --lookup-file output/parity_da/lookup.duckdb
+uv run python -m openhound_sccm.main --graph-dir output/parity_da/graph --output-dir output/parity_da
+
+# PowerShell CMBP (source of truth) — run from a fresh dir so the zip lands
+# in the cwd. The script's -ZipDir flag has a quirk that uses the value as
+# the full file path; running from a fresh dir avoids it.
+$work = 'C:\Users\domainadmin\Desktop\OpenHound\sccm\ConfigManBearPig\powershell_deprecated\parity_ps1_run'
+if (Test-Path $work) { Remove-Item -Recurse -Force $work }
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+Set-Location $work
+..\ConfigManBearPig.ps1 -Domain mayyhem.com -DisablePossibleEdges -OutputFormat Zip -LogFile run.log -CollectionMethods All
+
+# Python CMBP (cross-check)
+cd C:\Users\domainadmin\Desktop\OpenHound\sccm\ConfigManBearPig\python
+uv run configmanbearpig.py -d mayyhem.com -u 'MAYYHEM\domainadmin' -p password --disable-possible-edges -m All -o parity_py --log-file parity_py/run.log
+```
+
+Then compare. The compare script handles raw JSON and zip-bundled output, and
+honours `--baseline PS1` to focus the diff on properties PS1 has that OH lacks
+(suppresses OH-only extras):
+
+```pwsh
+cd C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm
+uv run python utils/compare_nodes_and_edges.py `
+    output/parity_da/bloodhound-sccm-*.zip `
+    ../ConfigManBearPig/powershell_deprecated/parity_ps1_run/bloodhound-sccm-*.zip `
+    --label1 OH --label2 PS1 --baseline PS1 `
+    --normalize-ids `
+    --kinds SCCM_Site,Computer,SCCM_AdminUser,SCCM_SecurityRole,SCCM_Collection,MSSQL_Database `
+    -v
+```
+
+The script reports node counts per kind, "only in OH" / "only in PS1" / "in
+both" partitions, per-property diffs on matching nodes, and a per-edge-kind
+property-difference summary. Useful flags:
+
+- `--baseline <label>` — only show properties the baseline has that the other
+  side lacks, plus value differences. Suppresses non-baseline extras.
+- `--kinds A,B,C` — restrict the comparison to specific node kinds.
+- `--normalize-ids` — match nodes by `(kinds, name)` when SIDs differ between
+  collectors (CMBP sometimes uses hostnames, OH always uses SIDs).
+- `--dedup` — collapse multiple edges with the same `(start, end, kind)` to a
+  single edge before comparing properties.
+
+Parity is achieved when the per-kind / per-property diff for each in-scope kind
+shows zero "only-in-baseline" entries.

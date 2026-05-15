@@ -23,8 +23,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-SecretPolicyEdge = register_placeholder(
-    name="SecretPolicyEdge",
+SCCMSecretPolicyEdge = register_placeholder(
+    name="SCCMSecretPolicyEdge",
     description="Schema-only placeholder for secret-policy edges; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.SCCM_HAS_NETWORK_ACCESS_ACCOUNT, start=nk.SCCM_CLIENT_DEVICE, end=nk.USER,

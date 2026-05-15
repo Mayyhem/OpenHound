@@ -16,7 +16,6 @@ from typing import ClassVar, Optional
 
 from dlt.common.libs.pydantic import DltConfig
 from openhound.core.asset import BaseAsset, NodeDef
-from openhound.core.models.entries_dataclass import Edge
 from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
@@ -31,6 +30,17 @@ class ComputerProperties(SCCMNodeProperties):
     Field names match the camelCase used by ConfigManBearPig's output so the
     test runner's wildcard patterns (e.g. ``dNSHostName: cas-pss.$Domain``)
     match unchanged.
+
+    Attributes:
+        objectGuid: AD objectGUID.
+        operatingSystem: Operating system from AD.
+        operatingSystemVersion: OS version from AD.
+        servicePrincipalName: AD SPNs.
+        networkBootServer: Whether this computer is a PXE-enabled DP.
+        Type: Marker matching CMBP property (always "Computer").
+        domain: AD domain (NetBIOS or DNS).
+        SCCMInfra: True when this Computer hosts an SCCM site system / DP / MP / SMS Provider role.
+        SCCMSiteSystemRoles: List of 'RoleName@SiteCode' entries from SMS_SCI_SysResUse.
     """
 
     objectGuid: Optional[str] = field(default=None, metadata={"description": "AD objectGUID"})
@@ -41,6 +51,7 @@ class ComputerProperties(SCCMNodeProperties):
     Type: Optional[str] = field(default="Computer", metadata={"description": "Marker matching CMBP property"})
     domain: Optional[str] = field(default=None, metadata={"description": "AD domain (NetBIOS or DNS)"})
     SCCMInfra: Optional[bool] = field(default=None, metadata={"description": "True when this Computer hosts an SCCM site system / DP / MP / SMS Provider role"})
+    SCCMSiteSystemRoles: Optional[list[str]] = field(default=None, metadata={"description": "List of 'RoleName@SiteCode' entries from SMS_SCI_SysResUse"})
 
 
 @app.asset(
@@ -83,20 +94,16 @@ class Computer(BaseAsset):
         # SCCM_AdminUser node (e.g. low-priv runs). The lookup probes
         # smb_site_servers / smb_distribution_points / http_*_points /
         # ldap_sms_providers and returns True if any row matches.
-        sccm_infra: Optional[bool] = None
-        lookup = getattr(self, "_lookup", None)
-        if lookup is not None and hasattr(lookup, "computer_is_sccm_infra"):
-            try:
-                sccm_infra = lookup.computer_is_sccm_infra(self.object_sid, self.dns_host_name) or None
-            except Exception:
-                sccm_infra = None
+        sccm_infra = self._lookup.computer_is_sccm_infra(self.object_sid, self.dns_host_name) or None
+        roles = self._lookup.computer_site_system_roles(self.object_sid, self.dns_host_name)
+        sccm_site_system_roles = list(roles) if roles else None
         return SCCMNode(
             kinds=[nk.COMPUTER, nk.BASE],
             properties=ComputerProperties(
                 node_id=self.object_sid,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 samAccountName=self.sam_account_name,
                 dNSHostName=self.dns_host_name,
                 distinguishedName=self.distinguished_name,
@@ -110,6 +117,7 @@ class Computer(BaseAsset):
                 Type="Computer",
                 domain=self.domain,
                 SCCMInfra=sccm_infra,
+                SCCMSiteSystemRoles=sccm_site_system_roles,
             ),
         )
 

@@ -81,7 +81,7 @@ class MSSQLServer(BaseAsset):
                 node_id=node_id,
                 name=f"{display}:{port}",
                 displayname=f"{display}:{port}",
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 dNSHostName=self.fqdn or host,
                 hostFQDN=self.fqdn or host,
                 port=port,

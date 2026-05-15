@@ -83,7 +83,7 @@ class SCCMClientDevice(BaseAsset):
                 node_id=node_id,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 resourceID=self.resource_id,
                 machineName=self.machine_name,
                 smsGUID=self.guid,

@@ -48,6 +48,13 @@ class SCCMAdminUserProperties(SCCMNodeProperties):
     Type: str = field(default="SCCM_AdminUser", metadata={"description": "Marker matching CMBP property"})
     roleNames: Optional[list[str]] = field(default=None, metadata={"description": "RoleNames flattened from SMS_Admin"})
     collectionNames: Optional[list[str]] = field(default=None, metadata={"description": "CollectionNames flattened from SMS_Admin"})
+    memberOf: Optional[list[str]] = field(default=None, metadata={"description": "Resolved SCCM_SecurityRole node IDs (PS1: 'memberOf')"})
+    collectionIds: Optional[list[str]] = field(default=None, metadata={"description": "Resolved SCCM_Collection node IDs (PS1: 'collectionIds', note camelCase 'Ids')"})
+    securityRoles: Optional[list[str]] = field(default=None, metadata={"description": "Alias for memberOf — kept for queries written against earlier OH versions"})
+    collectionIDs: Optional[list[str]] = field(default=None, metadata={"description": "Alias for collectionIds (uppercase IDs variant)"})
+    adminID: Optional[int] = field(default=None, metadata={"description": "AdminID integer (PS1 uppercase variant of adminId)"})
+    lastModifiedBy: Optional[str] = field(default=None, metadata={"description": "PS1 only: who last modified the admin record"})
+    lastModifiedDate: Optional[str] = field(default=None, metadata={"description": "PS1 only: when the admin record was last modified"})
     domain: Optional[str] = field(default=None, metadata={"description": "AD domain"})
 
 
@@ -84,14 +91,28 @@ class SCCMAdminUser(BaseAsset):
     def as_node(self) -> SCCMNode:
         # Resolve the hierarchy root so ids are stable across CAS/Primary
         # boundaries. See module docstring (Risk 1).
-        lookup = getattr(self, "_lookup", None)
         root_site_code = (
-            lookup.hierarchy_root(self.site_code) if lookup and self.site_code else self.site_code
+            self._lookup.hierarchy_root(self.site_code) if self.site_code else None
         ) or self.site_code or ""
 
         logon_lower = (self.logon_name or "").lower().strip()
         node_id = f"{logon_lower}@{root_site_code}"
-        display = f"{self.logon_name}@{root_site_code}"
+        # PS1 emits ``name`` = bare logon_name (no @site suffix). Match that
+        # so BloodHound queries against ``a.name = 'mayyhem\\domainadmin'`` work.
+        display = self.logon_name or node_id
+
+        # Resolve role names / collection names to canonical SCCM_SecurityRole /
+        # SCCM_Collection node IDs so BloodHound queries like
+        # ``WHERE 'SR0000001@CAS' IN n.securityRoles`` work against the OH graph
+        # the same way they work against CMBP/PS1 graphs.
+        security_role_ids: Optional[list[str]] = None
+        collection_ids: Optional[list[str]] = None
+        if self.role_names:
+            ids = self._lookup.admin_user_role_ids(tuple(self.role_names), self.site_code)
+            security_role_ids = list(ids) if ids else None
+        if self.collection_names:
+            ids = self._lookup.admin_user_collection_ids(tuple(self.collection_names), self.site_code)
+            collection_ids = list(ids) if ids else None
 
         return SCCMNode(
             kinds=[nk.SCCM_ADMIN_USER],
@@ -99,7 +120,7 @@ class SCCMAdminUser(BaseAsset):
                 node_id=node_id,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 logonName=self.logon_name,
                 displayName=self.display_name,
                 adminSid=self.admin_sid,
@@ -114,6 +135,11 @@ class SCCMAdminUser(BaseAsset):
                 Type="SCCM_AdminUser",
                 roleNames=self.role_names,
                 collectionNames=self.collection_names,
+                memberOf=security_role_ids,
+                collectionIds=collection_ids,
+                securityRoles=security_role_ids,
+                collectionIDs=collection_ids,
+                adminID=self.admin_id,
                 domain=self.domain,
             ),
         )

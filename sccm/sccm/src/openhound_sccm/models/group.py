@@ -29,6 +29,12 @@ class GroupProperties(SCCMNodeProperties):
 
     Field names match the camelCase used by ConfigManBearPig's output so the
     test runner's wildcard patterns match unchanged.
+
+    Attributes:
+        objectGuid: AD objectGUID.
+        groupType: AD groupType bitmask.
+        Type: Marker matching CMBP property (always "Group").
+        domain: AD domain (NetBIOS or DNS).
     """
 
     objectGuid: Optional[str] = field(default=None, metadata={"description": "AD objectGUID"})
@@ -72,7 +78,7 @@ class Group(BaseAsset):
                 node_id=self.object_sid,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 samAccountName=self.sam_account_name,
                 distinguishedName=self.distinguished_name,
                 objectGuid=self.object_guid,

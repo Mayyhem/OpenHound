@@ -14,8 +14,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-SameHostAsEdge = register_placeholder(
-    name="SameHostAsEdge",
+SCCMSameHostAsEdge = register_placeholder(
+    name="SCCMSameHostAsEdge",
     description="Schema-only placeholder for SameHostAs; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.SAME_HOST_AS, start=nk.SCCM_CLIENT_DEVICE, end=nk.COMPUTER,

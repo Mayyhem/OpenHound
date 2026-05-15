@@ -14,8 +14,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-AllPermissionsEdge = register_placeholder(
-    name="AllPermissionsEdge",
+SCCMAllPermissionsEdge = register_placeholder(
+    name="SCCMAllPermissionsEdge",
     description="Schema-only placeholder for SCCM_AllPermissions; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.SCCM_ALL_PERMISSIONS, start=nk.SCCM_ADMIN_USER, end=nk.SCCM_SITE,

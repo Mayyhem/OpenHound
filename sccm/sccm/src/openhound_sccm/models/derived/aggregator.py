@@ -87,6 +87,24 @@ def _trav_props(reason: str | None = None) -> EdgeProperties:
     return EdgeProperties(traversable=True)
 
 
+# CMBP/PS1 marks these edge kinds as non-traversable (informational only). BH
+# uses ``traversable`` to decide attack-path participation; mirror CMBP so the
+# two collectors yield equivalent traversal behaviour in BloodHound.
+_NON_TRAVERSABLE_KINDS: frozenset[str] = frozenset({
+    "MemberOf",
+    "SCCM_HasMember",
+    "SCCM_IsAssigned",
+    "SCCM_HasStoredAccount",
+    "MSSQL_ServiceAccountFor",
+})
+
+# Edge kinds CMBP/PS1 tag with ``SCCMInfra=True`` (the edge is part of SCCM
+# infrastructure traversal). Mirror so BH agrees across collectors.
+_SCCM_INFRA_EDGE_KINDS: frozenset[str] = frozenset({
+    "SCCM_IsMappedTo",
+})
+
+
 def _emit_edge(
     start: str,
     end: str,
@@ -103,6 +121,9 @@ def _emit_edge(
     CMBP's ``rename_node`` duplicate-retention behaviour for SCCM_HasClient
     and similar edges.
 
+    Edge kinds listed in ``_NON_TRAVERSABLE_KINDS`` are marked
+    ``traversable=False`` to match CMBP/PS1's BH traversal hints.
+
     ``is_possible=True`` marks edges that CMBP labels as "possible" (inferred
     rather than directly observed). When ``SOURCES__SCCM__DISABLE_POSSIBLE_EDGES``
     is true these edges are suppressed entirely, matching CMBP's
@@ -114,19 +135,120 @@ def _emit_edge(
         "SOURCES__SCCM__DISABLE_POSSIBLE_EDGES", ""
     ).lower() in ("1", "true", "yes"):
         return None
-    if collection_source:
+    traversable = kind not in _NON_TRAVERSABLE_KINDS
+    sccm_infra = True if kind in _SCCM_INFRA_EDGE_KINDS else None
+    if collection_source or sccm_infra is not None:
         props: EdgeProperties = SCCMEdgeProperties(
-            traversable=True,
-            collectionSource=[collection_source],
+            traversable=traversable,
+            collectionSource=[collection_source] if collection_source else None,
+            SCCMInfra=sccm_infra,
         )
     else:
-        props = _trav_props()
+        props = EdgeProperties(traversable=traversable)
     return Edge(
         kind=kind,
         start=EdgePath(value=start, match_by="id"),
         end=EdgePath(value=end, match_by="id"),
         properties=props,
     )
+
+
+# PS1 emits ``collectionSource`` lists in a specific stable order reflecting
+# the discovery-phase precedence (Registry → MSSQL → AdminService families →
+# SCCM_Invoke-PostProcessing → LDAP). Match that exact ordering so list
+# equality holds across collectors (BloodHound queries against
+# ``e.collectionSource[0]`` and similar return identical results).
+_COLLECTION_SOURCE_ORDER: tuple[str, ...] = (
+    "RemoteRegistry-MultisiteComponentServers",
+    "RemoteRegistry-Identification",
+    "RemoteRegistry-ComponentServer",
+    "RemoteRegistry-CurrentUser",
+    "Local-SMS_Authority",
+    "MSSQL-ScanForEPA",
+    "MSSQL",
+    "MSSQL-EPA",
+    "LDAP-MSSQLSvc",
+    "AdminService-SMS_Sites",
+    "AdminService-SMS_SCI_SiteDefinition",
+    "AdminService-SMS_SCI_SysResUse",
+    "AdminService-SMS_SCI_Reserved",
+    "AdminService-SMS_Admin",
+    "AdminService-SMS_Role",
+    "AdminService-SMS_Collection",
+    "AdminService-SMS_FullCollectionMembership",
+    "AdminService-SMS_CombinedDeviceResources",
+    "AdminService-ClientDevices",
+    "AdminService-SMS_R_System",
+    "AdminService-SMS_R_User",
+    "AdminService-Hierarchy",
+    "AdminService-SecretPolicy",
+    "WMI-UsersSeen",
+    "SMB-Signing",
+    "LDAP-mSSMSSite",
+    "LDAP-mSSMSManagementPoint",
+    "LDAP-GenericAllSystemManagement",
+    "LDAP-CmRcService",
+    "SCCM_Invoke-PostProcessing",
+)
+_COLLECTION_SOURCE_RANK: dict[str, int] = {
+    tag: idx for idx, tag in enumerate(_COLLECTION_SOURCE_ORDER)
+}
+
+
+def _sort_sources(sources: list[str]) -> list[str]:
+    """Order a collection_source list by PS1's discovery-phase precedence.
+
+    Unknown tags sort to the end in insertion order, so newly-added phases
+    don't silently swap the list shape on the canonical-tag prefix that
+    BloodHound queries care about.
+    """
+    default_rank = len(_COLLECTION_SOURCE_ORDER)
+    return sorted(sources, key=lambda s: _COLLECTION_SOURCE_RANK.get(s, default_rank))
+
+
+def _emit_grouped_edges(rows, default_kind: str | None = None):
+    """Group ``(start, end, kind?, source)`` rows by ``(start, end, kind)`` and
+    yield one ``Edge`` per group with the merged ``collectionSource`` list,
+    ordered by PS1's discovery-phase precedence.
+
+    Used for edge kinds where PS1 emits a single edge with multiple source
+    tags reflecting every channel that contributed to discovery (MSSQL
+    hierarchy edges, SCCM_AssignAllPermissions on MSSQL_Database, etc.).
+
+    ``rows`` is an iterable of 3-tuples ``(start, end, source)`` when
+    ``default_kind`` is given, or 4-tuples ``(start, end, kind, source)`` when
+    each row carries its own kind. ``source`` may be ``None`` — empty sources
+    are filtered from the merged list, preserving CMBP/PS1's behaviour of
+    omitting absent provenance.
+    """
+    from collections import OrderedDict
+    grouped: dict[tuple[str, str, str], list[str]] = OrderedDict()
+    for row in rows:
+        if default_kind is not None:
+            start, end, source = row
+            kind = default_kind
+        else:
+            start, end, kind, source = row
+        if not start or not end:
+            continue
+        key = (start, end, kind)
+        bucket = grouped.setdefault(key, [])
+        if source and source not in bucket:
+            bucket.append(source)
+    for (start, end, kind), sources in grouped.items():
+        traversable = kind not in _NON_TRAVERSABLE_KINDS
+        sccm_infra = True if kind in _SCCM_INFRA_EDGE_KINDS else None
+        props = SCCMEdgeProperties(
+            traversable=traversable,
+            collectionSource=_sort_sources(sources) if sources else None,
+            SCCMInfra=sccm_infra,
+        )
+        yield Edge(
+            kind=kind,
+            start=EdgePath(value=start, match_by="id"),
+            end=EdgePath(value=end, match_by="id"),
+            properties=props,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +269,7 @@ def _mk_mssql_node(node_id: str, kinds: list[str], **fields: Any) -> SCCMNode:
             node_id=node_id,
             name=fields.get("name") or node_id,
             displayname=fields.get("displayname") or fields.get("name") or node_id,
-            environmentid=fields.get("environmentid", ""),
+            environmentid=fields.get("environmentid") or None,
             collectionSource=fields.get("collectionSource"),
             siteCode=fields.get("SCCMSite"),
             SCCMSite=fields.get("SCCMSite"),
@@ -314,10 +436,10 @@ class DerivedEdges(BaseAsset):
 
         # --- SCCM_AdminsReplicatedTo -----------------------------------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.admins_replicated_to_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.admins_replicated_to_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_ADMINS_REPLICATED_TO)
+                e = _emit_edge(start, end, ek.SCCM_ADMINS_REPLICATED_TO, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -325,10 +447,10 @@ class DerivedEdges(BaseAsset):
 
         # --- SCCM_Contains ----------------------------------------------
         try:
-            for start, end, _kind in client.execute(
-                f"SELECT start_id, end_id, end_kind FROM {schema}.contains_edges"
+            for start, end, _kind, collection_source in client.execute(
+                f"SELECT start_id, end_id, end_kind, collection_source FROM {schema}.contains_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_CONTAINS)
+                e = _emit_edge(start, end, ek.SCCM_CONTAINS, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -336,10 +458,10 @@ class DerivedEdges(BaseAsset):
 
         # --- Role assignments (FullAdmin / AppAdmin / specific ...) ---
         try:
-            for start, end, kind in client.execute(
-                f"SELECT start_id, end_id, edge_kind FROM {schema}.role_assignment_edges"
+            for start, end, kind, collection_source in client.execute(
+                f"SELECT start_id, end_id, edge_kind, collection_source FROM {schema}.role_assignment_edges"
             ).fetchall():
-                e = _emit_edge(start, end, kind)
+                e = _emit_edge(start, end, kind, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -347,10 +469,10 @@ class DerivedEdges(BaseAsset):
 
         # --- SCCM_AllPermissions ---------------------------------------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.all_permissions_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.all_permissions_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_ALL_PERMISSIONS)
+                e = _emit_edge(start, end, ek.SCCM_ALL_PERMISSIONS, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -358,10 +480,10 @@ class DerivedEdges(BaseAsset):
 
         # --- SameHostAs (bidirectional) --------------------------------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.same_host_as_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.same_host_as_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SAME_HOST_AS)
+                e = _emit_edge(start, end, ek.SAME_HOST_AS, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -369,36 +491,40 @@ class DerivedEdges(BaseAsset):
 
         # --- LocalAdminRequired ----------------------------------------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.local_admin_required_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.local_admin_required_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.LOCAL_ADMIN_REQUIRED)
+                e = _emit_edge(start, end, ek.LOCAL_ADMIN_REQUIRED, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
             logger.warning("local_admin_required_edges read failed: %s", exc)
 
         # --- SCCM_AssignAllPermissions ---------------------------------
+        # The MSSQL_Database -> primary site branch fans out across the
+        # MSSQL_Server's provenance tags (see transforms.py), so the same
+        # group-and-merge strategy applies. Other rows (SMS Provider host
+        # -> primary site) yield a single source row each and pass through
+        # the grouping unchanged.
         try:
-            for start, end, collection_source in client.execute(
+            rows = client.execute(
                 f"SELECT start_id, end_id, collection_source FROM {schema}.assign_all_permissions_edges"
-            ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_ASSIGN_ALL_PERMISSIONS, collection_source=collection_source)
-                if e:
-                    yield e
+            ).fetchall()
+            for e in _emit_grouped_edges(rows, default_kind=ek.SCCM_ASSIGN_ALL_PERMISSIONS):
+                yield e
         except Exception as exc:
             logger.warning("assign_all_permissions_edges read failed: %s", exc)
 
         # --- MSSQL sysadmin fan-out (8 edges + 2 nodes per row) -------
         try:
             rows = client.execute(
-                f"SELECT start_id, server_id, database_id, login_name, site_code "
+                f"SELECT start_id, server_id, database_id, login_name, site_code, collection_source "
                 f"FROM {schema}.mssql_sysadmin_edges"
             ).fetchall()
         except Exception as exc:
             logger.warning("mssql_sysadmin_edges read failed: %s", exc)
             rows = []
-        for sysadmin_sid, server_id, database_id, login_name, site_code in rows:
+        for sysadmin_sid, server_id, database_id, login_name, site_code, collection_source in rows:
             login_id = f"{login_name}@{server_id}"
             db_user_id = f"{login_name}@{database_id}"
             sysadmin_role_id = f"sysadmin@{server_id}"
@@ -417,12 +543,12 @@ class DerivedEdges(BaseAsset):
 
             # Edges
             for e in (
-                _emit_edge(sysadmin_sid, login_id, ek.MSSQL_HAS_LOGIN),
-                _emit_edge(server_id, login_id, ek.MSSQL_CONTAINS),
-                _emit_edge(login_id, sysadmin_role_id, ek.MSSQL_MEMBER_OF),
-                _emit_edge(login_id, db_user_id, ek.MSSQL_IS_MAPPED_TO),
-                _emit_edge(database_id, db_user_id, ek.MSSQL_CONTAINS),
-                _emit_edge(db_user_id, db_owner_role_id, ek.MSSQL_MEMBER_OF),
+                _emit_edge(sysadmin_sid, login_id, ek.MSSQL_HAS_LOGIN, collection_source=collection_source),
+                _emit_edge(server_id, login_id, ek.MSSQL_CONTAINS, collection_source=collection_source),
+                _emit_edge(login_id, sysadmin_role_id, ek.MSSQL_MEMBER_OF, collection_source=collection_source),
+                _emit_edge(login_id, db_user_id, ek.MSSQL_IS_MAPPED_TO, collection_source=collection_source),
+                _emit_edge(database_id, db_user_id, ek.MSSQL_CONTAINS, collection_source=collection_source),
+                _emit_edge(db_user_id, db_owner_role_id, ek.MSSQL_MEMBER_OF, collection_source=collection_source),
             ):
                 if e:
                     yield e
@@ -431,23 +557,27 @@ class DerivedEdges(BaseAsset):
         # ExecuteOnHost, ControlServer, ControlDB, plus the three
         # boilerplate Contains edges Server->sysadmin / Server->Database
         # / Database->db_owner). Built per MSSQL_Server in transforms.py.
+        #
+        # The view fans out one row per (edge, contributing channel) so
+        # PS1's multi-source ``collectionSource`` list is reproduced.
+        # ``_emit_grouped_edges`` regroups the rows by (start, end, kind)
+        # and yields a single Edge per group with the merged source list.
         try:
-            for start, end, kind in client.execute(
-                f"SELECT start_id, end_id, edge_kind FROM {schema}.mssql_server_hierarchy_edges"
-            ).fetchall():
-                e = _emit_edge(start, end, kind)
-                if e:
-                    yield e
+            rows = client.execute(
+                f"SELECT start_id, end_id, edge_kind, collection_source FROM {schema}.mssql_server_hierarchy_edges"
+            ).fetchall()
+            for e in _emit_grouped_edges(rows):
+                yield e
         except Exception as exc:
             logger.warning("mssql_server_hierarchy_edges read failed: %s", exc)
 
         # --- CoerceAndRelay (3 flavours + 1 typo'd legacy) -------------
         try:
-            for start, end, kind, _v, _t in client.execute(
-                f"SELECT start_id, end_id, edge_kind, victim_fqdn, target_fqdn "
+            for start, end, kind, _v, _t, collection_source in client.execute(
+                f"SELECT start_id, end_id, edge_kind, victim_fqdn, target_fqdn, collection_source "
                 f"FROM {schema}.coerce_and_relay_edges"
             ).fetchall():
-                e = _emit_edge(start, end, kind)
+                e = _emit_edge(start, end, kind, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -455,10 +585,10 @@ class DerivedEdges(BaseAsset):
 
         # --- MSSQL_GetTGS / MSSQL_GetAdminTGS / MSSQL_ServiceAccountFor / HasSession --
         try:
-            for start, end, kind in client.execute(
-                f"SELECT start_id, end_id, edge_kind FROM {schema}.mssql_gettgs_edges"
+            for start, end, kind, collection_source in client.execute(
+                f"SELECT start_id, end_id, edge_kind, collection_source FROM {schema}.mssql_gettgs_edges"
             ).fetchall():
-                e = _emit_edge(start, end, kind)
+                e = _emit_edge(start, end, kind, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -466,10 +596,10 @@ class DerivedEdges(BaseAsset):
 
         # --- Secret-policy edges --------------------------------------
         try:
-            for start, end, kind in client.execute(
-                f"SELECT start_id, end_id, edge_kind FROM {schema}.secret_policy_edges"
+            for start, end, kind, collection_source in client.execute(
+                f"SELECT start_id, end_id, edge_kind, collection_source FROM {schema}.secret_policy_edges"
             ).fetchall():
-                e = _emit_edge(start, end, kind)
+                e = _emit_edge(start, end, kind, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -477,32 +607,36 @@ class DerivedEdges(BaseAsset):
 
         # --- Phase 6: SCCM_HasMember (Collection -> ClientDevice) ------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.has_member_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.has_member_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_HAS_MEMBER)
+                e = _emit_edge(start, end, ek.SCCM_HAS_MEMBER, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
             logger.warning("has_member_edges read failed: %s", exc)
 
         # --- Phase 6: SCCM_HasClient (Site -> ClientDevice) ------------
+        # PS1 emits ONE edge per (site, device) carrying a LIST of source tags
+        # (``AdminService-ClientDevices`` + ``AdminService-SMS_R_System``).
+        # ``has_client_edges`` stores one row per (site, device, source);
+        # ``_emit_grouped_edges`` merges them into a single Edge with the
+        # multi-element ``collectionSource`` list.
         try:
-            for start, end, collection_source in client.execute(
+            rows = client.execute(
                 f"SELECT start_id, end_id, collection_source FROM {schema}.has_client_edges"
-            ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_HAS_CLIENT, collection_source=collection_source)
-                if e:
-                    yield e
+            ).fetchall()
+            for e in _emit_grouped_edges(rows, default_kind=ek.SCCM_HAS_CLIENT):
+                yield e
         except Exception as exc:
             logger.warning("has_client_edges read failed: %s", exc)
 
         # --- Phase 6: SCCM_HasADLastLogonUser / HasCurrentUser / HasPrimaryUser
         try:
-            for start, end, kind in client.execute(
-                f"SELECT start_id, end_id, edge_kind FROM {schema}.client_user_edges"
+            for start, end, kind, collection_source in client.execute(
+                f"SELECT start_id, end_id, edge_kind, collection_source FROM {schema}.client_user_edges"
             ).fetchall():
-                e = _emit_edge(start, end, kind)
+                e = _emit_edge(start, end, kind, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -532,10 +666,10 @@ class DerivedEdges(BaseAsset):
 
         # --- Phase 6: extra MemberOf edges from SMS_R_System -----------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.r_system_member_of_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.r_system_member_of_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.MEMBER_OF)
+                e = _emit_edge(start, end, ek.MEMBER_OF, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -543,10 +677,10 @@ class DerivedEdges(BaseAsset):
 
         # --- Phase 6: extra MemberOf edges from SMS_R_User -------------
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.r_user_member_of_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.r_user_member_of_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.MEMBER_OF)
+                e = _emit_edge(start, end, ek.MEMBER_OF, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -555,10 +689,10 @@ class DerivedEdges(BaseAsset):
         # --- Phase 6: HasSession from registry / WMI per-host
         # current/last-logged-on-user data (Computer -> User).
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.registry_has_session_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.registry_has_session_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.HAS_SESSION)
+                e = _emit_edge(start, end, ek.HAS_SESSION, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:
@@ -566,10 +700,10 @@ class DerivedEdges(BaseAsset):
 
         # --- Phase 6: SCCM_HasStoredAccount (Site -> User from SMS_SCI_Reserved)
         try:
-            for start, end in client.execute(
-                f"SELECT start_id, end_id FROM {schema}.has_stored_account_edges"
+            for start, end, collection_source in client.execute(
+                f"SELECT start_id, end_id, collection_source FROM {schema}.has_stored_account_edges"
             ).fetchall():
-                e = _emit_edge(start, end, ek.SCCM_HAS_STORED_ACCOUNT)
+                e = _emit_edge(start, end, ek.SCCM_HAS_STORED_ACCOUNT, collection_source=collection_source)
                 if e:
                     yield e
         except Exception as exc:

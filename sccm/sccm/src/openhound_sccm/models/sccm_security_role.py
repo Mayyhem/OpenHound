@@ -27,7 +27,8 @@ class SCCMSecurityRoleProperties(SCCMNodeProperties):
 
     roleID: Optional[str] = field(default=None, metadata={"description": "RoleID from SMS_Role"})
     roleName: Optional[str] = field(default=None, metadata={"description": "RoleName from SMS_Role"})
-    description: Optional[str] = field(default=None, metadata={"description": "RoleDescription from SMS_Role"})
+    description: Optional[str] = field(default=None, metadata={"description": "RoleDescription from SMS_Role (alias kept for backwards compatibility)"})
+    roleDescription: Optional[str] = field(default=None, metadata={"description": "RoleDescription from SMS_Role (PS1 canonical name)"})
     SCCMInfra: Optional[bool] = field(default=True, metadata={"description": "Marker that this is SCCM infrastructure"})
     Type: str = field(default="SCCM_SecurityRole", metadata={"description": "Marker matching CMBP property"})
     domain: Optional[str] = field(default=None, metadata={"description": "AD domain"})
@@ -58,13 +59,14 @@ class SCCMSecurityRole(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        lookup = getattr(self, "_lookup", None)
         root_site_code = (
-            lookup.hierarchy_root(self.site_code) if lookup and self.site_code else self.site_code
+            self._lookup.hierarchy_root(self.site_code) if self.site_code else None
         ) or self.site_code or ""
 
         node_id = f"{self.role_id}@{root_site_code}"
-        display = f"{self.role_name}@{root_site_code}" if self.role_name else node_id
+        # PS1 emits ``name`` = bare role_name (no @site suffix). Match that
+        # so BloodHound queries against ``r.name = 'Full Administrator'`` work.
+        display = self.role_name or node_id
 
         return SCCMNode(
             kinds=[nk.SCCM_SECURITY_ROLE],
@@ -72,10 +74,11 @@ class SCCMSecurityRole(BaseAsset):
                 node_id=node_id,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 roleID=self.role_id,
                 roleName=self.role_name,
                 description=self.description,
+                roleDescription=self.description,
                 siteCode=self.site_code,
                 rootSiteCode=root_site_code,
                 SCCMInfra=True,

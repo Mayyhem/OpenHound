@@ -23,8 +23,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-CoerceAndRelayEdge = register_placeholder(
-    name="CoerceAndRelayEdge",
+SCCMCoerceAndRelayEdge = register_placeholder(
+    name="SCCMCoerceAndRelayEdge",
     description="Schema-only placeholder for CoerceAndRelay edges; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.COERCE_AND_RELAY_TO_ADMIN_SERVICE, start=nk.GROUP, end=nk.SCCM_SITE,

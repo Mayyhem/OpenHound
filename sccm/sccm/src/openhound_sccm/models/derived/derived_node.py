@@ -102,7 +102,7 @@ class DerivedNode(BaseAsset):
                 node_id=self.node_id,
                 name=name,
                 displayname=self.displayname or name,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 collectionSource=[self.source] if self.source else None,
                 siteCode=self.site_code,
                 SCCMSite=self.site_code,

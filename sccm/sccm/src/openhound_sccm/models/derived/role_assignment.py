@@ -20,8 +20,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-RoleAssignmentEdge = register_placeholder(
-    name="RoleAssignmentEdge",
+SCCMRoleAssignmentEdge = register_placeholder(
+    name="SCCMRoleAssignmentEdge",
     description="Schema-only placeholder for SCCM role-assignment edges; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.SCCM_FULL_ADMINISTRATOR, start=nk.SCCM_ADMIN_USER, end=nk.SCCM_CLIENT_DEVICE,

@@ -15,8 +15,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-ContainsEdge = register_placeholder(
-    name="ContainsEdge",
+SCCMContainsEdge = register_placeholder(
+    name="SCCMContainsEdge",
     description="Schema-only placeholder for SCCM_Contains; fan-out lives in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.SCCM_CONTAINS, start=nk.SCCM_SITE, end=nk.SCCM_COLLECTION,

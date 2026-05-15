@@ -66,10 +66,8 @@ class GroupMembership(BaseAsset):
     def edges(self):
         if not self.member_dn or not self.group_sid:
             return
-        # Resolve member DN -> SID via the convert-time lookup. The lookup is
-        # injected onto each parsed asset by `opengraph.source.apply_context`.
-        lookup = getattr(self, "_lookup", None)
-        member_sid = lookup.principal_id_by_dn(self.member_dn) if lookup else None
+        # Resolve member DN -> SID via the convert-time lookup.
+        member_sid = self._lookup.principal_id_by_dn(self.member_dn)
         if not member_sid:
             return
         # When the resolved member is a User present in
@@ -84,26 +82,23 @@ class GroupMembership(BaseAsset):
         # emits MemberOf from SMS_R_User and SMS_R_System; OH's LDAP
         # ``member`` enumeration is purely a fallback for low-priv
         # runs that never reach AdminService.
-        if lookup is not None:
-            if hasattr(lookup, "user_is_sccm_infra") and lookup.user_is_sccm_infra(member_sid):
-                return
-            if hasattr(lookup, "computer_is_in_r_system_groups") and lookup.computer_is_in_r_system_groups(member_sid):
-                return
-            # Suppress Group->Group LDAP MemberOf when AdminService
-            # SMS_R_System / SMS_R_User membership data is available. CMBP
-            # never queries LDAP ``member`` and only emits MemberOf via
-            # SMS_R_*; mirroring that behaviour drops the ~11-edge
-            # Group->Group overshoot we see for full-access users.
-            if (
-                hasattr(lookup, "is_group_sid")
-                and hasattr(lookup, "adminservice_membership_available")
-                and lookup.is_group_sid(member_sid)
-                and lookup.adminservice_membership_available()
-            ):
-                return
+        if self._lookup.user_is_sccm_infra(member_sid):
+            return
+        if self._lookup.computer_is_in_r_system_groups(member_sid):
+            return
+        # Suppress Group->Group LDAP MemberOf when AdminService
+        # SMS_R_System / SMS_R_User membership data is available. CMBP
+        # never queries LDAP ``member`` and only emits MemberOf via
+        # SMS_R_*; mirroring that behaviour drops the ~11-edge
+        # Group->Group overshoot we see for full-access users.
+        if self._lookup.is_group_sid(member_sid) and self._lookup.adminservice_membership_available():
+            return
         yield Edge(
             kind=ek.MEMBER_OF,
             start=EdgePath(value=member_sid, match_by="id"),
             end=EdgePath(value=self.group_sid, match_by="id"),
-            properties=EdgeProperties(traversable=True),
+            # CMBP/PS1 marks MemberOf edges as non-traversable (informational
+            # only — not used for attack-path traversal). Match that so the
+            # BloodHound traversal flag agrees between collectors.
+            properties=EdgeProperties(traversable=False),
         )

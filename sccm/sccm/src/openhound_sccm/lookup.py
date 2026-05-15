@@ -94,6 +94,65 @@ class SCCMLookup(LookupManager):
             return None
 
     @lru_cache
+    def computer_sid_by_hostname(self, hostname: str) -> str | None:
+        """Resolve a hostname (FQDN or short name) to a Computer SID.
+
+        Used by SCCM_Site to populate siteServerDomainSID / SQLServerDomainSID
+        — equivalent to PowerShell ``Resolve-PrincipalInDomain`` against the
+        server name reported by ``SMS_Site.ServerName`` / ``SMS_SCI_SiteDefinition.SQLServerName``.
+        Matches against ``dns_host_name`` (FQDN), the short hostname (NetBIOS),
+        the ``name`` field, and the ``sam_account_name`` minus the trailing ``$``.
+        """
+        if not hostname:
+            return None
+        host_low = hostname.lower()
+        short = host_low.split(".", 1)[0]
+        try:
+            return self._find_single_object(
+                f"""
+                SELECT object_sid FROM {self.schema}.ldap_computers
+                WHERE LOWER(dns_host_name) = ?
+                   OR LOWER(SPLIT_PART(COALESCE(dns_host_name, ''), '.', 1)) = ?
+                   OR LOWER(name) = ?
+                   OR LOWER(sam_account_name) = ? || '$'
+                LIMIT 1
+                """,
+                [host_low, short, short, short],
+            )
+        except Exception:
+            return None
+
+    @lru_cache
+    def principal_sid_by_account_name(self, account: str) -> str | None:
+        """Resolve a service-account string (``DOMAIN\\sam`` or bare ``sam``)
+        to an AD SID. Reads the precomputed ``sccm.ad_principals`` view
+        (built by ``transforms._build_ad_principals``) — a single indexed
+        scan that prefers users over computers via ``ORDER BY kind``.
+        Used by SCCM_Site for SQLServiceAccountDomainSID.
+        """
+        if not account:
+            return None
+        # Strip a DOMAIN\ prefix and trailing $ (gMSA / machine-account form).
+        bare = account.split("\\", 1)[-1].strip().lower().rstrip("$")
+        if not bare:
+            return None
+        try:
+            # ``ad_principals`` stores ``sam_account_bare`` with trailing $
+            # already stripped for computer rows, so a single equality matches
+            # both `mssqlsvc` (user) and `cas-pss` (computer, originally
+            # `cas-pss$`). ``ORDER BY kind`` is alphabetical and puts
+            # 'computer' before 'user' — we want the opposite, so we negate.
+            return self._find_single_object(
+                f"SELECT object_sid FROM {self.schema}.ad_principals "
+                f"WHERE sam_account_bare = ? "
+                f"ORDER BY CASE WHEN kind = 'user' THEN 0 ELSE 1 END "
+                f"LIMIT 1",
+                [bare],
+            )
+        except Exception:
+            return None
+
+    @lru_cache
     def user_by_sam(self, sam: str) -> str | None:
         try:
             return self._find_single_object(
@@ -161,6 +220,58 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
+    @lru_cache
+    def admin_user_collection_ids(self, collection_names: tuple[str, ...], site_code: str) -> tuple[str, ...]:
+        """Resolve a tuple of collection names to ``<collection_id>@<root_site_code>``
+        node IDs matching the SCCM_Collection node IDs emitted by
+        ``models/sccm_collection.py``.
+
+        Mirrors CMBP's ``collectionIDs`` resolution for SCCM_AdminUser
+        (ConfigManBearPig.ps1 lines 7819-7833). Names are matched
+        case-insensitively against ``adminservice_collections.name``.
+        """
+        if not collection_names or not site_code:
+            return ()
+        root = self.hierarchy_root(site_code) or site_code
+        names_lower = [n.lower() for n in collection_names if n]
+        if not names_lower:
+            return ()
+        placeholders = ", ".join("?" for _ in names_lower)
+        try:
+            rows = self._find_all_objects(
+                f"SELECT DISTINCT collection_id FROM {self.schema}.adminservice_collections "
+                f"WHERE LOWER(name) IN ({placeholders})",
+                names_lower,
+            )
+        except Exception:
+            return ()
+        return tuple(sorted(f"{r[0]}@{root}" for r in rows if r and r[0]))
+
+    @lru_cache
+    def admin_user_role_ids(self, role_names: tuple[str, ...], site_code: str) -> tuple[str, ...]:
+        """Resolve a tuple of role names to ``<role_id>@<root_site_code>``
+        node IDs matching the SCCM_SecurityRole node IDs.
+
+        Mirrors CMBP's ``securityRoles`` resolution for SCCM_AdminUser
+        (ConfigManBearPig.ps1 lines 7864-7888).
+        """
+        if not role_names or not site_code:
+            return ()
+        root = self.hierarchy_root(site_code) or site_code
+        names_lower = [n.lower() for n in role_names if n]
+        if not names_lower:
+            return ()
+        placeholders = ", ".join("?" for _ in names_lower)
+        try:
+            rows = self._find_all_objects(
+                f"SELECT DISTINCT role_id FROM {self.schema}.adminservice_security_roles "
+                f"WHERE LOWER(role_name) IN ({placeholders})",
+                names_lower,
+            )
+        except Exception:
+            return ()
+        return tuple(sorted(f"{r[0]}@{root}" for r in rows if r and r[0]))
+
     # -----------------------------------------------------------------
     # MSSQL EPA flag (used by post-processing coerce edges)
     # -----------------------------------------------------------------
@@ -193,6 +304,267 @@ class SCCMLookup(LookupManager):
     # -----------------------------------------------------------------
     # Computer / SCCM-infra anchor lookups
     # -----------------------------------------------------------------
+
+    @lru_cache
+    def site_system_roles_for_site(self, site_code: str) -> tuple[str, ...]:
+        """Return ``'hostname: RoleName@site_code'`` tuples for every site system
+        serving ``site_code``. PS1 format (CMBP mirrors it).
+
+        Ordering matches the AdminService row order (typically SMS SQL Server,
+        SMS Component Server, SMS Site System, then the rest) — PS1 emits in
+        insertion order and BH queries can be sensitive to position-based
+        comparison. We preserve that by NOT applying a SQL ORDER BY.
+        """
+        if not site_code:
+            return ()
+        try:
+            rows = self._find_all_objects(
+                f"SELECT hostname || ': ' || role || '@' || site_code "
+                f"FROM {self.schema}.adminservice_site_systems "
+                f"WHERE LOWER(site_code) = LOWER(?) "
+                f"AND role IS NOT NULL AND role <> '' "
+                f"AND hostname IS NOT NULL AND hostname <> ''",
+                [site_code],
+            )
+        except Exception:
+            return ()
+        # Dedup while preserving insertion order.
+        seen: set[str] = set()
+        out: list[str] = []
+        for r in rows:
+            if not (r and r[0]):
+                continue
+            if r[0] in seen:
+                continue
+            seen.add(r[0])
+            out.append(r[0])
+        return tuple(out)
+
+    @lru_cache
+    def extra_collection_sources_for_site(self, site_code: str) -> tuple[str, ...]:
+        """Return the additional ``collectionSource`` tags a SCCM_Site picks up
+        from non-AdminService phases (local SMS authority, RemoteRegistry,
+        SMS_SCI_Reserved). PS1 lists these alongside the LDAP / AdminService
+        tags; OH discovers them in independent resources, so we re-derive at
+        convert time via lookups against the DuckDB schema.
+
+        Also folds in ``AdminService-SMS_Sites`` and
+        ``AdminService-SMS_SCI_SiteDefinition`` whenever the site has rows
+        in the corresponding AdminService tables — this restores the
+        provenance tagging that the in-line ``ldap_sites`` fold-in used to
+        do, now that the LDAP collector emits LDAP-only rows.
+        """
+        if not site_code:
+            return ()
+        out: list[str] = []
+        for table, tag in (
+            ("local_management_points",   "Local-SMS_Authority"),
+            ("local_distribution_points", "Local-SMS_Authority"),
+            ("registry_sccm_components",  "RemoteRegistry"),
+            ("registry_sccm_databases",   "RemoteRegistry"),
+            ("adminservice_sites",        "AdminService-SMS_Sites"),
+            ("adminservice_site_definitions", "AdminService-SMS_SCI_SiteDefinition"),
+            ("adminservice_reserved_accounts", "AdminService-SMS_SCI_Reserved"),
+        ):
+            try:
+                row = self._find_single_object(
+                    f"SELECT 1 FROM {self.schema}.{table} WHERE LOWER(site_code) = LOWER(?) LIMIT 1",
+                    [site_code],
+                )
+            except Exception:
+                row = None
+            if row and tag not in out:
+                out.append(tag)
+        return tuple(out)
+
+    @lru_cache
+    def admin_enrichment_for_site(self, site_code: str) -> tuple[
+        str | None, str | None, str | None, str | None, str | None,
+        str | None, str | None, str | None,
+    ]:
+        """Convert-time enrichment for a SCCM_Site row.
+
+        The Phase 1 ``ldap_sites`` collector emits LDAP-only fields (it no
+        longer reaches into AdminService — that happens in Phase 7), so the
+        rich CMBP-equivalent property surface for SCCM_Site is reconstructed
+        here by joining the AdminService DLT tables.
+
+        Returns a positional tuple (lru_cache requires a hashable return):
+
+            (display_name, site_server_name, sql_server_name,
+             sql_database_name, sql_service_account_name, version,
+             site_type, parent_site_code)
+
+        Any field absent from AdminService is returned as ``None``. The
+        SCCMSite model uses these as fallbacks for its own ``None`` slots.
+        """
+        if not site_code:
+            return (None, None, None, None, None, None, None, None)
+
+        display_name: str | None = None
+        site_server_name: str | None = None
+        version: str | None = None
+        site_type: str | None = None
+        parent_site_code: str | None = None
+        # SMS_Site: display name, site server, version, type, parent.
+        try:
+            row = self._find_all_objects(
+                f"SELECT site_name, server_name, version, site_type, reporting_site_code "
+                f"FROM {self.schema}.adminservice_sites "
+                f"WHERE LOWER(site_code) = LOWER(?) LIMIT 1",
+                [site_code],
+            )
+        except Exception:
+            row = []
+        if row:
+            r = row[0]
+            display_name = (r[0] or None) if r and len(r) > 0 else None
+            site_server_name = (r[1] or None) if r and len(r) > 1 else None
+            version = (str(r[2]) if r[2] not in (None, "") else None) if r and len(r) > 2 else None
+            t = r[3] if r and len(r) > 3 else None
+            # SMS_Site.Type: 1=Secondary, 2=Primary, 4=CAS (CMBP/PS1 long form)
+            if t == 1:
+                site_type = "Secondary Site"
+            elif t == 2:
+                site_type = "Primary Site"
+            elif t == 4:
+                site_type = "Central Administration Site"
+            parent_raw = (r[4] or None) if r and len(r) > 4 else None
+            if parent_raw and parent_raw != site_code:
+                parent_site_code = parent_raw
+
+        # SMS_SCI_SiteDefinition: SQL server/db, and a more reliable SiteName.
+        sql_server_name: str | None = None
+        sql_database_name: str | None = None
+        try:
+            row = self._find_all_objects(
+                f"SELECT site_name, sql_server_name, sql_database_name "
+                f"FROM {self.schema}.adminservice_site_definitions "
+                f"WHERE LOWER(site_code) = LOWER(?) LIMIT 1",
+                [site_code],
+            )
+        except Exception:
+            row = []
+        if row:
+            r = row[0]
+            sd_site_name = (r[0] or None) if r and len(r) > 0 else None
+            if sd_site_name:
+                display_name = sd_site_name  # CMBP prefers SMS_SCI_SiteDefinition.SiteName
+            sql_server_name = (r[1] or None) if r and len(r) > 1 else None
+            sql_database_name = (r[2] or None) if r and len(r) > 2 else None
+
+        # SMS_SCI_SysResUse: SQL service account (the role whose name contains
+        # "sql server"). adminservice_site_systems holds one row per role per host.
+        sql_service_account_name: str | None = None
+        try:
+            row = self._find_all_objects(
+                f"SELECT service_account FROM {self.schema}.adminservice_site_systems "
+                f"WHERE LOWER(site_code) = LOWER(?) "
+                f"AND LOWER(role) LIKE '%sql server%' "
+                f"AND service_account IS NOT NULL AND service_account <> '' "
+                f"LIMIT 1",
+                [site_code],
+            )
+        except Exception:
+            row = []
+        if row and row[0] and row[0][0]:
+            sql_service_account_name = row[0][0]
+
+        return (
+            display_name,
+            site_server_name,
+            sql_server_name,
+            sql_database_name,
+            sql_service_account_name,
+            version,
+            site_type,
+            parent_site_code,
+        )
+
+    @lru_cache
+    def admin_user_logon_names_for_site(self, site_code: str) -> tuple[str, ...]:
+        """Return the tuple of admin logon names (``DOMAIN\\sam``) for admins
+        attached to ``site_code``. Populates SCCM_Site.adminUsers.
+        """
+        if not site_code:
+            return ()
+        try:
+            rows = self._find_all_objects(
+                f"SELECT DISTINCT logon_name FROM {self.schema}.adminservice_admins "
+                f"WHERE LOWER(site_code) = LOWER(?) AND logon_name IS NOT NULL AND logon_name <> ''",
+                [site_code],
+            )
+        except Exception:
+            return ()
+        return tuple(sorted(r[0] for r in rows if r and r[0]))
+
+    @lru_cache
+    def stored_account_labels_for_site(self, site_code: str) -> tuple[str, ...]:
+        """Return PS1-style ``' (<sid>)'`` labels for SMS_SCI_Reserved
+        accounts attached to ``site_code``.
+
+        PS1 emits a leading space + parenthesized SID — its sam_account_name
+        slot ends up empty because the upstream collection doesn't carry it
+        through. We match PS1's literal format (leading-space + parens) so
+        BloodHound queries against ``s.storedAccounts`` work identically.
+        """
+        if not site_code:
+            return ()
+        try:
+            rows = self._find_all_objects(
+                f"""
+                SELECT DISTINCT ' (' || u.object_sid || ')'
+                FROM {self.schema}.adminservice_reserved_accounts r
+                JOIN {self.schema}.ldap_users u
+                    ON LOWER(u.sam_account_name) =
+                       LOWER(LIST_EXTRACT(STRING_SPLIT(r.account_username, chr(92)), -1))
+                    OR LOWER(u.user_principal_name) = LOWER(r.account_username)
+                WHERE LOWER(r.site_code) = LOWER(?)
+                  AND r.account_username IS NOT NULL AND r.account_username <> ''
+                  AND u.object_sid IS NOT NULL
+                """,
+                [site_code],
+            )
+        except Exception:
+            return ()
+        return tuple(sorted(r[0] for r in rows if r and r[0]))
+
+    @lru_cache
+    def computer_site_system_roles(self, sid: str, hostname: str | None = None) -> tuple[str, ...]:
+        """Return the tuple of ``RoleName@SiteCode`` strings for a Computer.
+
+        Mirrors CMBP's ``SCCMSiteSystemRoles`` property: each row in
+        ``adminservice_site_systems`` for this host contributes one entry of
+        the form ``"<role>@<site_code>"``. Matched by SID where available,
+        falling back to FQDN / short-hostname comparison since
+        ``adminservice_site_systems.hostname`` may not be SID-resolved.
+        """
+        if not sid and not hostname:
+            return ()
+        host_low = hostname.lower() if hostname else None
+        host_short = host_low.split(".", 1)[0] if host_low else None
+        sid_low = sid.lower() if sid else None
+        # ``sccm.host_site_system_roles`` (built by transforms._build_host_site_system_roles)
+        # holds one row per (host, role@site) with SID resolved in-line. The
+        # lookup reduces to a single indexed scan.
+        try:
+            rows = self._find_all_objects(
+                f"SELECT role_at_site FROM {self.schema}.host_site_system_roles "
+                f"WHERE (? IS NOT NULL AND object_sid = ?) "
+                f"   OR (? IS NOT NULL AND hostname_low = ?) "
+                f"   OR (? IS NOT NULL AND hostname_short = ?)",
+                [sid_low, sid_low, host_low, host_low, host_short, host_short],
+            )
+        except Exception:
+            return ()
+        # Preserve insertion order (AdminService row order) — match PS1.
+        seen: set[str] = set()
+        out: list[str] = []
+        for r in rows:
+            if r and r[0] and r[0] not in seen:
+                seen.add(r[0])
+                out.append(r[0])
+        return tuple(out)
 
     @lru_cache
     def computer_is_in_r_system_groups(self, sid: str) -> bool:
@@ -280,66 +652,26 @@ class SCCMLookup(LookupManager):
         """Return True if a Computer SID / hostname appears in any
         SCCM-infrastructure source table.
 
-        Used by the output-stage prune as an extra Computer anchor so
-        SCCM site servers / distribution points / management points /
+        Reads the precomputed ``sccm.computer_sccm_infra`` view built by
+        ``transforms._build_computer_sccm_infra`` — one indexed query instead
+        of the historic 7-table per-call probe. Used by the output-stage
+        prune as an extra Computer anchor so SCCM site servers / DPs / MPs /
         SMS providers survive the LDAP-superset filter even when no
-        SCCM_AdminUser node is emitted (i.e. low-priv runs that never
-        reached the AdminService SMS_Admin endpoint).
+        SCCM_AdminUser node is emitted.
         """
         if not sid and not hostname:
             return False
-        # Use a single UNION ALL probe so this is one round-trip per SID.
-        sid_pred = "1=0" if not sid else "LOWER(? ) = LOWER(?)"  # constant-true placeholder; we use parameter binding
-        params: list[str] = []
-        # Build conditional SQL based on what's available. We always check
-        # by hostname when given; SID matching is done where the source
-        # table populates ``computer_sid`` directly.
-        clauses: list[str] = []
-        if hostname:
-            host_low = hostname.lower()
-            host_short = host_low.split(".")[0]
-            for table in (
-                "smb_site_servers",
-                "smb_distribution_points",
-                "http_management_points",
-                "http_smsproviders",
-                "http_distribution_points",
-            ):
-                try:
-                    if not self._find_single_object(
-                        f"SELECT 1 FROM {self.schema}.{table} WHERE LOWER(hostname) = ? OR LOWER(SPLIT_PART(hostname, '.', 1)) = ? LIMIT 1",
-                        [host_low, host_short],
-                    ):
-                        continue
-                    return True
-                except Exception:
-                    continue
-        if sid:
-            try:
-                if self._find_single_object(
-                    f"SELECT 1 FROM {self.schema}.ldap_sms_providers WHERE LOWER(object_sid) = LOWER(?) LIMIT 1",
-                    [sid],
-                ):
-                    return True
-            except Exception:
-                pass
-        # Computers that appear in SMS_R_System (AdminService) are also
-        # SCCM-discovered — they're enumerated by SCCM's site discovery and
-        # carry security-group memberships (used by SMS_R_System MemberOf
-        # path). Without this anchor, Computers like the DC that have
-        # security-group memberships from SMS_R_System but no Site System
-        # role would not be anchored, and their MemberOf -> Group edges
-        # would be pruned out (because forward_only BFS only fires when
-        # the start Computer is already an anchor).
-        if hostname:
-            host_low = hostname.lower()
-            host_short = host_low.split(".", 1)[0]
-            try:
-                if self._find_single_object(
-                    f"SELECT 1 FROM {self.schema}.adminservice_r_system_security_groups WHERE LOWER(machine_name) = ? LIMIT 1",
-                    [host_short],
-                ):
-                    return True
-            except Exception:
-                pass
-        return False
+        host_low = hostname.lower() if hostname else None
+        host_short = host_low.split(".", 1)[0] if host_low else None
+        sid_low = sid.lower() if sid else None
+        try:
+            return bool(self._find_single_object(
+                f"SELECT 1 FROM {self.schema}.computer_sccm_infra "
+                f"WHERE (? IS NOT NULL AND hostname_low = ?) "
+                f"   OR (? IS NOT NULL AND hostname_short = ?) "
+                f"   OR (? IS NOT NULL AND object_sid = ?) "
+                f"LIMIT 1",
+                [host_low, host_low, host_short, host_short, sid_low, sid_low],
+            ))
+        except Exception:
+            return False

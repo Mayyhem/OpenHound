@@ -26,7 +26,17 @@ from openhound_sccm.main import app
 
 @dataclass
 class SCCMCollectionProperties(SCCMNodeProperties):
-    """Properties carried on every SCCM_Collection node."""
+    """Properties carried on every SCCM_Collection node.
+
+    Attributes:
+        collectionID: CollectionID from SMS_Collection.
+        collectionType: 1 = user collection, 2 = device collection.
+        memberCount: Reported MemberCount.
+        limitToCollectionID: LimitToCollectionID parent collection.
+        SCCMInfra: Marker that this is SCCM infrastructure (always True).
+        Type: Marker matching CMBP property (always "SCCM_Collection").
+        domain: AD domain.
+    """
 
     collectionID: Optional[str] = field(default=None, metadata={"description": "CollectionID from SMS_Collection"})
     collectionType: Optional[int] = field(default=None, metadata={"description": "1=user collection, 2=device collection"})
@@ -64,13 +74,14 @@ class SCCMCollection(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        lookup = getattr(self, "_lookup", None)
         root_site_code = (
-            lookup.hierarchy_root(self.site_code) if lookup and self.site_code else self.site_code
+            self._lookup.hierarchy_root(self.site_code) if self.site_code else None
         ) or self.site_code or ""
 
         node_id = f"{self.collection_id}@{root_site_code}"
-        display = f"{self.name}@{root_site_code}" if self.name else node_id
+        # PS1 emits ``name`` = bare collection name (no @site suffix). Match
+        # so BloodHound queries against ``c.name = 'All Systems'`` work.
+        display = self.name or node_id
 
         return SCCMNode(
             kinds=[nk.SCCM_COLLECTION],
@@ -78,7 +89,7 @@ class SCCMCollection(BaseAsset):
                 node_id=node_id,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 collectionID=self.collection_id,
                 collectionType=self.collection_type,
                 memberCount=self.member_count,

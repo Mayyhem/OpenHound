@@ -77,10 +77,6 @@ parameters:
     description: "Display cleartext passwords when discovered. Flag: --show-cleartext-passwords. Env: SOURCES__SCCM__SHOW_CLEARTEXT_PASSWORDS."
     required: false
     default: false
-  - name: mssql_introspect
-    description: "Opt-in authenticated MSSQL TDS introspection. Off by default because impacket TDS wedges on CBT-enforcing servers. Env: SOURCES__SCCM__MSSQL_INTROSPECT."
-    required: false
-    default: false
 
   # --- Machine Account / CRED-2 (flag surface only — chain not implemented) -
   - name: machine_name

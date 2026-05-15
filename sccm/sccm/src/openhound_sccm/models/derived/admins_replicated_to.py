@@ -32,7 +32,7 @@ from openhound_sccm.main import app
         ),
     ],
 )
-class AdminsReplicatedToEdge(BaseAsset):
+class SCCMAdminsReplicatedToEdge(BaseAsset):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     dlt_config: ClassVar[DltConfig] = {"return_validated_models": True}
 

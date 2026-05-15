@@ -1,17 +1,12 @@
-"""MSSQL_DatabaseRole node model.
+"""MSSQL_DatabaseRole node-kind schema registration.
 
-Reads from the ``mssql_database_roles`` DLT table. Yields one
-MSSQL_DatabaseRole node per database-level role (db_owner, db_datareader,
-db_datawriter, etc.) on a given (server, database) pair. The node id is
-``<rolename>@<HOSTNAME>:<port>\\<DBNAME>`` (e.g.
-``db_owner@cas-db:1433\\CM_CAS``).
-
-CMBP synthesises a ``db_owner`` role node for every MSSQL_Database it
-discovers because the role-membership graph hangs off the role node.
-Phase 3a populates this table from authenticated
-``database_role_members`` queries; cross-cutting edges (MSSQL_Contains
-Database->DatabaseRole, MSSQL_ControlDB DatabaseRole->Database,
-MSSQL_MemberOf DatabaseUser->DatabaseRole) come from SQL views in Phase 4.
+Schema-only placeholder. Real MSSQL_DatabaseRole nodes are emitted at
+convert time by ``models/derived/derived_node.DerivedNode`` from the
+``mssql_sysadmin_edges`` inference fan-out (sourced from
+``adminservice_site_systems`` + ``ldap_computers`` — no SQL queries).
+This file exists solely to register the kind's icon, description and
+properties schema with OpenHound's ``ASSET_REGISTRY`` for OpenGraph
+documentation and BloodHound display.
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ from dlt.common.libs.pydantic import DltConfig
 from openhound.core.asset import BaseAsset, NodeDef
 from pydantic import ConfigDict
 
-from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
+from openhound_sccm.graph import SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
 from openhound_sccm.main import app
 
@@ -49,38 +44,14 @@ class MSSQLDatabaseRoleProperties(SCCMNodeProperties):
     edges=[],
 )
 class MSSQLDatabaseRole(BaseAsset):
-    """MSSQL_DatabaseRole asset — one row per (db,role) from ``mssql_database_roles``."""
+    """Schema-only registration; emission happens via DerivedNode."""
 
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     dlt_config: ClassVar[DltConfig] = {"return_validated_models": True}
 
-    hostname: str
-    database_name: str
-    role_name: str
-    port: Optional[int] = 1433
-    is_fixed_role: Optional[bool] = None
-    domain: Optional[str] = None
-    source: Optional[str] = "MSSQL-Auth"
-
     @property
-    def as_node(self) -> SCCMNode:
-        port = self.port or 1433
-        host = (self.hostname or "").lower()
-        node_id = f"{self.role_name}@{host}:{port}\\{self.database_name}"
-        return SCCMNode(
-            kinds=[nk.MSSQL_DATABASE_ROLE],
-            properties=MSSQLDatabaseRoleProperties(
-                node_id=node_id,
-                name=node_id,
-                displayname=self.role_name,
-                environmentid=self.domain or "",
-                isFixedRole=self.is_fixed_role,
-                database=self.database_name,
-                SQLServer=host,
-                collectionSource=[self.source] if self.source else None,
-                Type="MSSQL_DatabaseRole",
-            ),
-        )
+    def as_node(self):
+        return None
 
     @property
     def edges(self):

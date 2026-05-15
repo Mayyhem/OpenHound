@@ -27,19 +27,19 @@ from .sccm_site import SCCMSite
 from .user import User
 
 # Derived edge models (Phase 4).
-from .derived.admins_replicated_to import AdminsReplicatedToEdge
+from .derived.admins_replicated_to import SCCMAdminsReplicatedToEdge
 from .derived.aggregator import DerivedEdges
-from .derived.all_permissions import AllPermissionsEdge
-from .derived.assign_all_permissions import AssignAllPermissionsEdge
-from .derived.coerce_and_relay import CoerceAndRelayEdge
-from .derived.contains import ContainsEdge
+from .derived.all_permissions import SCCMAllPermissionsEdge
+from .derived.assign_all_permissions import SCCMAssignAllPermissionsEdge
+from .derived.coerce_and_relay import SCCMCoerceAndRelayEdge
+from .derived.contains import SCCMContainsEdge
 from .derived.derived_node import DerivedNode
-from .derived.local_admin_required import LocalAdminRequiredEdge
+from .derived.local_admin_required import SCCMLocalAdminRequiredEdge
 from .derived.mssql_gettgs import MSSQLGetTGSEdge
 from .derived.mssql_sysadmin import MSSQLSysadminEdge
-from .derived.role_assignment import RoleAssignmentEdge
-from .derived.same_host_as import SameHostAsEdge
-from .derived.secret_policy import SecretPolicyEdge
+from .derived.role_assignment import SCCMRoleAssignmentEdge
+from .derived.same_host_as import SCCMSameHostAsEdge
+from .derived.secret_policy import SCCMSecretPolicyEdge
 
 __all__ = [
     # Base node models.
@@ -59,17 +59,17 @@ __all__ = [
     "SCCMSite",
     "User",
     # Phase 4 derived edge models.
-    "AdminsReplicatedToEdge",
+    "SCCMAdminsReplicatedToEdge",
     "DerivedEdges",
     "DerivedNode",
-    "AllPermissionsEdge",
-    "AssignAllPermissionsEdge",
-    "CoerceAndRelayEdge",
-    "ContainsEdge",
-    "LocalAdminRequiredEdge",
+    "SCCMAllPermissionsEdge",
+    "SCCMAssignAllPermissionsEdge",
+    "SCCMCoerceAndRelayEdge",
+    "SCCMContainsEdge",
+    "SCCMLocalAdminRequiredEdge",
     "MSSQLGetTGSEdge",
     "MSSQLSysadminEdge",
-    "RoleAssignmentEdge",
-    "SameHostAsEdge",
-    "SecretPolicyEdge",
+    "SCCMRoleAssignmentEdge",
+    "SCCMSameHostAsEdge",
+    "SCCMSecretPolicyEdge",
 ]

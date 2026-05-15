@@ -102,42 +102,169 @@ def _safe_exec(con: duckdb.DuckDBPyConnection, sql: str, label: str) -> None:
 _EMPTY_SCHEMAS: dict[str, str] = {
     "site_types": "(site_code VARCHAR, site_type VARCHAR, parent_site_code VARCHAR)",
     "hierarchies": "(root_code VARCHAR, member_code VARCHAR)",
-    "admins_replicated_to_edges": "(start_id VARCHAR, end_id VARCHAR)",
-    "contains_edges": "(start_id VARCHAR, end_id VARCHAR, end_kind VARCHAR)",
-    "role_assignment_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR)",
-    "all_permissions_edges": "(start_id VARCHAR, end_id VARCHAR)",
-    "same_host_as_edges": "(start_id VARCHAR, end_id VARCHAR)",
-    "local_admin_required_edges": "(start_id VARCHAR, end_id VARCHAR)",
+    "admins_replicated_to_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "contains_edges": "(start_id VARCHAR, end_id VARCHAR, end_kind VARCHAR, collection_source VARCHAR)",
+    "role_assignment_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, collection_source VARCHAR)",
+    "all_permissions_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "same_host_as_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "local_admin_required_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
     "assign_all_permissions_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
     "mssql_sysadmin_edges": (
         "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, "
         "login_name VARCHAR, server_id VARCHAR, database_id VARCHAR, site_code VARCHAR, "
-        "node_kind VARCHAR)"
+        "node_kind VARCHAR, collection_source VARCHAR)"
     ),
     "mssql_server_hierarchy_edges": (
-        "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR)"
+        "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, collection_source VARCHAR)"
     ),
     "coerce_and_relay_edges": (
-        "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, victim_fqdn VARCHAR, target_fqdn VARCHAR)"
+        "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, victim_fqdn VARCHAR, "
+        "target_fqdn VARCHAR, collection_source VARCHAR)"
     ),
-    "mssql_gettgs_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR)",
-    "secret_policy_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR)",
+    "mssql_gettgs_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, collection_source VARCHAR)",
+    "secret_policy_edges": "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, collection_source VARCHAR)",
     # ----- Phase 6 additions -----
-    "has_member_edges":     "(start_id VARCHAR, end_id VARCHAR)",
+    "has_member_edges":     "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
     "has_client_edges":     "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
-    "client_user_edges":    "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR)",
+    "client_user_edges":    "(start_id VARCHAR, end_id VARCHAR, edge_kind VARCHAR, collection_source VARCHAR)",
     "is_assigned_edges":    "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
     "is_mapped_to_edges":   "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
-    "r_system_member_of_edges": "(start_id VARCHAR, end_id VARCHAR)",
-    "r_user_member_of_edges":   "(start_id VARCHAR, end_id VARCHAR)",
-    "registry_has_session_edges": "(start_id VARCHAR, end_id VARCHAR)",
-    "has_stored_account_edges":   "(start_id VARCHAR, end_id VARCHAR)",
+    "r_system_member_of_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "r_user_member_of_edges":   "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "registry_has_session_edges": "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
+    "has_stored_account_edges":   "(start_id VARCHAR, end_id VARCHAR, collection_source VARCHAR)",
 }
 
 
 def _ensure_empty(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> None:
     cols = _EMPTY_SCHEMAS.get(table, "(start_id VARCHAR, end_id VARCHAR)")
     con.execute(f"CREATE OR REPLACE TABLE {schema}.{table} {cols}")
+
+
+# ---------------------------------------------------------------------------
+# Convert-time lookup precomputation views (Phase E2).
+# These materialise multi-table UNION / JOIN logic that ``lookup.py`` used to
+# perform per-call, so each ``SCCMLookup`` method is a single-key
+# ``WHERE ... = ?`` query.
+# ---------------------------------------------------------------------------
+
+def _build_computer_sccm_infra(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Pre-compute the per-host union behind ``SCCMLookup.computer_is_sccm_infra``.
+
+    Each contributing source table marks a hostname (and where available a SID)
+    as SCCM-infrastructure. The view holds three columns:
+        hostname_low   — full lower-cased hostname (NULL for SID-only rows)
+        hostname_short — short lower-cased hostname (NULL for SID-only rows)
+        object_sid     — lower-cased SID (NULL for hostname-only rows)
+    The lookup method is then a single indexed ``SELECT 1 ... WHERE ...`` query.
+    """
+    parts: list[str] = []
+    for table in (
+        "smb_site_servers",
+        "smb_distribution_points",
+        "http_management_points",
+        "http_smsproviders",
+        "http_distribution_points",
+    ):
+        if _table_exists(con, schema, table) and _column_exists(con, schema, table, "hostname"):
+            parts.append(
+                f"SELECT LOWER(hostname) AS hostname_low, "
+                f"LOWER(SPLIT_PART(hostname, '.', 1)) AS hostname_short, "
+                f"NULL AS object_sid "
+                f"FROM {schema}.{table} WHERE hostname IS NOT NULL AND hostname <> ''"
+            )
+    if _table_exists(con, schema, "ldap_sms_providers") and _column_exists(con, schema, "ldap_sms_providers", "object_sid"):
+        parts.append(
+            f"SELECT NULL AS hostname_low, NULL AS hostname_short, LOWER(object_sid) AS object_sid "
+            f"FROM {schema}.ldap_sms_providers WHERE object_sid IS NOT NULL AND object_sid <> ''"
+        )
+    if _table_exists(con, schema, "adminservice_r_system_security_groups") and _column_exists(
+        con, schema, "adminservice_r_system_security_groups", "machine_name"
+    ):
+        # SMS_R_System matches on short hostname (no FQDN), so hostname_low is NULL.
+        parts.append(
+            f"SELECT NULL AS hostname_low, LOWER(machine_name) AS hostname_short, NULL AS object_sid "
+            f"FROM {schema}.adminservice_r_system_security_groups "
+            f"WHERE machine_name IS NOT NULL AND machine_name <> ''"
+        )
+    if not parts:
+        con.execute(
+            f"CREATE OR REPLACE TABLE {schema}.computer_sccm_infra "
+            "(hostname_low VARCHAR, hostname_short VARCHAR, object_sid VARCHAR)"
+        )
+        return
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.computer_sccm_infra AS {' UNION ALL '.join(parts)}"
+    )
+
+
+def _build_ad_principals(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Pre-compute the AD principal UNION behind
+    ``SCCMLookup.principal_sid_by_account_name``.
+
+    Users carry a real ``sAMAccountName``; Computers' sAMAccountName ends in
+    ``$``. The view normalises both into a ``(sam_account_bare, object_sid,
+    kind)`` triple so the lookup is one indexed query that prefers Users.
+    """
+    parts: list[str] = []
+    if _table_exists(con, schema, "ldap_users") and _column_exists(con, schema, "ldap_users", "sam_account_name"):
+        parts.append(
+            f"SELECT LOWER(sam_account_name) AS sam_account_bare, "
+            f"object_sid, 'user' AS kind "
+            f"FROM {schema}.ldap_users WHERE sam_account_name IS NOT NULL AND sam_account_name <> ''"
+        )
+    if _table_exists(con, schema, "ldap_computers") and _column_exists(con, schema, "ldap_computers", "sam_account_name"):
+        # Strip trailing ``$`` so a query for ``CAS-PSS`` matches ``CAS-PSS$``.
+        parts.append(
+            f"SELECT LOWER(RTRIM(sam_account_name, '$')) AS sam_account_bare, "
+            f"object_sid, 'computer' AS kind "
+            f"FROM {schema}.ldap_computers WHERE sam_account_name IS NOT NULL AND sam_account_name <> ''"
+        )
+    if not parts:
+        con.execute(
+            f"CREATE OR REPLACE TABLE {schema}.ad_principals "
+            "(sam_account_bare VARCHAR, object_sid VARCHAR, kind VARCHAR)"
+        )
+        return
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.ad_principals AS {' UNION ALL '.join(parts)}"
+    )
+
+
+def _build_host_site_system_roles(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Pre-compute per-host SCCM site-system-role membership behind
+    ``SCCMLookup.computer_site_system_roles``.
+
+    Each row in ``adminservice_site_systems`` contributes one
+    ``role@site_code`` entry per host. SID matching against ldap_computers is
+    done in-line so the lookup method only has to filter by sid or hostname.
+    """
+    if not _table_exists(con, schema, "adminservice_site_systems"):
+        con.execute(
+            f"CREATE OR REPLACE TABLE {schema}.host_site_system_roles "
+            "(object_sid VARCHAR, hostname_low VARCHAR, hostname_short VARCHAR, role_at_site VARCHAR)"
+        )
+        return
+    # The join here resolves the site-system hostname to an ldap_computers SID
+    # when possible; otherwise object_sid is NULL and lookups fall back to
+    # hostname matching.
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE {schema}.host_site_system_roles AS
+        SELECT
+            LOWER(c.object_sid) AS object_sid,
+            LOWER(ss.hostname) AS hostname_low,
+            LOWER(SPLIT_PART(ss.hostname, '.', 1)) AS hostname_short,
+            ss.role || '@' || ss.site_code AS role_at_site
+        FROM {schema}.adminservice_site_systems ss
+        LEFT JOIN {schema}.ldap_computers c
+          ON LOWER(c.dns_host_name) = LOWER(ss.hostname)
+          OR LOWER(SPLIT_PART(COALESCE(c.dns_host_name, ''), '.', 1)) = LOWER(SPLIT_PART(ss.hostname, '.', 1))
+          OR LOWER(c.name) = LOWER(SPLIT_PART(ss.hostname, '.', 1))
+        WHERE ss.role IS NOT NULL AND ss.role <> ''
+          AND ss.site_code IS NOT NULL AND ss.site_code <> ''
+        """
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +282,6 @@ def _build_targets(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         ("dhcp_pxe_dps", "DHCP", "hostname"),
         ("registry_sccm_components", "Registry", "hostname"),
         ("mssql_epa_flags", "MSSQL", "hostname"),
-        ("mssql_logins", "MSSQL-Auth", "hostname"),
         ("adminservice_client_devices", "AdminService", "hostname"),
         ("wmi_clients", "WMI-Client", "hostname"),
         ("wmi_users_seen", "WMI-UsersSeen", "hostname"),
@@ -179,6 +305,84 @@ def _build_targets(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     union_sql = " UNION ALL ".join(sources)
     con.execute(f"CREATE OR REPLACE TABLE {schema}.targets AS {union_sql}")
+
+
+# ---------------------------------------------------------------------------
+# MSSQL_Server provenance — list of PS1-canonical channel tags that
+# contributed to discovering each MSSQL host. Used by ``_build_mssql_server_
+# hierarchy_edges`` and ``_build_assign_all_permissions`` so the edges'
+# ``collectionSource`` list matches PS1's multi-source representation.
+# ---------------------------------------------------------------------------
+
+def _build_mssql_server_provenance(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Materialise (host, tag) rows for every channel that contributed to
+    discovering an MSSQL host. PS1 attaches the full set to every MSSQL_*
+    edge touching the host; OH inherits the same list by JOINing the edge
+    views against this provenance table.
+
+    Per-PS1 mapping of OH tables to PS1 channel tags:
+      * ``mssql_epa_flags``           -> ``MSSQL-ScanForEPA``
+      * ``adminservice_site_systems`` (role=SMS SQL Server) -> ``AdminService-SMS_SCI_SysResUse``
+      * ``registry_sccm_databases``   -> ``RemoteRegistry-MultisiteComponentServers``
+      * ``adminservice_sites``        -> ``AdminService-SMS_Sites`` (when the host
+        is the site server for any site; SMS_Site exposes ``ServerName``)
+      * ``adminservice_site_definitions`` -> ``AdminService-SMS_SCI_SiteDefinition``
+        (when ``SQLServerName`` matches the host)
+    """
+    parts: list[str] = []
+    if _table_exists(con, schema, "mssql_epa_flags"):
+        parts.append(
+            f"SELECT DISTINCT LOWER(hostname) AS host, 'MSSQL-ScanForEPA' AS tag "
+            f"FROM {schema}.mssql_epa_flags WHERE hostname IS NOT NULL AND hostname <> ''"
+        )
+    if _table_exists(con, schema, "adminservice_site_systems"):
+        parts.append(
+            f"SELECT DISTINCT LOWER(hostname) AS host, "
+            f"'AdminService-SMS_SCI_SysResUse' AS tag "
+            f"FROM {schema}.adminservice_site_systems "
+            f"WHERE LOWER(role) = 'sms sql server' "
+            f"AND hostname IS NOT NULL AND hostname <> ''"
+        )
+    if _table_exists(con, schema, "registry_sccm_databases"):
+        # registry_sccm_databases exposes the SQL host as ``hostname``.
+        parts.append(
+            f"SELECT DISTINCT LOWER(hostname) AS host, "
+            f"'RemoteRegistry-MultisiteComponentServers' AS tag "
+            f"FROM {schema}.registry_sccm_databases "
+            f"WHERE hostname IS NOT NULL AND hostname <> ''"
+        )
+    if (
+        _table_exists(con, schema, "adminservice_sites")
+        and _table_exists(con, schema, "adminservice_site_definitions")
+    ):
+        # PS1 attaches ``AdminService-SMS_Sites`` to every MSSQL edge whose
+        # underlying host is the SQL server for a site that appears in
+        # SMS_Site. ``adminservice_sites.server_name`` is the *site server*
+        # (not the SQL server) — we join via site_code on
+        # ``adminservice_site_definitions`` to find the SQL host for each
+        # site, then attribute the SMS_Sites tag back to that host.
+        parts.append(
+            f"SELECT DISTINCT LOWER(sd.sql_server_name) AS host, "
+            f"'AdminService-SMS_Sites' AS tag "
+            f"FROM {schema}.adminservice_site_definitions sd "
+            f"JOIN {schema}.adminservice_sites s ON UPPER(s.site_code) = UPPER(sd.site_code) "
+            f"WHERE sd.sql_server_name IS NOT NULL AND sd.sql_server_name <> ''"
+        )
+    if _table_exists(con, schema, "adminservice_site_definitions"):
+        parts.append(
+            f"SELECT DISTINCT LOWER(sql_server_name) AS host, "
+            f"'AdminService-SMS_SCI_SiteDefinition' AS tag "
+            f"FROM {schema}.adminservice_site_definitions "
+            f"WHERE sql_server_name IS NOT NULL AND sql_server_name <> ''"
+        )
+    if not parts:
+        con.execute(
+            f"CREATE OR REPLACE TABLE {schema}.mssql_server_provenance "
+            f"(host VARCHAR, tag VARCHAR)"
+        )
+        return
+    union = " UNION ALL ".join(parts)
+    con.execute(f"CREATE OR REPLACE TABLE {schema}.mssql_server_provenance AS {union}")
 
 
 # ---------------------------------------------------------------------------
@@ -399,19 +603,22 @@ def _build_admins_replicated_to(con: duckdb.DuckDBPyConnection, schema: str) -> 
     CREATE OR REPLACE TABLE {schema}.admins_replicated_to_edges AS
     WITH s AS (SELECT site_code, parent_site_code, site_type FROM {schema}.site_types)
     -- CAS -> Primary
-    SELECT cas.site_code AS start_id, prim.site_code AS end_id
+    SELECT cas.site_code AS start_id, prim.site_code AS end_id,
+           'AdminService-Hierarchy' AS collection_source
         FROM s prim JOIN s cas
           ON prim.site_type = 'Primary' AND cas.site_type = 'CAS'
          AND prim.parent_site_code = cas.site_code
     UNION ALL
     -- Primary -> CAS
-    SELECT prim.site_code AS start_id, cas.site_code AS end_id
+    SELECT prim.site_code AS start_id, cas.site_code AS end_id,
+           'AdminService-Hierarchy' AS collection_source
         FROM s prim JOIN s cas
           ON prim.site_type = 'Primary' AND cas.site_type = 'CAS'
          AND prim.parent_site_code = cas.site_code
     UNION ALL
     -- Primary -> Secondary
-    SELECT prim.site_code AS start_id, sec.site_code AS end_id
+    SELECT prim.site_code AS start_id, sec.site_code AS end_id,
+           'AdminService-Hierarchy' AS collection_source
         FROM s prim JOIN s sec
           ON prim.site_type = 'Primary' AND sec.site_type = 'Secondary'
          AND sec.parent_site_code = prim.site_code
@@ -426,19 +633,25 @@ def _build_contains(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _ensure_empty(con, schema, "contains_edges")
         return
 
+    # PS1 uses 'SCCM_Invoke-PostProcessing' uniformly for SCCM_Contains
+    # edges since they're derived in post-processing (not collected directly).
     targets: list[str] = []
-    for table, kind, id_expr in [
+    for table, kind, id_expr, source_tag in [
         ("adminservice_admins", "SCCM_AdminUser",
-         "LOWER(t.logon_name) || '@' || h_obj.root_code"),
+         "LOWER(t.logon_name) || '@' || h_obj.root_code",
+         "SCCM_Invoke-PostProcessing"),
         ("adminservice_security_roles", "SCCM_SecurityRole",
-         "t.role_id || '@' || h_obj.root_code"),
+         "t.role_id || '@' || h_obj.root_code",
+         "SCCM_Invoke-PostProcessing"),
         ("adminservice_collections", "SCCM_Collection",
-         "t.collection_id || '@' || h_obj.root_code"),
+         "t.collection_id || '@' || h_obj.root_code",
+         "SCCM_Invoke-PostProcessing"),
     ]:
         if _table_exists(con, schema, table):
             targets.append(
                 f"SELECT DISTINCT s.site_code AS start_id, "
-                f"{id_expr} AS end_id, '{kind}' AS end_kind "
+                f"{id_expr} AS end_id, '{kind}' AS end_kind, "
+                f"'{source_tag}' AS collection_source "
                 f"FROM {schema}.{table} t "
                 f"JOIN {schema}.hierarchies h_obj ON LOWER(h_obj.member_code) = LOWER(t.site_code) "
                 f"JOIN {schema}.hierarchies h_site ON h_site.root_code = h_obj.root_code "
@@ -507,7 +720,8 @@ def _build_role_assignment_edges(con: duckdb.DuckDBPyConnection, schema: str) ->
     SELECT DISTINCT
         LOWER(rm.admin_logon_name) || '@' || h.root_code AS start_id,
         'GUID:' || cd.guid                              AS end_id,
-        {role_case}                                      AS edge_kind
+        {role_case}                                      AS edge_kind,
+        'SCCM_Invoke-PostProcessing'                     AS collection_source
     FROM {schema}.adminservice_role_members rm
     JOIN {schema}.adminservice_collection_members cm
         ON LOWER(cm.site_code) = LOWER(rm.site_code)
@@ -557,7 +771,8 @@ def _build_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
     SELECT DISTINCT
         fa.logon_name || '@' || h_admin.root_code AS start_id,
-        site_in_hierarchy.member_code              AS end_id
+        site_in_hierarchy.member_code              AS end_id,
+        'SCCM_Invoke-PostProcessing'              AS collection_source
     FROM full_admins fa
     JOIN {schema}.hierarchies h_admin
         ON LOWER(h_admin.member_code) = LOWER(fa.site_code)
@@ -593,9 +808,11 @@ def _build_same_host_as(con: duckdb.DuckDBPyConnection, schema: str) -> None:
                       OR LOWER(cd.machine_name) = LOWER(c.name)))
         WHERE cd.guid IS NOT NULL AND cd.guid <> ''
     )
-    SELECT device_id   AS start_id, computer_id AS end_id FROM matches
+    SELECT device_id   AS start_id, computer_id AS end_id,
+           'AdminService-SMS_R_System' AS collection_source FROM matches
     UNION ALL
-    SELECT computer_id AS start_id, device_id   AS end_id FROM matches
+    SELECT computer_id AS start_id, device_id   AS end_id,
+           'AdminService-SMS_R_System' AS collection_source FROM matches
     ;
     """
     _safe_exec(con, sql, "same_host_as_edges")
@@ -756,7 +973,8 @@ def _build_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> 
         SELECT DISTINCT site_code, hostname, computer_sid
         FROM ({members_union})
     )
-    SELECT DISTINCT ss.computer_sid AS start_id, sm.computer_sid AS end_id
+    SELECT DISTINCT ss.computer_sid AS start_id, sm.computer_sid AS end_id,
+                    'SCCM_Invoke-PostProcessing' AS collection_source
     FROM site_servers ss
     JOIN site_members sm
       ON ss.site_code  = sm.site_code
@@ -806,15 +1024,23 @@ def _build_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) -
         # the corresponding primary site (must be Primary or CAS, not
         # Secondary). The DB node's site_code field carries the target site,
         # so we don't need to re-parse the name.
+        #
+        # The MSSQL_Database node lives on a specific MSSQL host; its
+        # provenance is the same set of channels that discovered the host as
+        # an MSSQL server (PS1 emits the same multi-source list as on
+        # MSSQL_HostFor etc. — see ``mssql_server_provenance`` for the
+        # PS1 tag mapping). We fan out one edge-row per contributing tag.
         db_clause = f"""
         UNION ALL
         SELECT DISTINCT
             dn.node_id                                  AS start_id,
             st.site_code                                AS end_id,
-            'MSSQL_Database@' || dn.site_code           AS collection_source
+            COALESCE(p.tag, 'SCCM_Invoke-PostProcessing') AS collection_source
         FROM {schema}.derived_nodes dn
         JOIN {schema}.site_types st
             ON UPPER(st.site_code) = UPPER(dn.site_code)
+        LEFT JOIN {schema}.mssql_server_provenance p
+            ON p.host = LOWER(SPLIT_PART(dn.node_id, ':', 1))
         WHERE dn.kind = 'MSSQL_Database'
           AND st.site_type <> 'Secondary'
           AND dn.node_id IS NOT NULL AND dn.node_id <> ''
@@ -834,7 +1060,7 @@ def _build_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) -
     SELECT DISTINCT
         ph.computer_sid                            AS start_id,
         st.site_code                               AS end_id,
-        'AdminService-SMS_SCI_SysResUse@' || ph.site_code AS collection_source
+        'SCCM_Invoke-PostProcessing' AS collection_source
     FROM provider_hosts ph
     JOIN {schema}.hierarchies hp
         ON LOWER(hp.member_code) = LOWER(ph.site_code)
@@ -920,7 +1146,8 @@ def _build_mssql_sysadmin_edges(con: duckdb.DuckDBPyConnection, schema: str) -> 
         db.hostname || ':1433' AS server_id,
         db.hostname || ':1433' || chr(92) || 'CM_' || sa.site_code AS database_id,
         sa.site_code AS site_code,
-        'fanout' AS node_kind
+        'fanout' AS node_kind,
+        'AdminService-SMS_SCI_SysResUse' AS collection_source
     FROM sysadmins sa
     JOIN site_dbs db
         ON db.site_code = sa.site_code
@@ -997,10 +1224,16 @@ def _build_mssql_server_hierarchy_edges(con: duckdb.DuckDBPyConnection, schema: 
         site_join = ""
         site_col = "NULL"
 
+    # ``mssql_server_provenance`` (built earlier) provides per-host channel
+    # tags. We compute the base edges once, then UNION-fan them out across
+    # every provenance tag so the aggregator can group the rows back into a
+    # single Edge per (start, end, kind) carrying the full multi-source list
+    # PS1 emits.
     sql = f"""
     CREATE OR REPLACE TABLE {schema}.mssql_server_hierarchy_edges AS
     WITH server_with_host AS (
         SELECT DISTINCT
+            LOWER(epa.hostname) AS host,
             LOWER(epa.hostname) || ':1433' AS server_id,
             c.object_sid                    AS computer_sid,
             {site_col}                      AS site_code
@@ -1011,49 +1244,53 @@ def _build_mssql_server_hierarchy_edges(con: duckdb.DuckDBPyConnection, schema: 
             OR  LOWER(c.name)             = LOWER(SPLIT_PART(epa.hostname, '.', 1))
         {site_join}
         WHERE c.object_sid IS NOT NULL AND c.object_sid <> ''
+    ),
+    -- The base edges, before fan-out across provenance tags.
+    base_edges AS (
+        -- HostFor: Computer -> MSSQL_Server (always)
+        SELECT host, computer_sid AS start_id, server_id AS end_id,
+               'MSSQL_HostFor' AS edge_kind
+            FROM server_with_host
+        UNION ALL
+        -- ExecuteOnHost: MSSQL_Server -> Computer (always)
+        SELECT host, server_id AS start_id, computer_sid AS end_id,
+               'MSSQL_ExecuteOnHost' AS edge_kind
+            FROM server_with_host
+        UNION ALL
+        -- Contains: Server -> sysadmin role (only when site_code resolved)
+        SELECT host, server_id, 'sysadmin@' || server_id, 'MSSQL_Contains'
+            FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
+        UNION ALL
+        -- ControlServer: sysadmin role -> Server
+        SELECT host, 'sysadmin@' || server_id, server_id, 'MSSQL_ControlServer'
+            FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
+        UNION ALL
+        -- Contains: Server -> Database
+        SELECT host, server_id,
+               server_id || chr(92) || 'CM_' || site_code, 'MSSQL_Contains'
+            FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
+        UNION ALL
+        -- Contains: Database -> db_owner role
+        SELECT host,
+               server_id || chr(92) || 'CM_' || site_code,
+               'db_owner@' || server_id || chr(92) || 'CM_' || site_code,
+               'MSSQL_Contains'
+            FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
+        UNION ALL
+        -- ControlDB: db_owner role -> Database
+        SELECT host,
+               'db_owner@' || server_id || chr(92) || 'CM_' || site_code,
+               server_id || chr(92) || 'CM_' || site_code,
+               'MSSQL_ControlDB'
+            FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
     )
-    -- HostFor: Computer -> MSSQL_Server (always)
-    SELECT computer_sid AS start_id, server_id AS end_id, 'MSSQL_HostFor' AS edge_kind
-        FROM server_with_host
-    UNION ALL
-    -- ExecuteOnHost: MSSQL_Server -> Computer (always)
-    SELECT server_id AS start_id, computer_sid AS end_id, 'MSSQL_ExecuteOnHost' AS edge_kind
-        FROM server_with_host
-    UNION ALL
-    -- Contains: Server -> sysadmin role (only when site_code resolved)
-    SELECT
-        server_id AS start_id,
-        'sysadmin@' || server_id AS end_id,
-        'MSSQL_Contains' AS edge_kind
-        FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
-    UNION ALL
-    -- ControlServer: sysadmin role -> Server
-    SELECT
-        'sysadmin@' || server_id AS start_id,
-        server_id AS end_id,
-        'MSSQL_ControlServer' AS edge_kind
-        FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
-    UNION ALL
-    -- Contains: Server -> Database
-    SELECT
-        server_id AS start_id,
-        server_id || chr(92) || 'CM_' || site_code AS end_id,
-        'MSSQL_Contains' AS edge_kind
-        FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
-    UNION ALL
-    -- Contains: Database -> db_owner role
-    SELECT
-        server_id || chr(92) || 'CM_' || site_code AS start_id,
-        'db_owner@' || server_id || chr(92) || 'CM_' || site_code AS end_id,
-        'MSSQL_Contains' AS edge_kind
-        FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
-    UNION ALL
-    -- ControlDB: db_owner role -> Database
-    SELECT
-        'db_owner@' || server_id || chr(92) || 'CM_' || site_code AS start_id,
-        server_id || chr(92) || 'CM_' || site_code AS end_id,
-        'MSSQL_ControlDB' AS edge_kind
-        FROM server_with_host WHERE site_code IS NOT NULL AND site_code <> ''
+    -- Fan out across provenance: one edge-row per contributing channel.
+    -- ``MSSQL-Default`` is the fallback tag when the host isn't in any
+    -- provenance source — preserves the previous single-source behaviour.
+    SELECT e.start_id, e.end_id, e.edge_kind,
+           COALESCE(p.tag, 'MSSQL') AS collection_source
+    FROM base_edges e
+    LEFT JOIN {schema}.mssql_server_provenance p ON p.host = e.host
     ;
     """
     _safe_exec(con, sql, "mssql_server_hierarchy_edges")
@@ -1104,7 +1341,8 @@ def _build_coerce_and_relay_edges(con: duckdb.DuckDBPyConnection, schema: str) -
             site.site_code   AS end_id,
             'CoerceAndRelayToAdminService' AS edge_kind,
             srv.fqdn AS victim_fqdn,
-            prov.fqdn AS target_fqdn
+            prov.fqdn AS target_fqdn,
+            'AdminService-SMS_SCI_SysResUse' AS collection_source
         FROM ({auth_users_sql}) au
         JOIN {schema}.site_types site ON site.site_type <> 'Secondary'
         JOIN (
@@ -1146,7 +1384,8 @@ def _build_coerce_and_relay_edges(con: duckdb.DuckDBPyConnection, schema: str) -
                 '@' || db.hostname || ':1433'             AS end_id,
             'CoerceAndRelayToMSSQL'                        AS edge_kind,
             victim.fqdn AS victim_fqdn,
-            db.hostname AS target_fqdn
+            db.hostname AS target_fqdn,
+            'MSSQL-EPA' AS collection_source
         FROM ({auth_users_sql}) au
         JOIN {schema}.site_types site ON site.site_type <> 'Secondary'
         JOIN (
@@ -1181,7 +1420,8 @@ def _build_coerce_and_relay_edges(con: duckdb.DuckDBPyConnection, schema: str) -
             target.computer_sid AS end_id,
             'CoerceAndRelayToSMB' AS edge_kind,
             srv.fqdn AS victim_fqdn,
-            target.fqdn AS target_fqdn
+            target.fqdn AS target_fqdn,
+            'SMB-Signing' AS collection_source
         FROM ({auth_users_sql}) au
         JOIN {schema}.site_types site ON site.site_type <> 'Secondary'
         JOIN (
@@ -1243,7 +1483,8 @@ def _build_coerce_and_relay_edges(con: duckdb.DuckDBPyConnection, schema: str) -
             target.computer_sid AS end_id,
             'CoerceAndRelayToSMB' AS edge_kind,
             srv.fqdn AS victim_fqdn,
-            target.fqdn AS target_fqdn
+            target.fqdn AS target_fqdn,
+            'SMB-Signing' AS collection_source
         FROM ({auth_users_sql}) au
         JOIN (
             SELECT DISTINCT site_code, LOWER(hostname) AS hostname,
@@ -1377,27 +1618,27 @@ def _build_mssql_gettgs_edges(con: duckdb.DuckDBPyConnection, schema: str) -> No
     SELECT
         svc.svc_user_sid AS start_id,
         svc.host || ':1433' AS end_id,
-        'MSSQL_ServiceAccountFor' AS edge_kind
+        'MSSQL_ServiceAccountFor' AS edge_kind,
+        'AdminService-SMS_SCI_SysResUse' AS collection_source
     FROM svc
     UNION ALL
     -- HasSession : Computer (db host) -> User (service account)
     SELECT
         svc.host_computer_sid AS start_id,
         svc.svc_user_sid     AS end_id,
-        'HasSession'         AS edge_kind
+        'HasSession'         AS edge_kind,
+        'AdminService-SMS_SCI_SysResUse' AS collection_source
     FROM svc
     WHERE svc.host_computer_sid IS NOT NULL
     UNION ALL
     -- MSSQL_GetAdminTGS : svc -> MSSQL_Server (host:1433).
     -- Fires once per (svc, server) where the svc account has a MSSQLSvc/<host>
     -- SPN registered in AD. CMBP: lib/collectors/mssql_collector.py:575.
-    -- The SPN match is the Kerberoasting precondition — without an MSSQLSvc
-    -- SPN the service account ticket isn't Kerberoastable, and the edge
-    -- doesn't fire.
     SELECT
         svc.svc_user_sid AS start_id,
         svc.host || ':1433' AS end_id,
-        'MSSQL_GetAdminTGS' AS edge_kind
+        'MSSQL_GetAdminTGS' AS edge_kind,
+        'AdminService-SMS_SCI_SysResUse' AS collection_source
     FROM svc
     WHERE svc.svc_spns IS NOT NULL
       AND CAST(svc.svc_spns AS VARCHAR) ILIKE '%MSSQLSvc/' || svc.host || '%'
@@ -1408,7 +1649,8 @@ def _build_mssql_gettgs_edges(con: duckdb.DuckDBPyConnection, schema: str) -> No
     SELECT
         svc.svc_user_sid AS start_id,
         msa.login_name || '@' || msa.server_id AS end_id,
-        'MSSQL_GetTGS' AS edge_kind
+        'MSSQL_GetTGS' AS edge_kind,
+        'AdminService-SMS_SCI_SysResUse' AS collection_source
     FROM svc
     JOIN {schema}.mssql_sysadmin_edges msa
         ON LOWER(SPLIT_PART(msa.server_id, ':', 1)) = svc.host
@@ -1477,7 +1719,8 @@ def _build_secret_policy_edges(con: duckdb.DuckDBPyConnection, schema: str) -> N
         SELECT DISTINCT
             'GUID:' || cd.guid AS start_id,
             {id_expr}          AS end_id,
-            '{edge_kind}'      AS edge_kind
+            '{edge_kind}'      AS edge_kind,
+            'AdminService-SecretPolicy' AS collection_source
         FROM {schema}.{table} t
         JOIN {schema}.adminservice_client_devices cd
             ON LOWER(cd.site_code) = LOWER({site_expr})
@@ -1537,7 +1780,8 @@ def _build_has_member_edges(con: duckdb.DuckDBPyConnection, schema: str) -> None
     CREATE OR REPLACE TABLE {schema}.has_member_edges AS
     SELECT DISTINCT
         cm.collection_id || '@' || h.root_code AS start_id,
-        'GUID:' || cd.guid                      AS end_id
+        'GUID:' || cd.guid                      AS end_id,
+        'AdminService-SMS_FullCollectionMembership' AS collection_source
     FROM {schema}.adminservice_collection_members cm
     JOIN {schema}.adminservice_client_devices cd
       ON cd.resource_id      = cm.resource_id
@@ -1593,36 +1837,30 @@ def _build_has_client_edges(con: duckdb.DuckDBPyConnection, schema: str) -> None
     # duplicate, tagged with ``LDAP-CmRcService``). The output-stage
     # dedup keys on (start, end, kind, collection_source) so each row
     # produces a distinct edge in the JSON.
+    # PS1 emits SCCM_HasClient once per (assigned_site, device) with TWO
+    # collection_source tags: 'AdminService-ClientDevices' (from
+    # SMS_CombinedDeviceResources) and 'AdminService-SMS_R_System' (from
+    # SMS_R_System). The aggregator emits one edge per row, so we emit two
+    # rows per (site, device) — one per tag — and the output packager
+    # serialises them as two edges with the same (start, end, kind) but
+    # different collectionSource. BloodHound deduplicates per the agreed
+    # ``(start, end, kind, collectionSource)`` key.
     sql = f"""
     CREATE OR REPLACE TABLE {schema}.has_client_edges AS
-    WITH unique_paths AS (
-        -- One canonical edge per (provider_site_in_hierarchy, device).
-        -- The CAS+Primary cross-product reflects the multi-provider
-        -- AdminService crawl ((PS1, dev) and (CAS, dev) both appear).
-        SELECT s.site_code AS start_id,
-               'GUID:' || cd.guid AS end_id,
-               'AdminService' AS collection_source
-        FROM {schema}.adminservice_client_devices cd
-        CROSS JOIN {schema}.site_types s
-        WHERE cd.source LIKE 'AdminService%'
-          AND s.site_type IN ('CAS', 'Primary')
-          AND cd.guid IS NOT NULL AND cd.guid <> ''
-    ),
-    cmrc_rows AS (
-        -- LDAP-CmRcService rows reuse the AdminService GUID when one
-        -- exists. Each row produces ONE duplicate edge (assigned_site,
-        -- device) on top of the canonical AdminService edge.
+    WITH base AS (
         SELECT cd.site_code AS start_id,
-               'GUID:' || cd.guid AS end_id,
-               'LDAP-CmRcService' AS collection_source
+               'GUID:' || cd.guid AS end_id
         FROM {schema}.adminservice_client_devices cd
-        WHERE cd.source = 'LDAP-CmRcService'
-          AND cd.guid IS NOT NULL AND cd.guid <> ''
+        WHERE cd.guid IS NOT NULL AND cd.guid <> ''
           AND cd.site_code IS NOT NULL AND cd.site_code <> ''
     )
-    SELECT DISTINCT start_id, end_id, collection_source FROM unique_paths
+    SELECT DISTINCT start_id, end_id,
+                    'AdminService-ClientDevices' AS collection_source
+    FROM base
     UNION ALL
-    SELECT DISTINCT start_id, end_id, collection_source FROM cmrc_rows
+    SELECT DISTINCT start_id, end_id,
+                    'AdminService-SMS_R_System' AS collection_source
+    FROM base
     ;
     """
     _safe_exec(con, sql, "has_client_edges")
@@ -1662,17 +1900,20 @@ def _build_client_user_edges(con: duckdb.DuckDBPyConnection, schema: str) -> Non
         FROM {schema}.adminservice_client_devices cd
         WHERE cd.guid IS NOT NULL AND cd.guid <> ''
     )
-    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasADLastLogonUser' AS edge_kind
+    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasADLastLogonUser' AS edge_kind,
+           'AdminService-ClientDevices' AS collection_source
     FROM device_users du JOIN {schema}.ldap_users u
         ON LOWER(u.sam_account_name) = du.last_user_sam
     WHERE du.last_user_sam <> ''
     UNION ALL
-    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasCurrentUser' AS edge_kind
+    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasCurrentUser' AS edge_kind,
+           'AdminService-ClientDevices' AS collection_source
     FROM device_users du JOIN {schema}.ldap_users u
         ON LOWER(u.sam_account_name) = du.curr_user_sam
     WHERE du.curr_user_sam <> ''
     UNION ALL
-    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasPrimaryUser' AS edge_kind
+    SELECT du.device_id AS start_id, u.object_sid AS end_id, 'SCCM_HasPrimaryUser' AS edge_kind,
+           'AdminService-ClientDevices' AS collection_source
     FROM device_users du JOIN {schema}.ldap_users u
         ON LOWER(u.sam_account_name) = du.prim_user_sam
     WHERE du.prim_user_sam <> ''
@@ -1723,7 +1964,7 @@ def _build_is_assigned_edges(con: duckdb.DuckDBPyConnection, schema: str) -> Non
     SELECT DISTINCT
         LOWER(rm.admin_logon_name) || '@' || h.root_code AS start_id,
         rm.role_id || '@' || h.root_code                  AS end_id,
-        'AdminService-SMS_Admin@' || h.member_code        AS collection_source
+        'AdminService-SMS_Admin'                          AS collection_source
     FROM {schema}.adminservice_role_members rm
     JOIN {schema}.hierarchies h
       ON h.root_code = (
@@ -1737,7 +1978,7 @@ def _build_is_assigned_edges(con: duckdb.DuckDBPyConnection, schema: str) -> Non
     SELECT DISTINCT
         LOWER(rm.admin_logon_name) || '@' || h.root_code AS start_id,
         rm.scope_collection_id || '@' || h.root_code      AS end_id,
-        'AdminService-SMS_Admin@' || h.member_code        AS collection_source
+        'AdminService-SMS_Admin'                          AS collection_source
     FROM {schema}.adminservice_role_members rm
     JOIN {schema}.hierarchies h
       ON h.root_code = (
@@ -1796,7 +2037,7 @@ def _build_is_mapped_to_edges(con: duckdb.DuckDBPyConnection, schema: str) -> No
         SELECT DISTINCT
             u.object_sid                                       AS start_id,
             LOWER(a.logon_name) || '@' || h.root_code           AS end_id,
-            'AdminService-SMS_Admin@' || h.member_code          AS collection_source
+            'AdminService-SMS_Admin'                            AS collection_source
         FROM {schema}.adminservice_admins a
         JOIN {schema}.hierarchies h
           ON h.root_code = (
@@ -1813,7 +2054,7 @@ def _build_is_mapped_to_edges(con: duckdb.DuckDBPyConnection, schema: str) -> No
         SELECT DISTINCT
             g.object_sid                                       AS start_id,
             LOWER(a.logon_name) || '@' || h.root_code           AS end_id,
-            'AdminService-SMS_Admin@' || h.member_code          AS collection_source
+            'AdminService-SMS_Admin'                            AS collection_source
         FROM {schema}.adminservice_admins a
         JOIN {schema}.hierarchies h
           ON h.root_code = (
@@ -1854,7 +2095,8 @@ def _build_r_system_member_of_edges(con: duckdb.DuckDBPyConnection, schema: str)
     CREATE OR REPLACE TABLE {schema}.r_system_member_of_edges AS
     SELECT DISTINCT
         c.object_sid AS start_id,
-        g.object_sid AS end_id
+        g.object_sid AS end_id,
+        'AdminService-SMS_R_System' AS collection_source
     FROM {schema}.adminservice_r_system_security_groups r
     JOIN {schema}.ldap_computers c
         ON LOWER(c.name) = LOWER(r.machine_name)
@@ -1889,7 +2131,8 @@ def _build_registry_has_session_edges(con: duckdb.DuckDBPyConnection, schema: st
         parts.append(f"""
         SELECT DISTINCT
             c.object_sid AS start_id,
-            u.object_sid AS end_id
+            u.object_sid AS end_id,
+            'RemoteRegistry-CurrentUser' AS collection_source
         FROM {schema}.registry_current_users r
         JOIN {schema}.ldap_users u
             ON LOWER(u.sam_account_name) = LOWER(LIST_EXTRACT(STRING_SPLIT(r.user_name, chr(92)), -1))
@@ -1908,7 +2151,8 @@ def _build_registry_has_session_edges(con: duckdb.DuckDBPyConnection, schema: st
         parts.append(f"""
         SELECT DISTINCT
             c.object_sid AS start_id,
-            u.object_sid AS end_id
+            u.object_sid AS end_id,
+            'WMI-UsersSeen' AS collection_source
         FROM {schema}.wmi_users_seen w
         JOIN {schema}.ldap_users u
             ON LOWER(u.sam_account_name) = LOWER(LIST_EXTRACT(STRING_SPLIT(w.user_name, chr(92)), -1))
@@ -1952,7 +2196,8 @@ def _build_has_stored_account_edges(con: duckdb.DuckDBPyConnection, schema: str)
     CREATE OR REPLACE TABLE {schema}.has_stored_account_edges AS
     SELECT DISTINCT
         r.site_code  AS start_id,
-        u.object_sid AS end_id
+        u.object_sid AS end_id,
+        'AdminService-SMS_SCI_Reserved' AS collection_source
     FROM {schema}.adminservice_reserved_accounts r
     JOIN {schema}.ldap_users u
         ON LOWER(u.sam_account_name) =
@@ -1993,7 +2238,8 @@ def _build_r_user_member_of_edges(con: duckdb.DuckDBPyConnection, schema: str) -
     CREATE OR REPLACE TABLE {schema}.r_user_member_of_edges AS
     SELECT DISTINCT
         u.object_sid AS start_id,
-        g.object_sid AS end_id
+        g.object_sid AS end_id,
+        'AdminService-SMS_R_User' AS collection_source
     FROM {schema}.adminservice_r_user_security_groups r
     JOIN {schema}.ldap_users u
         ON LOWER(u.object_sid) = LOWER(r.user_sid)
@@ -2025,6 +2271,11 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _build_targets(con, schema)
     _build_site_types(con, schema)
     _build_hierarchies(con, schema)
+    _build_mssql_server_provenance(con, schema)
+    # Convert-time lookup precomputation views (Phase E2).
+    _build_computer_sccm_infra(con, schema)
+    _build_ad_principals(con, schema)
+    _build_host_site_system_roles(con, schema)
 
     _build_admins_replicated_to(con, schema)
     _build_contains(con, schema)

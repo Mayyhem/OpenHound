@@ -14,8 +14,8 @@ from openhound_sccm.kinds import nodes as nk
 
 from ._placeholder import register_placeholder
 
-LocalAdminRequiredEdge = register_placeholder(
-    name="LocalAdminRequiredEdge",
+SCCMLocalAdminRequiredEdge = register_placeholder(
+    name="SCCMLocalAdminRequiredEdge",
     description="Schema-only placeholder for LocalAdminRequired; emitter in aggregator.py.",
     edges=[
         EdgeDef(kind=ek.LOCAL_ADMIN_REQUIRED, start=nk.COMPUTER, end=nk.COMPUTER,

@@ -29,6 +29,14 @@ class UserProperties(SCCMNodeProperties):
 
     Field names match the camelCase used by ConfigManBearPig's output so the
     test runner's wildcard patterns match unchanged.
+
+    Attributes:
+        userPrincipalName: AD userPrincipalName.
+        objectGuid: AD objectGUID.
+        servicePrincipalName: AD SPNs.
+        Type: Marker matching CMBP property (always "User").
+        domain: AD domain (NetBIOS or DNS).
+        SCCMInfra: True when this User appears in SMS_R_User (i.e. AdminService discovered them).
     """
 
     userPrincipalName: Optional[str] = field(default=None, metadata={"description": "AD userPrincipalName"})
@@ -77,20 +85,14 @@ class User(BaseAsset):
         # them). Drives the output-stage prune so AdminService-known
         # users keep their MemberOf edges even when no other anchor
         # path pulls them in.
-        sccm_infra: Optional[bool] = None
-        lookup = getattr(self, "_lookup", None)
-        if lookup is not None and hasattr(lookup, "user_is_sccm_infra"):
-            try:
-                sccm_infra = lookup.user_is_sccm_infra(self.object_sid) or None
-            except Exception:
-                sccm_infra = None
+        sccm_infra = self._lookup.user_is_sccm_infra(self.object_sid) or None
         return SCCMNode(
             kinds=[nk.USER, nk.BASE],
             properties=UserProperties(
                 node_id=self.object_sid,
                 name=display,
                 displayname=display,
-                environmentid=self.domain or "",
+                environmentid=self.domain or None,
                 samAccountName=self.sam_account_name,
                 distinguishedName=self.distinguished_name,
                 objectGuid=self.object_guid,

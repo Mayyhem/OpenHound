@@ -127,34 +127,39 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
 
 
 def _apply_log_level(verbose: bool, debug: bool) -> None:
-    """Adjust console logging when ``-v`` / ``--verbose`` or ``--debug`` is set.
+    """Adjust console logging when ``-v`` / ``--verbose`` or ``--debug`` is set,
+    and install the ``[target][phase]`` prefix filter.
 
     ``-v``      → INFO (status messages like auto-detected domain / resolved DC).
     ``--debug`` → DEBUG (everything, including dlt and ldap3 internals).
     Both        → DEBUG wins.
     Neither     → leave the framework's default (CLI level ERROR).
 
-    The openhound framework configures the root logger and its RichHandler at
-    *import* time (``openhound.core.logging`` runs ``logger_override.setup()``
-    on load) with ``cli_level`` defaulting to ERROR. By the time this Typer
-    command callback runs, those handlers already exist and each one filters
-    at its own level — so setting the root-logger level alone isn't enough,
-    the RichHandler still drops anything below ERROR. We lower every existing
-    handler too, on both the root logger and the ``dlt`` logger (which the
-    framework configures separately).
+    Stdlib-only: keeps the openhound framework's RichHandler in place and just
+    plugs in a ``LogContextFilter`` that rewrites each ``LogRecord.msg`` to
+    prepend ``[<host>][<phase>] `` based on the currently-active
+    ``target_context`` / ``phase_context`` (see ``log_context.py``). The
+    framework keeps colorizing levels / timestamps as before; only the message
+    text gets the prefix.
     """
+    from .log_context import install_filter
+
     if debug:
         level_name, level = "DEBUG", logging.DEBUG
     elif verbose:
         level_name, level = "INFO", logging.INFO
     else:
-        return
-    os.environ["RUNTIME__LOG_LEVEL"] = level_name
-    os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
-    for log in (logging.getLogger(), logging.getLogger("dlt")):
-        log.setLevel(level)
-        for handler in log.handlers:
-            handler.setLevel(level)
+        level_name, level = None, None
+
+    if level_name is not None:
+        os.environ["RUNTIME__LOG_LEVEL"] = level_name
+        os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
+        for log in (logging.getLogger(), logging.getLogger("dlt")):
+            log.setLevel(level)
+            for handler in log.handlers:
+                handler.setLevel(level)
+
+    install_filter()
 
 
 def _detect_windows_domain() -> Optional[str]:
@@ -399,13 +404,6 @@ def _preproc_table_map() -> dict[str, str]:
         "registry_sccm_databases",
         "registry_current_users",
         "registry_sccm_components",
-        "mssql_logins",
-        "mssql_databases",
-        "mssql_database_users",
-        "mssql_server_roles",
-        "mssql_database_roles",
-        "mssql_role_members",
-        "mssql_linked_servers",
         "mssql_epa_flags",
         "adminservice_admins",
         "adminservice_collections",
@@ -416,6 +414,8 @@ def _preproc_table_map() -> dict[str, str]:
         "adminservice_task_sequences",
         "adminservice_collection_variables",
         "adminservice_site_systems",
+        "adminservice_sites",
+        "adminservice_site_definitions",
         "adminservice_r_system_security_groups",
         "adminservice_r_user_security_groups",
         "adminservice_reserved_accounts",
