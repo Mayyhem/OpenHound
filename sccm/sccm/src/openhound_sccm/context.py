@@ -103,6 +103,18 @@ class SourceContext:
     # dedup set, a single SCCM site visible from all three channels would
     # produce three SCCM_Site nodes with the same node_id.
     _emitted_site_codes: Optional[set[str]] = None
+    # Phase 3a — Cache of hostnames that the RemoteRegistry phase confirmed
+    # as site DB hosts (read from the
+    # ``SMS_SITE_COMPONENT_MANAGER\Multisite Component Servers`` registry
+    # subkey on each reachable site server). The set is populated as a
+    # side-effect of the ``registry_sccm_databases`` resource yielding
+    # rows, so it is *only* trustworthy after that resource has run. The
+    # ``derived_nodes`` resource (which runs later in the source tuple)
+    # reads this set to gate the MSSQL_Database / MSSQL_DatabaseRole
+    # synthesis when ``--disable-possible-edges`` is set, matching PS1
+    # and CMBP-python's rule that those nodes only exist when registry
+    # confirms the host.
+    _registry_confirmed_db_hosts: Optional[set[str]] = None
 
     @property
     def system_management_dn(self) -> str:
@@ -349,6 +361,45 @@ class SourceContext:
         self._smb_shares[hostname] = result
         return result
 
+    def note_registry_confirmed_db_host(self, hostname: str) -> None:
+        """Mark *hostname* as a site DB host confirmed via RemoteRegistry.
+
+        Called by the ``registry_sccm_databases`` resource for each
+        (site_server, db_host) pair it reads out of the registry. The
+        ``derived_nodes`` resource later reads
+        ``registry_confirmed_db_hosts()`` to gate MSSQL_Database /
+        MSSQL_DatabaseRole synthesis on registry confirmation (PS1's
+        rule when ``-DisablePossibleEdges`` is set).
+        """
+        if self._registry_confirmed_db_hosts is None:
+            self._registry_confirmed_db_hosts = set()
+        if hostname:
+            self._registry_confirmed_db_hosts.add(hostname.lower())
+
+    def registry_confirmed_db_hosts(self) -> set[str]:
+        """Return lowercased hostnames confirmed as site DB hosts.
+
+        PS1's literal gate is "RemoteRegistry Multisite Component Servers
+        subkey is readable", but impacket's WinReg client can't enumerate
+        that subkey as low-privileged users (roanalyst, lowpriv) even
+        though PowerShell's native registry remoting can. To keep parity
+        with PS1's *intent* — "emit the database hierarchy when the host
+        is genuinely a site DB" — we treat the AdminService
+        ``SMS_SCI_SiteDefinition.SQLServerName`` field as an equivalent
+        confirmation signal. AdminService publishes the same configured
+        value, just over a different transport, and it's reachable by
+        roanalyst where RemoteRegistry is not. Domainadmin still hits the
+        registry path first; lowpriv (no AdminService access) still gets
+        the empty set, matching PS1.
+        """
+        confirmed: set[str] = set(self._registry_confirmed_db_hosts or ())
+        for payload in (self._adminservice_payloads or {}).values():
+            for sd in payload.get("site_definitions") or []:
+                sql_server = (sd.get("SQLServerName") or "").strip().lower()
+                if sql_server:
+                    confirmed.add(sql_server)
+        return confirmed
+
     # ---- SCCM-discovered host gate -----------------------------------------
 
     def sccm_discovered_hosts(self) -> set[str]:
@@ -485,21 +536,18 @@ class SourceContext:
         # If we ever need it, we can have ``dns_management_points`` push its
         # rows back into ``self._sccm_discovered_hosts``.
 
-        # 5. AdminService discovered hosts. We *only* fold these in if the
-        # AdminService payload cache has already been populated by the
-        # AdminService phase (Phase 7). Calling ``adminservice_payloads()``
-        # here would eagerly fire Phase 7's HTTP work during MSSQL/Registry
-        # (Phase 5–6) and break the documented phase ordering:
-        #   1 LDAP → 2 Local → 3 DNS → 4 DHCP → 5 Registry → 6 MSSQL →
-        #   7 AdminService → 8 WMI → 9 HTTP → 10 SMB.
-        # Since every current caller of this method runs before Phase 7
-        # (mssql_epa_flags, registry_current_users, ldap_sites SMB fold-in),
-        # the AdminService cache is normally empty at call time and this
-        # branch contributes nothing — matching CMBP, whose pre-AdminService
-        # phases see only the LDAP-derived TargetManager set.
-        if self._adminservice_payloads:
+        # 5. AdminService discovered hosts. The MSSQL phase needs to see
+        # the site DB hosts (CAS-DB, PS1-DB, ...) which are not reachable
+        # through any pure-LDAP channel — they only surface through
+        # AdminService SMS_SCI_SysResUse / SMS_SCI_SiteDefinition. We
+        # eagerly populate the AdminService cache here so the MSSQL probe
+        # set is complete on first call. The cache is idempotent: later
+        # AdminService resources just reuse it. For lowpriv (no
+        # AdminService access) this returns an empty dict.
+        admin_payloads = self.adminservice_payloads()
+        if admin_payloads:
             try:
-                for payload in self._adminservice_payloads.values():
+                for payload in admin_payloads.values():
                     # SMS_SCI_SysResUse: per-site role hosts (Site Server, SMS
                     # Provider, MP, DP, Reporting SP, etc.)
                     for ss in payload.get("site_systems", []) or []:

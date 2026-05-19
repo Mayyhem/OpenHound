@@ -40,7 +40,12 @@ class GroupProperties(SCCMNodeProperties):
     objectGuid: Optional[str] = field(default=None, metadata={"description": "AD objectGUID"})
     groupType: Optional[int] = field(default=None, metadata={"description": "AD groupType bitmask"})
     Type: Optional[str] = field(default="Group", metadata={"description": "Marker matching CMBP property"})
-    domain: Optional[str] = field(default=None, metadata={"description": "AD domain (NetBIOS or DNS)"})
+    # PS1-style PascalCase AD properties (see Computer model).
+    Domain: Optional[str] = field(default=None, metadata={"description": "AD domain (PS1 PascalCase form)"})
+    SamAccountName: Optional[str] = field(default=None, metadata={"description": "sAMAccountName (PS1 PascalCase form)"})
+    Enabled: Optional[bool] = field(default=None, metadata={"description": "Whether the AD group is enabled (PS1 PascalCase form; groups don't really have UAC bit but PS1 emits ``Enabled=True``)"})
+    IsDomainPrincipal: Optional[bool] = field(default=None, metadata={"description": "Whether this principal is sourced from AD (PS1 PascalCase form)"})
+    SCCMResourceIDs: Optional[list[str]] = field(default=None, metadata={"description": "List of ResourceID@SiteCode of users assigned to this group (per-site SMS_R_User fan-out)"})
 
 
 @app.asset(
@@ -72,6 +77,33 @@ class Group(BaseAsset):
     @property
     def as_node(self) -> SCCMNode:
         display = self.name or self.sam_account_name or self.object_sid
+        # SCCMResourceIDs for groups — PS1 emits the ResourceID@SiteCode
+        # entries of users whose ``SecurityGroupName`` references this
+        # group (so the group's "members" appear in BloodHound queries
+        # built against PS1's output). Pulled by matching the group's
+        # SamAccountName against ``security_group_name`` in
+        # ``adminservice_r_user_security_groups`` (which stores it as
+        # ``"<DOMAIN>\<SAM>"``).
+        sccm_resource_ids: Optional[list[str]] = None
+        try:
+            lookup = getattr(self, "_lookup", None)
+            if lookup is not None and self.sam_account_name:
+                client = lookup.client
+                schema = lookup.schema
+                needle = f"%\\{self.sam_account_name}"
+                rows = client.execute(
+                    f"SELECT DISTINCT resource_id, site_code "
+                    f"FROM {schema}.adminservice_r_user_security_groups "
+                    f"WHERE LOWER(security_group_name) LIKE LOWER(?) "
+                    f"  AND resource_id IS NOT NULL AND site_code IS NOT NULL "
+                    f"ORDER BY site_code, resource_id",
+                    [needle],
+                ).fetchall()
+                if rows:
+                    sccm_resource_ids = [f"{rid}@{sc}" for rid, sc in rows]
+        except Exception:
+            pass
+
         return SCCMNode(
             kinds=[nk.GROUP, nk.BASE],
             properties=GroupProperties(
@@ -79,14 +111,17 @@ class Group(BaseAsset):
                 name=display,
                 displayname=display,
                 environmentid=self.domain or None,
-                samAccountName=self.sam_account_name,
                 distinguishedName=self.distinguished_name,
                 objectGuid=self.object_guid,
                 groupType=self.group_type,
-                isDomainPrincipal=True,
                 collectionSource=["LDAP"],
                 Type="Group",
-                domain=self.domain,
+                # PS1-style PascalCase AD-property casing.
+                Domain=self.domain,
+                SamAccountName=self.sam_account_name,
+                Enabled=True,
+                IsDomainPrincipal=True,
+                SCCMResourceIDs=sccm_resource_ids,
             ),
         )
 

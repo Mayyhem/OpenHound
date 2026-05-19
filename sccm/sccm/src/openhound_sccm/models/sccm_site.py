@@ -63,6 +63,7 @@ class SCCMSiteProperties(SCCMNodeProperties):
     version: Optional[str] = field(default=None, metadata={"description": "SCCM site version from SMS_Site.Version"})
     buildNumber: Optional[int] = field(default=None, metadata={"description": "SCCM build number parsed from version (e.g. 9106 from '5.00.9106.1000'). CMBP/PS1 emit as int."})
     versionCVEs: Optional[list[str]] = field(default=None, metadata={"description": "Known CVEs for this site version (computed from version + CVE table)"})
+    installDir: Optional[str] = field(default=None, metadata={"description": "SMS_Site.InstallDir — site server installation directory"})
     siteSystemRoles: Optional[list[str]] = field(default=None, metadata={"description": "List of 'RoleName@hostname' entries for site systems serving this site"})
     adminUsers: Optional[list[str]] = field(default=None, metadata={"description": "List of admin user logon names assigned to this site"})
     storedAccounts: Optional[list[str]] = field(default=None, metadata={"description": "List of stored account names (SMS_SCI_Reserved) for this site"})
@@ -127,6 +128,7 @@ class SCCMSite(BaseAsset):
         version = self.version
         site_type = self.site_type
         parent_site_code = self.parent_site_code
+        install_dir: Optional[str] = None
         if lookup is not None:
             (
                 e_display,
@@ -137,6 +139,7 @@ class SCCMSite(BaseAsset):
                 e_version,
                 e_type,
                 e_parent,
+                e_install_dir,
             ) = lookup.admin_enrichment_for_site(self.site_code)
             display_name = display_name or e_display
             site_server_name = site_server_name or e_server
@@ -146,6 +149,7 @@ class SCCMSite(BaseAsset):
             version = version or e_version
             site_type = site_type or e_type
             parent_site_code = parent_site_code or e_parent
+            install_dir = e_install_dir
 
         # versionCVEs — computed from version via the CMBP-derived CVE table.
         version_cves: Optional[list[str]] = None
@@ -245,6 +249,7 @@ class SCCMSite(BaseAsset):
                 version=version,
                 buildNumber=build_number,
                 versionCVEs=version_cves,
+                installDir=install_dir,
                 siteSystemRoles=site_system_roles,
                 adminUsers=admin_users,
                 storedAccounts=stored_accounts,

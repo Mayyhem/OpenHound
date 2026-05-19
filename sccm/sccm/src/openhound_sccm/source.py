@@ -120,6 +120,7 @@ from .collectors.local import (  # noqa: E402
 from .collectors.mssql import mssql_epa_flags  # noqa: E402
 from .collectors.registry import (  # noqa: E402
     registry_current_users,
+    registry_mssql_settings,
     registry_sccm_components,
     registry_sccm_databases,
 )
@@ -284,6 +285,7 @@ def source(
         registry_sccm_components(ctx),
         registry_sccm_databases(ctx),
         registry_current_users(ctx),
+        registry_mssql_settings(ctx),
         mssql_epa_flags(ctx),
         # Phase 3b — AdminService REST API. Each resource shares a per-host
         # cache built lazily by ``ctx.adminservice_payloads()``.

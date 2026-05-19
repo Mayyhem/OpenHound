@@ -44,6 +44,7 @@ from .aggregator import _MSSQLSynthProperties
 
 # Map row "kind" tokens to (node-kind constant, default Type marker).
 _KIND_MAP = {
+    "MSSQL_Server": (nk.MSSQL_SERVER, "MSSQL_Server"),
     "MSSQL_Login": (nk.MSSQL_LOGIN, "MSSQL_Login"),
     "MSSQL_DatabaseUser": (nk.MSSQL_DATABASE_USER, "MSSQL_DatabaseUser"),
     "MSSQL_DatabaseRole": (nk.MSSQL_DATABASE_ROLE, "MSSQL_DatabaseRole"),
@@ -96,6 +97,24 @@ class DerivedNode(BaseAsset):
             return None
         node_kind, type_marker = spec
         name = self.name or self.node_id
+        # ``SQLServer`` is the parent server id (``<computer_SID>:1433``).
+        # For Server itself, this is just the node_id. For Database /
+        # Login / DatabaseUser / Role kinds, the server id is the prefix
+        # of node_id up to ``\`` (for Database/Role) or after ``@`` and
+        # before any ``\`` (for Login/DatabaseUser).
+        sql_server: Optional[str] = None
+        nid = self.node_id or ""
+        if self.kind == "MSSQL_Server":
+            sql_server = nid
+        elif "@" in nid:
+            # Login: <domain>\<sam>@<SID>:1433
+            # DatabaseUser: <domain>\<sam>@<SID>:1433\CM_<site>
+            after_at = nid.split("@", 1)[1]
+            sql_server = after_at.split("\\", 1)[0] or None
+        elif "\\" in nid:
+            # Database: <SID>:1433\CM_<site>
+            # DatabaseRole/ServerRole: <role>@<SID>:1433 — handled above
+            sql_server = nid.split("\\", 1)[0] or None
         return SCCMNode(
             kinds=[node_kind],
             properties=_MSSQLSynthProperties(
@@ -111,6 +130,8 @@ class DerivedNode(BaseAsset):
                 memberOfRoles=self.member_of_roles,
                 database=self.database,
                 login=self.login,
+                SQLServer=sql_server,
+                isFixedRole=self.is_fixed_role,
                 Type=type_marker,
             ),
         )

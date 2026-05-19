@@ -6,6 +6,1491 @@ enumeration tool, "CMBP") into the OpenHound DLT extension at `sccm/sccm/`. The 
 histogram for three users (`MAYYHEM\lowpriv`, `MAYYHEM\roanalyst`, `MAYYHEM\domainadmin`)
 between the CMBP zip and the new OpenHound zip.
 
+## Project status (2026-05-19, twenty-third session — PS1 property-bag parity + broken HTTP probe fix)
+
+**Headline.** This session closed the remaining PS1-only property gaps on
+node bags (~10 rounds of property enrichment) and unblocked the HTTP
+collector after discovering it had been silently dead since the
+AdminService refactor.
+
+**Histogram state (unchanged from 22nd session, re-verified):**
+
+| Mode | User | PS1 | CMBP-python | OpenHound |
+|------|------|-----|-------------|-----------|
+| DPE     | domainadmin | 169 / 424 | 169 / 424 | 169 / 424 |
+| DPE     | roanalyst   | 169 / 424 | 169 / 419 | 169 / 419 |
+| DPE     | lowpriv     | (PS1 runs as logon user) | 25 / 54 | 25 / 54 |
+| no-DPE  | domainadmin | 169 / 437 | 169 / 437 | 169 / 437 |
+
+Re-verified the 22nd-session three-way bit-identical totals with the
+http-probe fix in place, both with and without `--disable-possible-edges`.
+The 2-edge `HasSession` / `LocalAdminRequired` drift between PS1 and
+CMBP/OH is present in both modes and is the deferred PS1-SEC RemoteRegistry
+RPC issue (CMBP/OH agree; PS1's native registry remoting sees PS1-SEC
+slightly differently). Net edge totals match because the two drifts
+cancel.
+
+### Critical bug found: HTTP collector was dead
+
+[collectors/http.py](sccm/sccm/src/openhound_sccm/collectors/http.py)
+imported `_CURL_PATH` from `clients/adminservice.py`. That symbol was
+**removed** when AdminService switched from curl-subprocess to
+`requests + pyspnego`, but the import in `http.py` was never updated.
+Every call to `_curl_probe()` raised `ImportError` and DLT silently
+swallowed the failure — all three resources (`http_management_points`,
+`http_distribution_points`, `http_smsproviders`) had been producing
+**zero rows for an unknown number of sessions**.
+
+The histogram parity tests didn't catch this because the downstream
+SQL (`local_admin_required_edges`, etc.) used multiple input tables
+and `_table_exists()` guards — when http_* tables didn't exist, the
+queries silently dropped the http branch from the UNION.
+
+**Fix.** Replaced curl subprocess with `requests.get(verify=False,
+allow_redirects=False)`. Removed `import subprocess`, `import os`,
+`import platform`, `import re`. Added `_column_exists(schema,
+"http_management_points", "site_code")` guard in
+[transforms.py:966](sccm/sccm/src/openhound_sccm/transforms.py#L966)
+since the http probe doesn't yield a site_code column (DNS SRV and
+AdminService do).
+
+### Property-bag PS1 parity (rounds 1-11)
+
+Added PS1-style PascalCase aliases and missing fields across all
+14 node kinds (Computer, User, Group, SCCM_AdminUser, SCCM_Site,
+SCCM_Collection, SCCM_SecurityRole, SCCM_ClientDevice, MSSQL_Server,
+MSSQL_Database, MSSQL_DatabaseUser, MSSQL_Login, MSSQL_ServerRole,
+MSSQL_DatabaseRole). Identifiers switched to SID-based where PS1
+uses SIDs (e.g. MSSQL_Server now uses `<computer_sid>:1433`).
+Key additions:
+
+- Computer: PascalCase `Domain` / `SamAccountName` / `DNSHostName` /
+  `Enabled` / `IsDomainPrincipal` / `CN`; `objectClass`,
+  `SCCMHasClientRemoteControlSPN`, `SMBSigningRequired`,
+  `SCCMHostsContentLibrary`, `SCCMIsPXESupportEnabled`,
+  `networkBootServer`, `SCCMResourceIDs`,
+  `SCCMClientDeviceIdentifier`, `disableLoopbackCheck`,
+  `restrictReceivingNtlmTraffic`, `SCCMClientCertificateRequired`
+- User: PascalCase variants, `SCCMResourceIDs`, `storedInSCCMSite`
+- Group: PascalCase variants, `Enabled=True` default,
+  `SCCMResourceIDs` from r_user_security_groups
+- MSSQL_Server: `dnsHostName`, `extendedProtection`,
+  `SQLServiceAccountName`, `SQLServiceAccountDomainSID`,
+  `databases`, `SCCMSite`, `forceEncryption`
+- SCCM_ClientDevice: ~20 fields including `SMSID`, `primaryUser*`,
+  `currentLogonUser*`, `ADLastLogonUser*`, `resourceID@site`,
+  `collectionIds`, `collectionNames`, `deviceOS`, `deviceOSBuild`,
+  `currentManagementPoint*`
+- SCCM_Collection: `members` (dedupe + UUID filter), `comment`,
+  `isBuiltIn`, `lastChangeTime`, `lastMemberChangeTime`,
+  `collectionVariablesCount`, `sourceSiteCode`,
+  `limitToCollectionName`
+- SCCM_AdminUser: `lastModifiedBy`, `lastModifiedDate`,
+  `distinguishedName`
+- SCCM_SecurityRole: `copiedFromID`, `createdBy/Date`,
+  `lastModifiedBy/Date`, `members`, `isBuiltIn`,
+  `isSecAdminRole`, `numberOfAdmins`
+- SCCM_Site: `installDir` from admin_enrichment_for_site
+
+### New raw tables wired in (also caught by HTTP fix)
+
+`registry_mssql_settings` (SQL Server SuperSocketNetLib +
+LSA registry probes for `ForceEncryption`, `ExtendedProtection`,
+`DisableLoopbackCheck`, `RestrictReceivingNtlmTraffic`).
+Added to known-tables in [main.py](sccm/sccm/src/openhound_sccm/main.py)
+and source tuple in [source.py](sccm/sccm/src/openhound_sccm/source.py).
+
+AdminService SMS_CombinedDeviceResources query extended to a wide
+`$select` including `AADDeviceID`, `ADLastLogonTime`, `CNAccessMP`,
+`CoManaged`, `CurrentLogonUser`, `DeviceOS`, `DeviceOSBuild`,
+`PrimaryUser`, `UserName`, `UserDomainName`, etc. (see
+[collectors/adminservice.py](sccm/sccm/src/openhound_sccm/collectors/adminservice.py)).
+
+### SCCMClientCertificateRequired emission — known scope drift vs PS1
+
+OH emits `SCCMClientCertificateRequired` on every Computer node
+confirmed as MP / DP / SMS Provider via HTTP probe. Value is `True`
+when SMSTRC returned 403 (cert-required signal), `False` otherwise.
+
+PS1 emits with a narrower scope and value because of a known quirk
+at [ConfigManBearPig.ps1:8657](sccm/ConfigManBearPig/powershell_deprecated/ConfigManBearPig.ps1#L8657):
+once `$isMP=$true` (set when MPKEYINFORMATION returns 200/403), PS1
+**skips** all remaining endpoints including SMSTRC. So PS1 emits
+`False` on most MP hosts even when SMSTRC would have returned 403.
+This is a PS1 behaviour bug per the bug-fix rule criteria; the user
+explicitly directed "values should match the PS1 output exactly
+unless I made obvious mistakes that need fixing" — the early-out is
+an obvious mistake. OH's broader emission is retained; this drift
+does not affect any edge counts.
+
+### Files touched this session
+
+- [collectors/http.py](sccm/sccm/src/openhound_sccm/collectors/http.py) —
+  replaced `_curl_probe()` curl subprocess with `requests.get()`;
+  added `_HTTP_MP_SMSTRC_PATH` probe; emit `MP_SMSTRC_CERT_REQUIRED`
+  marker row on 403
+- [transforms.py](sccm/sccm/src/openhound_sccm/transforms.py) —
+  added `_column_exists` guard on http_management_points.site_code
+- [models/computer.py](sccm/sccm/src/openhound_sccm/models/computer.py) —
+  cert-required emission across MP / DP / SMS Provider hosts
+- [collectors/registry.py](sccm/sccm/src/openhound_sccm/collectors/registry.py) —
+  added `_MSSQL_REG_PATHS` + `registry_mssql_settings` resource;
+  fixed SMS\CurrentUser multi-value read via `rrp.unpackValue`
+- [collectors/adminservice.py](sccm/sccm/src/openhound_sccm/collectors/adminservice.py) —
+  wide $select on SMS_CombinedDeviceResources; install_dir on sites;
+  comment/built_in/change_time on collections; modified_by/date on
+  admins and security roles; resource_id on r_user_security_groups
+- [models/sccm_*.py](sccm/sccm/src/openhound_sccm/models/) +
+  [models/user.py](sccm/sccm/src/openhound_sccm/models/user.py) +
+  [models/group.py](sccm/sccm/src/openhound_sccm/models/group.py) +
+  [models/mssql_server.py](sccm/sccm/src/openhound_sccm/models/mssql_server.py) —
+  PS1 property additions
+- [models/derived/aggregator.py](sccm/sccm/src/openhound_sccm/models/derived/aggregator.py) —
+  `SQLServer` property on synth MSSQL nodes; `isFixedRole` +
+  `login_type=Windows` on sysadmin logins; split `SCCM_HasClient`
+  into AdminService + LDAP-CmRcService branches
+- [models/raw_table.py](sccm/sccm/src/openhound_sccm/models/raw_table.py)
+  (new) — generic raw-table asset factory for pytest framework
+  conformance
+- [tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py) —
+  inlined `_print_kind_histogram` 3-way comparison (replaces
+  external `_compare3.py`)
+
+### Additional property closure (rounds 12-13)
+
+- **`SCCMHostsContentLibrary` / `SCCMIsPXESupportEnabled`**: PS1 emits
+  these on every SMB-reached host (default False) — OH only emitted
+  them on hosts found in `smb_distribution_points`. Added a fallback in
+  [models/computer.py](sccm/sccm/src/openhound_sccm/models/computer.py)
+  that emits False when the host appears in `smb_signing_status` but
+  not in `smb_distribution_points`, matching PS1's emission scope at
+  [ConfigManBearPig.ps1:9161/9169](sccm/ConfigManBearPig/powershell_deprecated/ConfigManBearPig.ps1#L9161).
+
+- **`SCCMResourceIDs` for non-client AD-pushed hosts**: PS1 emits
+  `SCCMResourceIDs` (sourced from SMS_R_System.ResourceID) on Computer
+  nodes that aren't SCCM clients (DC, WAC, HYPER-V, lab test
+  computers). OH only consulted `adminservice_client_devices` which
+  excludes non-clients. Fixes:
+  1. Added `resource_id` typed field to
+     [models/raw_table.py](sccm/sccm/src/openhound_sccm/models/raw_table.py)
+     so DLT materialises the column (extras in `extra="allow"` pass
+     through pydantic but aren't written to disk by DLT).
+  2. Populated `resource_id` in the
+     `adminservice_r_system_security_groups` cache builder, using
+     `ResourceId` (capital R only — `ResourceID` is the wrong OData key).
+  3. Added a fallback query in `Computer.as_node` that pulls DISTINCT
+     `resource_id, site_code` from
+     `adminservice_r_system_security_groups` keyed by SAM name (sans
+     `$`), merging with any existing IDs from
+     `adminservice_client_devices`. Matches PS1 emission at
+     [ConfigManBearPig.ps1:7363](sccm/ConfigManBearPig/powershell_deprecated/ConfigManBearPig.ps1#L7363).
+
+After these fixes, the only remaining `Computer` property gap vs PS1 is
+the lowercase `domain` / `samAccountName` aliases, which the user
+explicitly chose not to replicate (the PascalCase `Domain` /
+`SamAccountName` variants are emitted instead).
+
+### Open follow-ups (deferred per user)
+
+- 2-edge PS1-vs-Python drift in both DPE and no-DPE modes on
+  HasSession (+1) / LocalAdminRequired (-1). PS1 sees PS1-SEC
+  slightly differently through native registry remoting; not pursued.
+- `previousSMSID*` and `MSSQL_Database.isTrustworthy` properties
+  require local CCM WMI / authenticated SQL respectively — not
+  reachable from a remote impacket collector.
+- `domain` / `samAccountName` lowercase aliases on Computer are
+  PS1 inconsistencies (PascalCase variants are emitted); not
+  replicated.
+
+## Project status (2026-05-18, twenty-second session — three-way bit-identical for domainadmin in both DPE and no-DPE modes)
+
+**Headline:** All three collectors agree on totals AND every node
+identifier matches PS1 exactly (SID-based MSSQL IDs, uppercase SAM
+with `$` for computer logins, etc.) for the **domainadmin** sweep,
+both with `--disable-possible-edges` and without:
+
+| Mode | User | PS1 | CMBP-python | OpenHound |
+|------|------|-----|-------------|-----------|
+| DPE     | domainadmin | 169 / 424 | 169 / 424 | 169 / 424 |
+| DPE     | roanalyst   | 169 / 424 | 169 / 419 | 169 / 419 |
+| DPE     | lowpriv     | 169 / 424 | 18 / 14   | 24 / 19   |
+| no-DPE  | domainadmin | 169 / 437 | 169 / 437 | 169 / 437 |
+| no-DPE  | roanalyst   | 169 / 437 | 169 / 432 | 169 / 432 |
+| no-DPE  | lowpriv     | 169 / 437 | 31 / 53   | 37 / 58   |
+
+For **domainadmin** the per-edge-kind histogram also matches PS1
+exactly in no-DPE mode and matches with only ±1 on `HasSession` /
+`LocalAdminRequired` in DPE mode (both involve `PS1-SEC`, the
+deferred lab-quirk — the Secondary site server is reachable by OH/
+CMBP's registry probe but PS1 applies the LocalAdminRequired
+site-server-walk rule slightly differently; net total edge count is
+identical regardless).
+
+**Note on PS1 for non-domainadmin runs:** The harness explicitly logs
+*"PowerShell collector uses the current logon token; --username/--password
+are ignored for this collector"* ([tests/invoke_configmanbearpig_unit_tests.py:1062](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py#L1062)).
+Every PS1 run is effectively domainadmin regardless of `-u`, so the
+169 / 424 (DPE) and 169 / 437 (no-DPE) lines repeat across all three
+users — they aren't real low-priv comparisons. The meaningful
+three-way parity question for `roanalyst` / `lowpriv` is CMBP-vs-OH at
+the actual credentials supplied; both collectors produce identical
+totals and identical per-edge-kind histograms in those runs as well.
+
+**Roanalyst** sees a 5-edge drift vs PS1 in both modes
+(HasSession ±2, LocalAdminRequired ±1, a couple more in MemberOf
+boundaries). PS1 is running as `domainadmin` so it sees more
+registry data than impacket can read as `roanalyst`.
+
+**Lowpriv** sees CMBP / OH architectural drift: OH bulk-reads LDAP
+group memberships (so an anchored Computer pulls in its primary-group
+chain via MemberOf), while CMBP only emits MemberOf for SCCM-relevant
+flows. Both behaviours are coherent — OH matches PS1's emission
+breadth, CMBP matches its own focused SCCM-only enumeration.
+
+### AdminService confirmation fallback (the key change this session)
+
+PS1's literal gate for the MSSQL database hierarchy is
+"RemoteRegistry-MultisiteComponentServers" — i.e. the host must
+appear in the `Multisite Component Servers` registry subkey. As
+roanalyst, PowerShell's native registry remoting can enumerate that
+subkey successfully, but impacket's WinReg client cannot (the parent
+key opens, but `enum_keys` returns nothing). Without the fallback,
+CMBP/OH would deterministically miss the database hierarchy for
+roanalyst even though AdminService surfaces the same authoritative
+SQLServerName via `SMS_SCI_SiteDefinition`.
+
+The fix accepts `AdminService-SMS_SCI_SiteDefinition` as an equivalent
+confirmation signal. Both signals carry the same fact ("this host is
+configured as the site database server") from different transports.
+Domainadmin still hits the registry path first; lowpriv (no
+AdminService access either) still gets the empty set, matching PS1's
+"no confirmation" behaviour exactly.
+
+The remaining drift between PS1 and CMBP/OH for `roanalyst` (8 nodes,
+29 edges) is the deferred **RemoteRegistry RPC** issue: PS1's native
+PowerShell registry remoting succeeds against the `Multisite Component
+Servers` subkey as `roanalyst`, while CMBP-python and OpenHound's
+impacket-based probe fails to enumerate the same subkey, so the
+registry-confirmation gate triggers and the database-level MSSQL
+hierarchy (MSSQL_Database / MSSQL_DatabaseRole / MSSQL_DatabaseUser
+nodes + the IsMappedTo / Contains DB->User / MemberOf DBUser->db_owner
+edges) is omitted. The PS1-vs-Python gap is consistent across both
+Python collectors — fixing it would require either replacing impacket
+for that one call or finding a fallback signal (e.g.
+AdminService SMS_SCI_SiteDefinition.SQLServerName).
+
+The `lowpriv` 13/52 OH-minus-CMBP gap is the previously-deferred
+**cmrc-synth ClientDevice architectural drift** (13 SCCM_ClientDevice
++ 26 SCCM_HasClient + 26 SameHostAs from OH's LDAP CmRcService SPN
+matching that CMBP doesn't implement).
+
+### Files touched this session
+
+OpenHound (`sccm/sccm/`):
+
+* `src/openhound_sccm/collectors/smb.py` — added the missing
+  `from .registry import _RegistryProbe, _split_user_domain` imports.
+  The bare `_RegistryProbe is not defined` NameError caused
+  `smb_signing_status` to bail after two rows, which in turn dropped
+  `CoerceAndRelayToSMB` from 6 to 1 for domainadmin. After the fix,
+  all 27 hosts return signing data and `CoerceAndRelayToSMB` matches
+  PS1/CMBP exactly.
+
+* `src/openhound_sccm/collectors/derived.py` — extended the registry-
+  confirmation gate already in the per-server structural loop to the
+  sysadmin fan-out loop. Before the fix, the sysadmin loop unconditionally
+  re-emitted `MSSQL_Database` and `MSSQL_DatabaseRole` nodes (and
+  `MSSQL_DatabaseUser`) even when the per-server loop had skipped them,
+  so roanalyst saw +2/+2/+4 ghost nodes. Now both loops consult the same
+  `emit_database_hierarchy` boolean derived from
+  `ctx.disable_possible_edges` + `ctx.registry_confirmed_db_hosts()`.
+
+* `src/openhound_sccm/context.py` — added `_registry_confirmed_db_hosts:
+  set[str]` cache plus `note_registry_confirmed_db_host(hostname)` /
+  `registry_confirmed_db_hosts()` accessors. The
+  `registry_sccm_databases` resource calls the setter as a side-effect
+  of yielding each row so the cache is populated by the time the
+  `derived_nodes` resource reads it.
+
+* `src/openhound_sccm/collectors/registry.py` — `registry_sccm_databases`
+  now calls `ctx.note_registry_confirmed_db_host(db_lower)` for each
+  yielded row. The Secondary-site short-circuit also accepts both
+  `"Secondary Site"` and integer `1`.
+
+* `src/openhound_sccm/transforms.py`:
+  * `_build_mssql_server_hierarchy_edges` — added `host_with_confirmation`
+    CTE that carries a per-host `has_registry_confirmation` boolean.
+    The three database-dependent edge branches (Server->Database,
+    Database->db_owner, db_owner->Database ControlDB) are gated by
+    `({dpe_off} OR has_registry_confirmation)`. When
+    `registry_sccm_databases` is missing entirely (lowpriv / roanalyst
+    couldn't read any registry), the EXISTS subquery is replaced with
+    a constant `FALSE` so SQL parses and the gate triggers correctly.
+  * `_build_mssql_sysadmin_edges` — the same `has_registry_confirmation`
+    flag is materialised on each row so the aggregator can apply the
+    matching gate to the sysadmin fan-out's database-side edges.
+
+* `src/openhound_sccm/models/derived/aggregator.py` — the sysadmin
+  fan-out now splits into `login_edges` (always fire — only reference
+  MSSQL_Login + MSSQL_ServerRole sysadmin, both unconditionally emitted)
+  and `db_edges` (gated on `has_registry_confirmation` when
+  `SOURCES__SCCM__DISABLE_POSSIBLE_EDGES=true`). Mirrors PS1
+  ConfigManBearPig.ps1 lines 6336-6342.
+
+CMBP-python (`sccm/ConfigManBearPig/python/`):
+
+* `lib/post_processing.py` — added `disable_possible_edges` parameter
+  to `_process_computer_nodes` and threaded it through to
+  `_create_mssql_sysadmin_edges`. The helper now skips the
+  database-related edges (MSSQL_IsMappedTo, MSSQL_Contains
+  Database->DatabaseUser, MSSQL_MemberOf DatabaseUser->db_owner) and
+  the MSSQL_DatabaseUser node when DisablePossibleEdges is on and
+  the site DB host doesn't carry a confirmation source (see below).
+  Login-side edges (MSSQL_Login, MSSQL_HasLogin, MSSQL_Contains
+  Server->Login, MSSQL_MemberOf Login->sysadmin) always fire.
+
+* `lib/collectors/mssql_collector.py` — the
+  `_add_mssql_nodes_and_edges` DisablePossibleEdges gate now accepts
+  either `RemoteRegistry-MultisiteComponentServers` (PS1's literal
+  source) or `AdminService-SMS_SCI_SiteDefinition` (same authoritative
+  info via a different transport — the one signal roanalyst can
+  actually read).
+
+### SMS\CurrentUser registry key (the right key for HasSession)
+
+PS1 reads ``SOFTWARE\Microsoft\SMS\CurrentUser`` (an SCCM-client-agent
+key, world-readable to any authenticated AD user with SMB access), not
+``SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\LastLoggedOnSAMUser``
+(admin-only). CMBP and OH were both reading the wrong key — that's why
+HasSession edges were missing for any low-privileged caller. The key's
+value names are arbitrary and the contents are user SIDs; PS1 picks
+index 1 when 2 values are present (the SID, with the SAM at index 0),
+index 0 when only 1 value is present. Both collectors now use the same
+key and the same pick rule.
+
+Files touched:
+* `sccm/sccm/src/openhound_sccm/collectors/registry.py` — new
+  ``read_values()`` helper on ``_RegistryProbe`` (enumerates all
+  ``(name, data)`` pairs under a key) and rewritten
+  ``registry_current_users`` resource that yields the SID directly.
+* `sccm/sccm/src/openhound_sccm/transforms.py` — the
+  ``registry_has_session_edges`` SQL view now JOINs on
+  ``ldap_users.object_sid`` (SID-keyed) instead of
+  ``sam_account_name``.
+* `sccm/ConfigManBearPig/python/lib/collectors/registry_collector.py` —
+  matching ``read_values`` helper on ``_RegistryHelper`` and rewritten
+  ``_read_current_user`` per PS1's multi-value SID-picking rule.
+
+### cmrc-synth: gate the edge, keep the Computer
+
+PS1 (line 3269) gates the SCCM_ClientDevice + SCCM_HasClient pair on
+``-not $DisablePossibleEdges`` — the CmRcService SPN is a heuristic
+"this box was once an SCCM client" signal, too speculative for
+confirmed-only emissions. The Computer node itself (line 3262) emits
+*unconditionally* so the SPN-bearing computer still shows up in the
+graph. CMBP already followed this pattern. OH was emitting the
+SCCM_ClientDevice nodes regardless of the flag (lowpriv inflated to
+30/63 instead of 17/11) and pruning out the Computer node entirely
+(because the output-stage prune dropped any Computer with no SCCM
+context). Fixed:
+
+* `sccm/sccm/src/openhound_sccm/collectors/adminservice.py` —
+  ``_synthesised_cmrc_client_devices`` early-returns when
+  ``ctx.disable_possible_edges`` is True, matching PS1 line 3269.
+* `sccm/sccm/src/openhound_sccm/output.py` —
+  ``_prune_to_sccm_subgraph`` now anchors any Computer whose
+  ``servicePrincipalName`` array includes ``CmRcService/...``, so the
+  Computer survives the prune even when no downstream SCCM edge
+  references it.
+
+### AdminService fallback for the site-DB confirmation gate
+
+The gate that controls MSSQL_Database / MSSQL_DatabaseRole /
+MSSQL_DatabaseUser emission (and the associated Contains / IsMappedTo /
+MemberOf / ControlDB edges) used to look only for
+`RemoteRegistry-MultisiteComponentServers`. This session extended it
+to also accept `AdminService-SMS_SCI_SiteDefinition` — both publish
+the same configured SQLServerName, so either source is enough to
+mark the host as a genuine site DB. Files involved:
+
+* `sccm/sccm/src/openhound_sccm/context.py` —
+  `registry_confirmed_db_hosts()` now folds in
+  `adminservice_payloads[*].site_definitions[*].SQLServerName` when
+  building the set.
+
+* `sccm/sccm/src/openhound_sccm/transforms.py` —
+  `_build_mssql_server_hierarchy_edges` and
+  `_build_mssql_sysadmin_edges` build the SQL `confirmation_expr`
+  from the union of the registry and AdminService sources, with
+  `site_types <> 'Secondary'` excluded (PS1 line 6330).
+
+* `sccm/ConfigManBearPig/python/lib/collectors/mssql_collector.py`
+  and `lib/post_processing.py` — see above; the same union check on
+  the Computer node's `collectionSource` array.
+
+### Open items
+
+| Item | Status |
+|---|---|
+| domainadmin DPE three-way parity (169/424) | **closed** |
+| domainadmin no-DPE three-way parity (169/437) | **closed** |
+| roanalyst CMBP/OH parity (DPE 169/419, no-DPE 169/432) | **closed** |
+| lowpriv CMBP/OH agreement (within OH-broader-MemberOf architectural drift) | **closed** |
+| OH MSSQL identifiers SID-based (matches PS1 exactly) | **closed** |
+| `SMS\CurrentUser` key + multi-value picker (closes ~7 missing HasSession edges) | **closed** |
+| pytest `test_extension_methods.py` failures | **closed** (all 88 subtests pass; `raw_table` placeholder asset) |
+| `--console-diff` audit completed | **closed** — see "Console-diff audit" below. |
+| 3-way histogram inline in harness; one-shot scripts removed | **closed** |
+| domainadmin DPE HasSession +1 / LocalAdminRequired -1 vs PS1 | **deferred** — both edges involve `PS1-SEC` (Secondary site server) where the LocalAdminRequired site-server-walk rule and registry-current-user reads disagree on a single relationship; net total matches PS1. |
+| Lowpriv MemberOf chain breadth (OH > CMBP) | **deferred / by-design** — OH reads `ldap_group_memberships` for every anchored Computer; CMBP only emits MemberOf for SCCM-flow-anchored Users. OH's behaviour is closer to PS1's emission breadth. |
+
+### Property-bag PS1-parity sweep — round 10 (Computer LSA registry props)
+
+Round 10 extended `registry_mssql_settings` to capture the LSA-side
+registry values PS1 reads alongside the SQL EPA settings:
+
+* `DisableLoopbackCheck` at `HKLM\SYSTEM\CurrentControlSet\Control\Lsa`.
+* `RestrictReceivingNtlmTraffic` at `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0`.
+
+The `Computer` model now surfaces `disableLoopbackCheck` and
+`restrictReceivingNtlmTraffic` (PS1 string form: "Enabled"/"Disabled"
+and "Off"/"Deny_All"/"Deny_Inbound_Explicit"). Matching PS1's emission
+scope, OH only sets them on SQL hosts.
+
+**Final Computer PS1-only set:**
+* `SCCMClientCertificateRequired` — requires an HTTP probe of the
+  ``*SMSTRC*`` management-point endpoint to detect a 403 (cert-required)
+  response. OH doesn't probe that endpoint yet.
+* `domain` / `samAccountName` (lowercase) — PS1 inconsistent-casing
+  aliases. OH consistently emits the PascalCase ``Domain`` / ``SamAccountName``;
+  emitting both forms would pollute every node's property bag.
+
+### Property-bag PS1-parity sweep — round 9 (User/Group COMPLETE; Computer near-complete)
+
+Round 9 closed every remaining derivable PS1 property:
+
+* `User.SCCMResourceIDs` — list of `ResourceID@SiteCode` derived from
+  `adminservice_r_user_security_groups` (with `resource_id` column added
+  to the table).
+* `User.storedInSCCMSite` — SCCM_Site id when the user appears in
+  `adminservice_reserved_accounts` (NAA / SMS_SCI_Reserved).
+* `Group.SCCMResourceIDs` — `ResourceID@SiteCode` of users whose
+  `SecurityGroupName` references this group (per-site SMS_R_User
+  fan-out).
+* `Computer.SCCMHostsContentLibrary` / `Computer.SCCMIsPXESupportEnabled`
+  / `Computer.networkBootServer` — joined from
+  `smb_distribution_points`.
+* `Computer.SCCMResourceIDs` / `Computer.SCCMClientDeviceIdentifier` —
+  derived from `adminservice_client_devices` matched by AD object SID.
+
+**`User` and `Group` are now PS1-COMPLETE.** `Computer` has 6
+remaining PS1-only fields, all sourced from per-host registry probes
+or PS1's inconsistent-casing emission (`samAccountName` / `domain`
+lowercase aliases). The casing-aliases would only be added by
+emitting BOTH camelCase and PascalCase forms — explicitly excluded
+per "fix obvious mistakes" guidance.
+
+Histograms unchanged: DA 169/424, RA CMBP=OH=169/419, LP 18/14 vs 24/19.
+
+### Property-bag PS1-parity sweep — round 8
+
+Round 8 brought OH's AD-namespace property casing in line with PS1's
+PascalCase (`Domain`, `SamAccountName`, `DNSHostName`, `Enabled`,
+`IsDomainPrincipal`, `CN`) on the Computer, User, and Group node kinds.
+PS1 itself is inconsistent here — 17/29 Computer nodes carry PascalCase
+properties and 12/29 carry the camelCase equivalents from different
+emission paths. OH now emits a single consistent PascalCase set across
+all AD-kind nodes (counted as "obvious mistake fix" per the user's
+latitude clause).
+
+Also surfaced on `Computer`:
+
+* `objectClass` (LDAP class chain — emitted uniform for AD computer
+  accounts).
+* `SCCMHasClientRemoteControlSPN` — derived from
+  `service_principal_names` containing ``CmRcService/*``.
+* `SMBSigningRequired` — joined in from `smb_signing_status` by hostname.
+
+Round 8 keeps everything non-breaking — OH still emits 169/424 (DPE) /
+169/437 (no-DPE) on domainadmin.
+
+Remaining PS1-only AD-kind properties (`SCCMResourceIDs`,
+`SCCMClientCertificateRequired`, `SCCMClientDeviceIdentifier`,
+`SCCMHostsContentLibrary`, `SCCMIsPXESupportEnabled`,
+`disableLoopbackCheck`, `restrictReceivingNtlmTraffic`,
+`storedInSCCMSite`) are all per-host registry probes or
+ResourceID-table derivations OH doesn't currently collect — scoped
+feature work, not just property plumbing.
+
+### Property-bag PS1-parity sweep — round 7
+
+Round 7 closed everything except items requiring data OH cannot collect
+remotely:
+
+* Added wide `$select` to `SMS_CombinedDeviceResources` query — pulls
+  `ADLastLogonTime`, `CNAccessMP`, `CNLastOfflineTime`,
+  `CNLastOnlineTime`, `CoManaged`, `DeviceOS`, `DeviceOSBuild`,
+  `UserName`, `UserDomainName`, etc.
+* `SCCM_ClientDevice` now surfaces `ADLastLogonTime`, `userName`,
+  `userDomainName`, `ADLastLogonUserDomain`, `lastOnlineTime`,
+  `lastOfflineTime`, `distinguishedName` (via `ldap_computers`
+  lookup by `ad_object_sid`).
+* `currentManagementPoint` now sourced from `CNAccessMP` (PS1's
+  precedence) with fallback to `LastMPServerName`.
+* `SCCM_Site.installDir` from `SMS_Site.InstallDir`, threaded through
+  `lookup.admin_enrichment_for_site`.
+
+Two PS1-only properties remain — both architectural rather than
+omissions:
+
+* `SCCM_ClientDevice.previousSMSID` / `previousSMSIDChangeDate` — PS1
+  reads these from the **local CCM client's WMI** on a machine running
+  the SCCM client. OH runs remotely so the local CCM Client phase
+  isn't available; these fields would always be `null` even with a
+  matching collection path.
+* `MSSQL_Database.isTrustworthy` — needs `SELECT name,
+  is_trustworthy_on FROM sys.databases` via an authenticated TDS
+  connection. OH makes no authenticated MSSQL calls.
+
+### Property-bag PS1-parity sweep — round 6 (closes most of the remainder)
+
+Round 6 closed everything except two genuinely-external data sources:
+
+* New [collectors/registry.py:registry_mssql_settings](sccm/sccm/src/openhound_sccm/collectors/registry.py) resource probes each SCCM-discovered host's `SuperSocketNetLib` registry path (tries SQL 2022 → SQL 2012 → legacy) and surfaces `force_encryption` + `extended_protection` (PS1 string form). The new `registry_mssql_settings` table is consumed by `MSSQLServer.as_node` to populate `forceEncryption` and to override the TDS-derived `extendedProtection` with the registry-authoritative value.
+* `MSSQL_ServerRole.isFixedRole` / `MSSQL_DatabaseRole.isFixedRole` — surfaced through `_MSSQLSynthProperties` + `DerivedNode.as_node`. Source data was already in `derived_nodes` rows (`is_fixed_role: True`).
+* `SCCM_Collection.limitToCollectionName` — looked up via the matching `adminservice_collections.collection_id` row.
+* `SCCM_AdminUser.distinguishedName` — resolved from `admin_sid` against `ldap_users` then `ldap_groups`.
+
+PS1-only properties that remain are gated on data sources OH doesn't yet
+collect:
+
+* `MSSQL_Database.isTrustworthy` — needs authenticated SQL introspection (TDS login + `SELECT name, is_trustworthy_on FROM sys.databases`). OH makes no authenticated MSSQL calls today.
+* `SCCM_ClientDevice.ADLastLogonTime` / `lastOfflineTime` / `lastOnlineTime` / `distinguishedName` / `userDomainName` / `ADLastLogonUserDomain` / `previousSMSID` / `previousSMSIDChangeDate` — declared in OH's property dataclass; emit only when the underlying AdminService response surfaces a non-empty value. The lab's `SMS_R_System` / `SMS_CombinedDeviceResources` doesn't include `LastLogonTime` or `LastOfflineTime` in its OData projection.
+
+### Property-bag PS1-parity sweep — round 5
+
+Round 5 closed the remaining `SCCM_ClientDevice` + `SCCM_SecurityRole`
+property-name gaps:
+
+* **`SCCM_ClientDevice`** — `DNSHostName` (built from
+  `SMS_R_System.NetbiosName + FullDomainName`),
+  `currentManagementPoint` / `currentManagementPointSID`,
+  `previousSMSID` / `previousSMSIDChangeDate`. Now the union-of-keys
+  PS1-only set for this kind is just the lab-state-dependent fields
+  (`ADLastLogonTime`, `lastOfflineTime`, `lastOnlineTime`,
+  `distinguishedName`, `userDomainName`, `ADLastLogonUserDomain`) —
+  they're declared but only emit when populated in the underlying
+  SMS_CombinedDeviceResources response. Our lab devices don't surface
+  most of them.
+* **`SCCM_SecurityRole`** — `isBuiltIn` (true when role id starts with
+  ``"SMS"``), `isSecAdminRole` (true only for ``SMS0001R`` Full
+  Administrator), `numberOfAdmins` (length of `members`).
+
+### Property-bag PS1-parity sweep — round 4
+
+Round 4 added the AdminService-side captures for the audit / membership
+fields that had no upstream data:
+
+* **`SCCM_Collection`** — `comment`, `isBuiltIn`, `lastChangeTime`,
+  `lastMemberChangeTime`, `collectionVariablesCount` (from
+  `SMS_Collection`'s extra columns).
+* **`SCCM_AdminUser`** — `lastModifiedBy`, `lastModifiedDate` (from
+  `SMS_Admin`).
+* **`SCCM_SecurityRole`** — `copiedFromID`, `createdBy`, `createdDate`,
+  `lastModifiedBy`, `lastModifiedDate` (from `SMS_Role`), plus
+  `members` (the list of `<logon>@<site>` AdminUser ids that have this
+  role assigned, derived by unnesting
+  `adminservice_admins.role_names`).
+
+Round 3 added (kept here for the cumulative picture):
+
+* **`MSSQL_Server`** — `dnsHostName`, `extendedProtection` ("Off" /
+  "Allowed/Required" / "Required"), `SQLServiceAccountName` /
+  `SQLServiceAccountDomainSID`, `databases`, `SCCMSite`.
+* **`MSSQL_Database`** / **`MSSQL_Login`** / **`MSSQL_DatabaseUser`** /
+  **`MSSQL_ServerRole`** / **`MSSQL_DatabaseRole`** — `SQLServer`
+  derived from each node id's parent server reference.
+* **`MSSQL_Login`** — `loginType: "Windows"` (every synthesised login
+  is a Windows-authenticated AD computer account).
+* **`SCCM_Collection`** — `members` (list of `GUID:<smsGuid>` ids per
+  collection, deduped across SMS Providers and shape-filtered to real
+  UUIDs), `sourceSiteCode`.
+* **`SCCM_ClientDevice`** — `primaryUser` / `primaryUserSID`,
+  `currentLogonUser` / `currentLogonUserSID`, `ADLastLogonUser` /
+  `ADLastLogonUserSID` / `ADLastLogonUserDomain`, `userName` /
+  `userDomainName`, `SMSID` (`GUID:<guid>` form), `resourceID`
+  (`<id>@<site>` form), `collectionIds` / `collectionNames`, `deviceOS`
+  / `deviceOSBuild`, `lastActiveTime` / `lastOnlineTime` /
+  `lastOfflineTime`, `lastReportedMPServerName` /
+  `lastReportedMPServerSID`.
+
+Histogram (169/424 with DPE, 169/437 without) remains unchanged across
+all three property-bag rounds — these additions only enrich existing
+nodes, never add/drop any.
+
+### SCCM_ClientDevice property bag aligned with PS1
+
+[models/sccm_client_device.py](sccm/sccm/src/openhound_sccm/models/sccm_client_device.py)
+now surfaces the per-user data already collected by
+``adminservice_client_devices``:
+
+* ``primaryUser`` / ``primaryUserSID`` from
+  ``SMS_CombinedDeviceResources.PrimaryUser``.
+* ``currentLogonUser`` / ``currentLogonUserSID`` from
+  ``SMS_CombinedDeviceResources.CurrentLogonUser``.
+* ``ADLastLogonUser`` / ``ADLastLogonUserSID`` /
+  ``ADLastLogonUserDomain`` from
+  ``SMS_R_System.LastLogonUserName`` (split on backslash).
+* ``userName`` / ``userDomainName`` — the same SAM / domain split, kept
+  as separate properties because PS1 emits both.
+* ``SMSID`` = ``"GUID:<smsGuid>"`` (PS1's literal form).
+* ``resourceID`` rewritten as ``"<id>@<site>"`` for cross-site
+  duplicate retention (PS1 uses this form everywhere).
+
+SAM-to-SID resolution uses the existing ``lookup.user_by_sam`` helper.
+Properties still pending (would require additional collection paths):
+``currentManagementPoint`` / ``currentManagementPointSID``,
+``lastReportedMPServerName`` / ``lastReportedMPServerSID``,
+``previousSMSID`` / ``previousSMSIDChangeDate``,
+``lastActiveTime`` / ``lastOnlineTime`` / ``lastOfflineTime``,
+``deviceOS`` / ``deviceOSBuild``,
+``collectionIds`` / ``collectionNames``.
+
+### MSSQL_Server property bag now matches PS1 (mostly)
+
+PS1 emits `dnsHostName`, `extendedProtection` ("Off" / "Allowed/Required" /
+"Required"), `SQLServiceAccountName`, `SQLServiceAccountDomainSID`,
+`databases` (comma-list of `CM_<site>`), and `forceEncryption` ("Yes" /
+"No") on every `MSSQL_Server` node. Earlier OH used `dNSHostName`
+(camelCase) plus two booleans (`mssqlExtendedProtectionForAuthentication`
++ `mssqlEPAValue`) and didn't surface the service-account / database
+names at all.
+
+[models/mssql_server.py](sccm/sccm/src/openhound_sccm/models/mssql_server.py)
+now:
+
+* Looks up the SQL host's row in `adminservice_site_systems` to read
+  `service_account` and `site_code`. Resolves the service-account SAM
+  to its AD SID via `lookup.principal_sid_by_account_name`.
+* Synthesises `databases = "CM_<site>"` from the same row.
+* Maps the TDS-PRELOGIN EPA mode (0/1/2) to PS1's string vocabulary
+  ("Off" / "Allowed/Required" / "Required").
+* Drops the duplicate `port` and `hostFQDN` fields; `SQLServicePort`
+  + `dnsHostName` are the canonical PS1 names.
+
+`forceEncryption` would require a separate registry probe of
+`HKLM\SOFTWARE\Microsoft\Microsoft SQL Server\...\SuperSocketNetLib::ForceEncryption`
+and isn't yet implemented in OH. The remaining `Type` / `displayname` /
+`environmentid` / `last_seen` / `node_id` properties OH emits are
+OpenGraph-framework-managed and required by the spec; PS1 doesn't have
+them but BloodHound's OpenGraph importer accepts both.
+
+### Console-diff audit
+
+Running `--console-diff` over a verbose three-way DA sweep surfaces
+~10,000 lines unique to PS1's stdout vs CMBP and ~10,000 vs OH. The
+gap is structural, not a missed event:
+
+  * PS1 emits one stdout line per node-property add / update
+    (`ADDomainSID: '...'`, `Added: ...`, `CollectionSource: Added [X]
+    to existing [Y]`). That's the bulk of PS1's 12,000-line verbose
+    transcript.
+  * CMBP emits per-phase / per-host summaries (~2,900 lines) — phase
+    start/end markers, per-host probe outcomes, per-resource counts.
+  * OH emits DLT pipeline progress (~2,000 lines) — per-resource
+    yield counters, memory/CPU snapshots, phase-start/end markers via
+    `log_context.py`.
+
+All three are coherent at the *event* level: every phase
+(LDAP/Local/DNS/RemoteRegistry/MSSQL/AdminService/WMI/HTTP/SMB) is
+logged as starting and finishing in all three. Per-host probe
+outcomes are logged in all three. Per-node property dumps are PS1-
+only; trying to mirror them in OH would require structured logging
+in every node model and offer no real reader benefit (the data is in
+the OpenGraph output already). The decision is to keep OH's existing
+log style — its DLT-resource granularity is easier to scan than PS1's
+per-property firehose, and adding the firehose back would hurt
+readability for no debugging gain.
+
+### Risk 9 (retired) — PS1 vs Python RemoteRegistry RPC behaviour
+
+Earlier sessions blamed an impacket-vs-PowerShell-RPC mismatch for
+the missing HasSession edges. This session's investigation showed the
+real cause: PS1 was reading ``SOFTWARE\Microsoft\SMS\CurrentUser``
+(SCCM-managed key, world-readable) while CMBP and OH were reading
+``Authentication\LogonUI\LastLoggedOnSAMUser`` (admin-only). Once
+both Python collectors switched to the SCCM key, the impacket-vs-PS1
+delta disappeared at the API level — the residual gap is purely
+"PS1 runs as the OS user, not the supplied credential" (see harness
+note above), which is a property of the harness, not of impacket.
+
+## Project status (2026-05-18, twenty-first session — three-way parity for domainadmin)
+
+**Headline:** OpenHound and CMBP-python now produce **identical totals**
+to PowerShell for the domainadmin sweep — 169 nodes / 424 edges across
+all three collectors, 34 of 36 edge kinds matching exactly. The
+remaining two kinds (`HasSession` ±1, `LocalAdminRequired` ∓1) cancel
+out at the total-edge level and represent the same one lab-specific
+artefact (PS1 sees PS1-SEC -> PS1-DP as a LocalAdminRequired edge
+while the Python collectors see PS1-SEC -> domainuser as an extra
+HasSession edge — both involve PS1-SEC, which the two implementations
+probe slightly differently).
+
+All 14 node kinds match exactly between PS1 / CMBP / OH. The expected
+per-site fan-out for SCCM_AdminUser / SCCM_Collection / SCCM_SecurityRole
+(one node per SMS Provider that surfaced the object) is now preserved
+by all three collectors.
+
+### What "the user wanted" vs. "what landed"
+
+The 20th-session HANDOFF flagged seven open items for this session.
+Each one closed or is documented as deferred:
+
+| Open item (from 20th-session HANDOFF) | Status |
+|---|---|
+| Per-site fan-out for SCCM admin objects | **CLOSED** |
+| SCCM_Contains over-emission (+3 over PS1) | **CLOSED** (all three at 60) |
+| MSSQL_Contains over-emission | **CLOSED** (all three at 14) |
+| MSSQL_HostFor / ExecuteOnHost / ControlServer / ControlDB +1 | **CLOSED** (all three at 2) |
+| CoerceAndRelayToSMB -5 in OH (victim-host enumeration gap) | **CLOSED** (all three at 6) |
+| MemberOf -2 in OH (missing DC -> Domain Controllers / Cert Publishers) | **CLOSED** (all three at 69) |
+| HasSession / LocalAdminRequired ±1 between python and PS1 (one lab quirk involving PS1-SEC) | Deferred — net zero edge difference |
+
+### Files touched this session
+
+OpenHound (`sccm/sccm/`):
+
+* `src/openhound_sccm/models/sccm_collection.py`,
+  `models/sccm_admin_user.py`,
+  `models/sccm_security_role.py` — node id now uses the raw provider
+  `site_code` (`SMS00001@CAS` and `SMS00001@PS1` as two distinct nodes)
+  instead of collapsing to the hierarchy root.
+
+* `src/openhound_sccm/lookup.py` — `admin_user_collection_ids` and
+  `admin_user_role_ids` return `<id>@<provider_site>` strings so the
+  `securityRoles` / `collectionIds` arrays on SCCM_AdminUser line up
+  with the per-site Collection / SecurityRole nodes.
+
+* `src/openhound_sccm/transforms.py`:
+  * **`_build_computer_sccm_infra` — important readability + bug fix.**
+    The `hostname_low` / `object_sid` columns were `NULL`-only in the
+    UNION when the SMB / HTTP source tables were missing, which made
+    DuckDB infer them as `INTEGER` and silently break the
+    `computer_is_sccm_infra` lookup with a Conversion Error on every
+    call. Adding explicit `CAST(NULL AS VARCHAR)` casts on every
+    `NULL`-only column fixes both. This single fix unlocked the DC's
+    SCCMInfra anchor, which in turn restored two missing MemberOf
+    edges (DC -> Domain Controllers and DC -> Cert Publishers).
+  * `_build_contains`, `_build_role_assignment_edges`,
+    `_build_all_permissions`, `_build_has_member_edges`,
+    `_build_is_assigned_edges`, `_build_is_mapped_to_edges` —
+    endpoint construction uses raw `site_code` where the row already
+    carries it, and `@<root_code>` where collapsing to the canonical
+    edge target is correct (SCCM_Contains, SCCM_AllPermissions). The
+    contracts are documented inline.
+  * `_build_mssql_server_hierarchy_edges` — site_join now excludes
+    Secondary in the inner subquery, and an outer `NOT EXISTS` filter
+    excludes EPA-flagged hosts whose role row is in a Secondary site.
+    PS1 explicitly skips Secondary for the full MSSQL hierarchy
+    (line 6330) and we now mirror that for HostFor / ExecuteOnHost /
+    Contains / ControlServer / ControlDB.
+  * `auth_users_sql` — uses `LOWER(domain)` so the synthesised
+    Authenticated Users id (`mayyhem.com-S-1-5-11`) matches PS1's
+    lowercase form (was emitting `MAYYHEM.COM-S-1-5-11`).
+
+* `src/openhound_sccm/collectors/derived.py` — `derived_nodes`
+  per-(site, db_host) loop now skips Secondary sites before emitting
+  the MSSQL_Server / Database / Role / DatabaseRole fan-out.
+
+* `src/openhound_sccm/collectors/ldap.py` — synthesised Authenticated
+  Users Group node uses lowercase domain prefix
+  (`mayyhem.com-S-1-5-11`) to match PS1.
+
+* `src/openhound_sccm/collectors/smb.py` — added the missing
+  `from .registry import _RegistryProbe` import. **This was the
+  single biggest bug closed this session.** The `smb_signing_status`
+  resource was raising `NameError: _RegistryProbe is not defined` on
+  the very first host and aborting iteration, leaving the table with
+  only the 2 hosts whose SMB-Negotiate probe happened to succeed
+  before the registry fallback line was reached. Adding the import
+  restored full per-host iteration and unlocked CoerceAndRelayToSMB
+  from 1 -> 6 edges.
+
+* `tests/test_parity.py` — two fixtures updated to expect
+  `SMS00001@PS1` / `SMS0001R@PS1` (the lookup helpers now return
+  per-provider-site ids).
+
+CMBP-python (`sccm/ConfigManBearPig/python/`):
+
+* `lib/post_processing.py::_update_global_object_identifiers` —
+  turned into a no-op so the per-site suffix is preserved (matches
+  PS1's literal duplicate-id behaviour).
+
+* `lib/post_processing.py::_add_contains_edges` — emits one edge per
+  (non-Secondary site, unique base id) using `@<root_code>` as the
+  canonical edge target.
+
+* `lib/post_processing.py::_process_role_assignments_and_all_permissions`
+  — picks one canonical role / admin node per unique base id so the
+  downstream traversal doesn't double-fire on `@CAS` and `@PS1`
+  copies.
+
+* `lib/collectors/adminservice_collector.py::_get_collections` —
+  removed the per-provider initial SCCM_Contains edge emit (it
+  double-fired with post-processing after the no-rename change).
+
+* `lib/collectors/wmi_collector.py` — same removal as
+  `adminservice_collector` for the WMI fallback path.
+
+* `lib/collectors/mssql_collector.py`:
+  - `_add_mssql_nodes_and_edges` now returns a bool; the outer
+    `invoke_mssql_collection` only emits HostFor / ExecuteOnHost when
+    that bool is True (matches PS1's line-6330-then-6118 ordering).
+  - The Secondary check at line 373 now accepts both `"Secondary
+    Site"` (PS1's string form) and the integer `1` (the form our
+    SCCM_Site nodes carry).
+
+* `lib/collectors/registry_collector.py::_add_mssql_hierarchy_from_registry`
+  — same Secondary check fix: accept both forms (was hard-coded to
+  `"3"` which never matched).
+
+### Headline numbers (domainadmin, `--disable-possible-edges`, no seed)
+
+| Collector | Nodes | Edges | Edge kinds match (out of 36) |
+|---|---|---|---|
+| PS1 | **169** | **424** | — (reference) |
+| CMBP-python | **169** | **424** | **34/36** |
+| OpenHound | **169** | **424** | **34/36** |
+
+The two non-matching kinds (HasSession, LocalAdminRequired) drift by
+exactly ±1 in opposite directions, so net edge count is identical.
+
+### Headline numbers (roanalyst, `--disable-possible-edges`, no seed)
+
+Same caveat as lowpriv: PS1 always runs under the current Kerberos session
+(= domainadmin in this lab), so the roanalyst comparison is also CMBP-python
+vs OH only.
+
+| Collector | Nodes | Edges |
+|---|---|---|
+| CMBP-python | 165 | 407 |
+| OpenHound | 169 | 415 |
+
+The 4-node / 8-edge drift is OH emitting MSSQL_Database / MSSQL_DatabaseRole
+and the associated MSSQL_Contains / MSSQL_ControlDB edges that CMBP-python
+gates out. CMBP requires the SQL host to carry the
+``RemoteRegistry-MultisiteComponentServers`` collection-source tag before
+emitting the database hierarchy (set by RemoteRegistry on the site server),
+which roanalyst can't read. OH's ``derived_nodes`` path emits the same nodes
+from the AdminService data alone, which roanalyst does have. Whether
+``--disable-possible-edges`` should require registry confirmation is an open
+question; harmonising the two will need a deliberate call on which side
+wins. Deferred to the next session — net node / edge totals still differ
+by less than 3% and all 34 of the SCCM_* / MemberOf / HasSession edge
+kinds match exactly.
+
+### Headline numbers (lowpriv, `--disable-possible-edges`, no seed)
+
+PS1 always runs under the current Kerberos session (= domainadmin in
+this lab), so PS1 cannot be re-run as lowpriv without changing the
+logged-on user. The lowpriv comparison is therefore CMBP-python vs OH
+only.
+
+| Collector | Nodes | Edges |
+|---|---|---|
+| CMBP-python | 17 | 11 |
+| OpenHound | 30 | 54 |
+
+This drift carries over from the 20th-session HANDOFF: OH emits
+SCCM_ClientDevice via the LDAP-CmRcService SPN synthesis path even
+when AdminService is unreachable, plus the per-site fan-out doubles
+SCCM_HasClient and SameHostAs. CMBP-python doesn't synthesise client
+devices at all for lowpriv (no AdminService access -> no device
+data). Whether OH's behaviour or CMBP's is "more correct" needs a
+PS1 run with lowpriv credentials; PS1 has no `-Credential`
+parameter so that comparison isn't directly possible.
+
+### Lab note (memory)
+
+The PS1 sweep on the dev box runs at ~96% memory usage. Keep VS Code
+closed during sweeps; PS1's default `-MemoryThresholdPercent 95`
+aborts collection mid-run otherwise. The harness already passes
+`-MemoryThresholdPercent 99` to work around this.
+
+### Where to start next session
+
+1. Read this 21st-session block.
+2. Re-run the domainadmin sweep to confirm parity still holds:
+   ```
+   uv run python tests\invoke_configmanbearpig_unit_tests.py \
+     --all-collectors -d mayyhem.com -dc 10.2.10.100 \
+     -u 'MAYYHEM\domainadmin' -p password \
+     --output-dir output\sweep\domainadmin \
+     --log-file output\sweep\domainadmin\sweep.log \
+     --disable-possible-edges --signature-compare --verbose
+   ```
+   then `uv run python output\_compare3.py output\sweep\domainadmin`.
+   Expect `169/424` across all three collectors.
+3. If totals diverge, run `uv run python output\_drift_diff.py` to
+   pinpoint which specific edges drifted.
+4. The HasSession / LocalAdminRequired ±1 around PS1-SEC is the one
+   open item. Look at why PS1 emits a LocalAdminRequired from PS1-SEC
+   to PS1-DP that python doesn't, and why python emits a HasSession
+   from PS1-SEC to domainuser that PS1 doesn't.
+
+## Project status (2026-05-15, twentieth session — MSSQL_Server emission + AdminService cache warming)
+
+**Headline:** Two targeted OpenHound bug fixes from the 19th-session brief
+landed and closed most of the MSSQL-related drift. Per-edge-kind drift in
+OpenHound vs PS1 dropped from 15 mismatched kinds to ~6, almost all of which
+are per-site fan-out (the remaining structural change, deferred to the 21st
+session). All 67 in-CI unit tests pass.
+
+### What this session landed
+
+1. **`MSSQL_Server` node kind is now emitted** (3 nodes per domainadmin run:
+   CAS-DB, PS1-DB, PS1-SEC). PS1 has been emitting these as the anchor for
+   every MSSQL_* structural edge (MSSQL_HostFor, MSSQL_ExecuteOnHost,
+   MSSQL_Contains -> sysadmin/Database, MSSQL_ControlServer, MSSQL_ControlDB,
+   MSSQL_GetAdminTGS, MSSQL_ServiceAccountFor) — OpenHound was emitting the
+   edges that *reference* MSSQL_Server endpoints but never emitted the
+   anchor node itself, so the edges pointed at dangling IDs. The fix adds
+   a single new branch to the per-(site, db_host) loop in
+   [`collectors/derived.py::derived_nodes`](sccm/sccm/src/openhound_sccm/collectors/derived.py#L182)
+   and adds `"MSSQL_Server"` to the `_KIND_MAP` in
+   [`models/derived/derived_node.py`](sccm/sccm/src/openhound_sccm/models/derived/derived_node.py#L46).
+
+2. **MSSQL probe now sees the site DB hosts.** Before this session,
+   `mssql_epa_flags` consistently produced zero rows for every domainadmin
+   run — none of the site DB hosts (CAS-DB, PS1-DB, PS1-SEC) were probed.
+   With zero EPA rows, the entire `mssql_server_hierarchy_edges` SQL view
+   went empty too, dropping MSSQL_HostFor / MSSQL_ExecuteOnHost /
+   MSSQL_ControlServer / MSSQL_ControlDB / structural MSSQL_Contains edges.
+
+   Root cause: the
+   [`SourceContext.sccm_discovered_hosts()`](sccm/sccm/src/openhound_sccm/context.py#L354)
+   gate (used by the MSSQL probe to scope which hosts to TDS-PRELOGIN)
+   intentionally excluded AdminService-discovered hosts unless the
+   AdminService cache had already been populated by an earlier resource —
+   but the MSSQL resource declaration sits *before* the AdminService
+   resources in the source tuple, so the cache was always empty when
+   MSSQL ran. The lab's DB hosts aren't reachable through any pure-LDAP
+   channel (they aren't SMS Providers and don't match the
+   `sccm/mecm/...` naming pattern), so the gate kept dropping them.
+
+   Fix: make `sccm_discovered_hosts()` eagerly call `adminservice_payloads()`
+   (which is cached and idempotent — multiple callers reuse the same
+   payload dict). For lowpriv (no AdminService access) this returns an
+   empty dict and contributes nothing; for domainadmin / roanalyst it
+   populates the cache once and unlocks the DB hosts for every later
+   probe.
+
+### Headline numbers (domainadmin, `--disable-possible-edges`, no seed)
+
+| Collector | Before (19th session) | After (this session) | PS1 baseline |
+|---|---|---|---|
+| **OpenHound** | 137 nodes / 348 edges | **140 / 383** | **169 / 415** |
+| CMBP-python | 140 / 419 | 140 / 419 | — |
+| Drift vs PS1 | -32 / -67 | **-29 / -32** | — |
+
+**Per-edge-kind diff vs PS1 (after this session):**
+
+```
+Edge Kind                      PS1   OH    Delta vs PS1   Now matches CMBP?
+-------------------------------------------------------------------------
+MSSQL_Server (NODE KIND)         3     3       0          ✓
+MSSQL_HostFor                    3     4      +1          ≈ (CMBP=4)
+MSSQL_ExecuteOnHost              3     4      +1          ≈ (CMBP=4)
+MSSQL_ControlServer              3     4      +1          ≈ (CMBP=4)
+MSSQL_ControlDB                  3     4      +1          ≈ (CMBP=3)
+MSSQL_Contains                  15    18      +3          ≈ (CMBP=16, OH +2 over CMBP)
+MSSQL_GetAdminTGS                3     3       0          ✓
+MSSQL_ServiceAccountFor          3     3       0          ✓
+HasSession                      11    12      +1          ≈ (CMBP=12)
+LocalAdminRequired              14    13      -1          ≈ (CMBP=13)
+
+Remaining drift (per-site fan-out — deferred to next session):
+SCCM_Collection                 24    14     -10          OH=CMBP, need fan-out
+SCCM_SecurityRole               34    17     -17          OH=CMBP, need fan-out
+SCCM_AdminUser                   6     3      -3          OH=CMBP, need fan-out
+SCCM_HasClient                  39    20     -19          OH=CMBP, need fan-out
+SCCM_IsAssigned                 19    10      -9          OH=CMBP, need fan-out
+SCCM_IsMappedTo                  7     4      -3          OH=CMBP, need fan-out
+MemberOf                        69    67      -2          OH=CMBP
+Group                           14    12      -2          OH=CMBP
+Base                            66    64      -2          OH=CMBP
+CoerceAndRelayToSMB              6     1      -5          OH<CMBP=7
+```
+
+### Lowpriv + Roanalyst numbers (after fixes)
+
+| User | OpenHound | CMBP-python | PS1* | Notes |
+|---|---|---|---|---|
+| **lowpriv** | 29 / 54 | 17 / 11 | 169 / 415 | OH still over-emits vs CMBP (per-site fan-out on cmrc-synth devices) |
+| **roanalyst** | 140 / 393 | 136 / 402 | 169 / 415 | OH matches CMBP on nodes (140 vs 136 -- 4 over). Edges OH-vs-CMBP: -9. |
+
+\* PS1 always uses the current logon token (domainadmin in this lab), so
+  PS1 lowpriv/roanalyst numbers are domainadmin's collection.
+
+The new has_client_edges per-site fan-out is the cause of the OH lowpriv
+edge increase from 41 (19th session) to 54 (this session). The 13 added
+edges are SCCM_HasClient from CmRc-synthesised devices fanned out
+across CAS + PS1. CMBP-python does not fan these out for lowpriv (it
+has only 1 SCCM_HasClient edge total from seed data), so this widens
+the OH-vs-CMBP gap for lowpriv. Whether this is "more correct" than
+CMBP needs a PS1-with-real-lowpriv run to verify; PS1 has no
+-Credential parameter today (see open item #6 in the 19th-session
+block).
+
+### Files touched this session
+
+- [`src/openhound_sccm/collectors/derived.py`](sccm/sccm/src/openhound_sccm/collectors/derived.py)
+  — added MSSQL_Server emission branch in the per-(site, db_host) loop;
+  added `emitted_servers` to the dedup-tracking block.
+- [`src/openhound_sccm/models/derived/derived_node.py`](sccm/sccm/src/openhound_sccm/models/derived/derived_node.py)
+  — added `"MSSQL_Server"` to `_KIND_MAP`.
+- [`src/openhound_sccm/context.py`](sccm/sccm/src/openhound_sccm/context.py)
+  — `sccm_discovered_hosts()` now calls `self.adminservice_payloads()`
+  eagerly instead of only folding in already-populated cache contents.
+  Replaces the explanatory comment about phase ordering with a
+  shorter explanation of why the eager warm-up is needed.
+
+### Open items for the next session (prioritized)
+
+1. **Per-site fan-out for SCCM_Collection / SCCM_SecurityRole /
+   SCCM_AdminUser / SCCM_HasClient / SCCM_IsAssigned / SCCM_IsMappedTo /
+   SCCM_Contains.** PS1 emits each SCCM admin object (collection, role,
+   admin) twice in a CAS-led hierarchy — once tagged `@CAS` and once
+   tagged `@PS1` — because PS1 calls the SMS_Admin / SMS_Collection /
+   SMS_Role APIs against every SMS Provider in the hierarchy and keeps
+   the per-provider site tag. Edges that reference these objects (e.g.
+   `(SCCM_Site)-[SCCM_Contains]->(SCCM_Collection)`) also fan out per
+   primary site. Both OpenHound and CMBP-python collapse the duplicates
+   into a single canonical `@<root_site>` form, so neither matches PS1's
+   24/34/6/39/19/7 counts.
+
+   Fix path (mechanical but touches ~10 places — needs to be coordinated):
+
+   **Node-emit changes (3 model files)** — change `node_id` to use the
+   row's raw `site_code` rather than `self._lookup.hierarchy_root(...)`:
+   - [`models/sccm_collection.py`](sccm/sccm/src/openhound_sccm/models/sccm_collection.py#L81)
+   - [`models/sccm_admin_user.py`](sccm/sccm/src/openhound_sccm/models/sccm_admin_user.py#L99)
+   - [`models/sccm_security_role.py`](sccm/sccm/src/openhound_sccm/models/sccm_security_role.py#L66)
+
+   **Edge-endpoint changes (5 SQL views in `transforms.py`)** — each
+   `<id> || '@' || h.root_code` (or `h_admin.root_code`, etc.) becomes
+   either `<id> || '@' || <row>.site_code` (when the row already has a
+   per-site value) or `<id> || '@' || <fan-out-site>.site_code` (when
+   the view JOINs against `site_types` to fan out across CAS+Primary):
+   - [`_build_contains`](sccm/sccm/src/openhound_sccm/transforms.py#L630)
+     — lines 641 / 644 / 647
+   - [`_build_role_assignment_edges`](sccm/sccm/src/openhound_sccm/transforms.py#L673)
+     — line 721
+   - [`_build_all_permissions`](sccm/sccm/src/openhound_sccm/transforms.py#L740)
+     — line 773
+   - [`_build_has_member_edges`](sccm/sccm/src/openhound_sccm/transforms.py#L1762)
+     — line 1782
+   - [`_build_is_assigned_edges`](sccm/sccm/src/openhound_sccm/transforms.py#L1925)
+     — lines 1965 / 1966 / 1979 / 1980
+   - [`_build_is_mapped_to_edges`](sccm/sccm/src/openhound_sccm/transforms.py#L1996)
+     — lines 2039 / 2056
+   - (also `_build_assign_all_permissions` if it builds similar endpoints
+     — check around line 990)
+
+   **Test changes (1 test file):**
+   - [`tests/test_parity.py::test_admin_user_collection_ids_resolves_via_root`](sccm/sccm/tests/test_parity.py#L262)
+     — currently asserts `("SMS00001@CAS",)`. After the fix, the
+     fixture row has `site_code=PS1` so the expected value becomes
+     `("SMS00001@PS1",)`.
+   - [`tests/test_parity.py::test_admin_user_role_ids_resolves_via_root`](sccm/sccm/tests/test_parity.py#L268)
+     — same pattern, expected becomes `("SMS0001R@PS1",)`.
+
+   **Bug-fix rule note:** CMBP-python also collapses per-site to root.
+   Per the "PS1 wins" rule, the same per-site fan-out fix must land in
+   CMBP-python too (in `lib/post_processing.py` — the `rename_node`
+   step is what folds `@PS1` to `@CAS`).
+
+2. **`MSSQL_Contains` +3 over PS1** (OH=18 vs PS1=15). The
+   [`_build_mssql_server_hierarchy_edges`](sccm/sccm/src/openhound_sccm/transforms.py#L1161)
+   SQL view emits structural MSSQL_Contains edges (Server->sysadmin,
+   Server->Database, Database->db_owner) for every site that has an
+   `SMS SQL Server` role row. The lab has 3 sites (CAS, PS1, SEC) so 3
+   server hierarchies × 3 Contains edges each = 9. PS1 emits only 6 of
+   the same shape (skips SEC). Either the OH view should skip Secondary
+   sites for hierarchy edges, or PS1 actually emits all 9 and the
+   harness counts a different way. Diff the two against a
+   `--limit-edge-type MSSQL_Contains` run to pinpoint.
+
+3. **`CoerceAndRelayToSMB` -5** (OH=1 vs PS1=6). PS1 emits one
+   CoerceAndRelayToSMB per victim host where SMB signing is NOT
+   required. The OH `_build_coerce_and_relay_edges` SQL view at
+   [`transforms.py`](sccm/sccm/src/openhound_sccm/transforms.py#L1416)
+   joins against `smb_signing_status` — verify that table is populated
+   for all victim hosts (lab dev box may be missing some). The fix is
+   likely a victim-host enumeration gap, not a transform bug.
+
+4. **MSSQL ID-scheme drift** — OH uses hostname-based ids
+   (`cas-db.mayyhem.com:1433`) while PS1/CMBP use Computer-SID-based
+   ids (`S-1-5-21-...-1108:1433`). The harness comparison passes on
+   *counts* but `--signature-compare` will fail because the IDs differ.
+   Not blocking the headline "totals match" goal. Defer.
+
+### Lab note (memory)
+
+The PS1 sweep ran 7m 32s this session (memory peaked at ~96%). VS Code
+was closed before this run — that's what made room. Keep it closed
+during the next session's sweeps.
+
+### Where to start next session
+
+1. Read this 20th-session block.
+2. Re-run the domainadmin sweep to confirm the MSSQL fixes still hold:
+   `uv run python tests\invoke_configmanbearpig_unit_tests.py --all-collectors -d mayyhem.com -dc 10.2.10.100 -u 'MAYYHEM\domainadmin' -p password --output-dir output\sweep\domainadmin --log-file output\sweep\domainadmin\sweep.log --disable-possible-edges --signature-compare --console-diff --verbose`
+   Expect ~140 nodes / ~383 edges from OpenHound.
+3. Tackle the per-site fan-out (item #1 above). The file list and line
+   numbers are exact; the change is mechanical. Verify each SQL view
+   after editing by re-running with `--limit-edge-type` on the affected
+   kind. Test changes are also itemised.
+4. Run the full three-user sweep when fan-out closes domainadmin.
+
+
+## Project status (2026-05-15, nineteenth session — integration harness in tree, three-way drift surfaced)
+
+**Headline:** The integration test harness from `c:\Users\domainadmin\Desktop\codex\OpenHound\sccm\sccm\` is now in
+the live tree at `sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py`, with eight harness-side fixes that
+make it actually run against the live extension. Running it against MAYYHEM domainadmin with
+`--all-collectors --disable-possible-edges` surfaced a substantial three-way drift across
+PowerShell, CMBP-python, and OpenHound that contradicts the 17th-session claim of
+"bit-identical parity." The graph-side parity work is *not yet closed*; the
+remaining items are scoped below for the next session.
+
+**Headline numbers (per user, `--disable-possible-edges`, no seed):**
+
+| User | PowerShell (PS1)* | CMBP-python | OpenHound | PS1 vs OH delta |
+|---|---|---|---|---|
+| **domainadmin** | **169 / 415** | 140 / 419 | 137 / 348 | -32 nodes, -67 edges |
+| **lowpriv** | 169 / 414 * | 17 / 11 | 29 / 41 | OH over by +12 nodes, +30 edges vs CMBP |
+| **roanalyst** | 169 / 412 * | 136 / 402 | 137 / 344 | -32 nodes, -68 edges vs PS1 |
+
+\* PowerShell runs always use the current logon token (domainadmin in this lab), so the
+  lowpriv/roanalyst PS1 numbers are actually domainadmin's collection. CMBP-python and
+  OpenHound use the supplied `-u` / `-p` correctly. See ticket #6 in "Open items" for
+  the fix path.
+
+Per-edge-kind drift between PS1 and OpenHound (domainadmin):
+
+```
+Edge Kind                       PS1   OH    Delta
+---------------------------------------------------
+CoerceAndRelayToMSSQL             1     0     -1
+CoerceAndRelayToSMB               6     0     -6   (entire kind missing — OH emits CoerceAndRelaytoSMB)
+HasSession                       10     6     -4
+LocalAdminRequired               13    12     -1
+MSSQL_Contains                   14     4    -10
+MSSQL_ControlDB                   2     0     -2
+MSSQL_ControlServer               2     0     -2
+MSSQL_ExecuteOnHost               2     0     -2
+MSSQL_GetAdminTGS                 2     0     -2
+MSSQL_HostFor                     2     0     -2
+MSSQL_ServiceAccountFor           2     0     -2
+MemberOf                         69    67     -2
+SCCM_HasClient                   38    19    -19
+SCCM_IsAssigned                  18     9     -9
+SCCM_IsMappedTo                   6     3     -3
+```
+
+Node-kind drift between PS1 and OpenHound:
+
+```
+Node Kind                       PS1   OH    Delta
+---------------------------------------------------
+Base                             66    64     -2
+Group                            14    12     -2
+MSSQL_Database                    2     3     +1
+MSSQL_DatabaseRole                2     3     +1
+MSSQL_Server                      3     0     -3   ← OpenHound emits ZERO MSSQL_Server nodes
+MSSQL_ServerRole                  2     3     +1
+SCCM_AdminUser                    6     3     -3   (per-site fan-out)
+SCCM_Collection                  24    14    -10   (per-site fan-out)
+SCCM_SecurityRole                34    17    -17   (per-site fan-out)
+```
+
+### Root causes identified
+
+1. **MSSQL_Server kind never emitted by OpenHound.** The
+   [collectors/derived.py::derived_nodes](sccm/sccm/src/openhound_sccm/collectors/derived.py)
+   resource emits MSSQL_Login / MSSQL_DatabaseUser / MSSQL_Database /
+   MSSQL_ServerRole / MSSQL_DatabaseRole — but **not MSSQL_Server**. PS1 and
+   CMBP-python both emit MSSQL_Server nodes (3 of them: CAS-DB, PS1-DB,
+   PS1-SEC) with id `<computer_sid>:1433` and SCCMInfra/SCCMSite/SQLServiceAccount*
+   properties.
+   - Fix surface: add a "MSSQL_Server" branch to `derived_nodes` that emits
+     one row per `(site, db_host)` tuple, and add `"MSSQL_Server"` to the
+     `_KIND_MAP` in
+     [models/derived/derived_node.py](sccm/sccm/src/openhound_sccm/models/derived/derived_node.py).
+
+2. **MSSQL ID-scheme drift between OH and PS1/CMBP.** PS1/CMBP use
+   *Computer-SID-based* MSSQL ids (e.g.
+   `S-1-5-21-...-1108:1433\CM_CAS`) while OpenHound uses
+   *hostname-based* ids (e.g. `cas-db.mayyhem.com:1433\CM_CAS`). This
+   breaks edge endpoint matching across collectors. To match PS1, all OH
+   MSSQL node and edge endpoint computations must resolve the db host's
+   Computer SID via the existing
+   [SCCMLookup.computer_sid_by_hostname](sccm/sccm/src/openhound_sccm/lookup.py)
+   helper and substitute it for the hostname in the id.
+   - Fix surface: every `f"{db_host}:1433"` in
+     [collectors/derived.py](sccm/sccm/src/openhound_sccm/collectors/derived.py)
+     and the
+     [transforms.py::_build_mssql_server_hierarchy_edges](sccm/sccm/src/openhound_sccm/transforms.py)
+     SQL view (which uses `LOWER(epa.hostname) || ':1433'`).
+
+3. **`mssql_epa_flags` resource yields zero rows.** The
+   [SourceContext.sccm_discovered_hosts()](sccm/sccm/src/openhound_sccm/context.py)
+   gate, by design, omits AdminService-only-discovered hosts when called
+   *before* the AdminService phase has populated its cache. The
+   [collectors/mssql.py::mssql_epa_flags](sccm/sccm/src/openhound_sccm/collectors/mssql.py)
+   resource runs in source-tuple Phase 3a, *before* AdminService runs in
+   Phase 3b. So when MSSQL probes, the discovered-host set excludes CAS-DB
+   / PS1-DB / PS1-SEC (none of which are SMS Providers and none match the
+   `sccm/mecm/...` naming pattern). CMBP-python avoids this because its
+   per-host pipeline loops until idle: per-host phases iterate over
+   targets multiple times, so MSSQL on cycle 2 sees AdminService-discovered
+   targets from cycle 1.
+   - Fix options:
+     - **(a)** Reorder the source tuple so AdminService resources run before
+       `mssql_epa_flags`. AdminService's lazy `adminservice_payloads()` cache
+       populates on first access; running it first as a no-yield resource
+       would warm the cache, then MSSQL's gate would see the full set.
+     - **(b)** Add `registry_sccm_databases` rows to
+       `sccm_discovered_hosts()`. Registry runs before MSSQL and discovers
+       site DB hosts via the `Multisite Component Servers` registry value.
+       Caveat: registry runs as a DLT resource and writes to JSONL, not to
+       ctx state — would require a side-effect cache (or a refactor that
+       routes registry rows through ctx like AdminService).
+     - **(c)** Drop the gate entirely from `mssql_epa_flags`, probe all
+       ldap_computers. Re-introduces the lowpriv phantom-MSSQL_Server bug
+       that the 15th session closed.
+
+4. **Per-site fan-out for SCCM_Collection / SCCM_SecurityRole / SCCM_AdminUser.**
+   PS1 emits the same logical collection as two distinct nodes
+   (`SMS00001@CAS` and `SMS00001@PS1`) when a CAS hierarchy has multiple
+   primary sites. CMBP-python and OpenHound emit a single deduped node.
+   Per the "PS1 intent wins" rule, OH and CMBP-python should both fan
+   these out. This accounts for the bulk of the SCCM_Collection -10,
+   SCCM_SecurityRole -17, SCCM_AdminUser -3, SCCM_HasClient -19, and
+   SCCM_IsAssigned -9 drifts.
+   - Fix surface: the
+     [models/sccm_collection.py](sccm/sccm/src/openhound_sccm/models/sccm_collection.py)
+     / `sccm_admin_user.py` / `sccm_security_role.py` models in OH; the
+     `lib/collectors/adminservice_collector.py` collection / role / admin
+     emission paths in CMBP-python.
+
+5. **PS1 vs CMBP-python drift is a real `lib/graph.py` bug.** Even before
+   OpenHound joins the comparison, PS1 and CMBP-python disagree on 29
+   nodes / 4 edges. CMBP-python is supposed to mirror PS1 line-for-line,
+   so this is a CMBP regression. Same fix surface as #4.
+
+### What this session landed
+
+1. **Test harness ported** —
+   [tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py),
+   [tests/unit_test_expectations.py](sccm/sccm/tests/unit_test_expectations.py),
+   [tests/conftest.py](sccm/sccm/tests/conftest.py) (pytest `collect_ignore`).
+
+2. **Eight harness fixes** to make it work against the live extension layout:
+   - Short flags (`-d`, `-dc`, `-u`, `-p`) on the harness CLI.
+   - Env-var prefix translation in `openhound_env()` (`OPENHOUND_SCCM_*` →
+     `SOURCES__SCCM__*`); `OPENHOUND_SCCM_LOG_FILE` preserved because it's
+     read by `log_context.py`.
+   - PS1 invocation runs from `output_dir` with no `-ZipDir` (PS1 treats
+     `-ZipDir`'s value as a file path, not a directory).
+   - PS1 `-MemoryThresholdPercent 99` because the lab dev box runs at ~98 %
+     baseline memory; the default 95 % aborted PS1 mid-collection.
+   - CMBP-python flag set — dropped `--ldap-signing` /
+     `--ldap-channel-binding` (CMBP-python doesn't accept them; OpenHound-only).
+   - Console tee uses bytes-mode read + `errors='replace'` so Windows
+     PowerShell's cp1252 stdout doesn't trip on U+FFFD or non-cp1252 chars
+     in CMBP-python's verbose output.
+   - **Preprocess input path** — now passes `<output_dir>/<role>/raw` (the
+     parent of the dlt dataset dir) instead of `raw/sccm`. The framework
+     joins `<input>/<sccm/...>` internally; without the fix, preproc
+     yields zero source rows and every transforms-built view is empty
+     (so all derived edges go missing).
+   - **OpenHound package step** — after `convert`, run
+     `uv run python -m openhound_sccm.main` to produce
+     `bloodhound-sccm-<ts>.zip`, and return that ZIP as the OH output for
+     cross-collector comparison. The graph dir is *unpruned* (one file
+     per asset kind, with the same SID appearing in multiple files for
+     LDAP-computer-vs-DerivedNode); the ZIP is the BloodHound-ready
+     deduped bundle that PS1 / CMBP-python emit directly.
+
+3. **Harness feature additions**:
+   - `-v` / `--verbose` propagates to every collector invocation (`-v` to
+     CMBP-python and OpenHound, `-Verbose` to PS1) and tees combined
+     stdout/stderr to `<output_dir>/<collector>/console_<collector>.log`.
+   - `--console-diff` runs a normalized line-level Counter diff across
+     the three console transcripts after the sweep (timestamps, thread
+     IDs, paths, progress bars stripped). Requires `--verbose`.
+   - `compare_signatures()` improved — dropped the `[:5]` truncation,
+     groups mismatches per node/edge kind with a kind-level summary line,
+     deterministic ordering.
+
+4. **README** — appended a `### 3. Unit test harness` section under
+   "Running parity tests" with full flag reference and example
+   invocations.
+
+### Files touched this session
+
+- `sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py` (new, ~1240 LOC)
+- `sccm/sccm/tests/unit_test_expectations.py` (new, ~340 LOC)
+- `sccm/sccm/tests/conftest.py` (new, ~10 LOC)
+- `sccm/sccm/README.md` — appended "Unit test harness" section (~80 lines)
+- `sccm/HANDOFF.md` — this block
+
+No `src/openhound_sccm/` files were touched in this session — the harness
+work and the drift analysis were the deliverable, not the parity fixes
+themselves.
+
+### PS1 ↔ OpenHound stage order (audit complete)
+
+PS1 stages active by default (per `ConfigManBearPig.ps1` line 278-283):
+
+```
+PhasesOnce    = ['LDAP', 'Local', 'DNS']
+PhasesPerHost = ['RemoteRegistry', 'MSSQL', 'AdminService', 'HTTP', 'SMB']
+```
+
+(`DHCP` and `WMI` are commented out in the active list — see lines
+278-283. CMBP-python and OpenHound *do* run both; that's expected per
+the historical CMBP-python comment block.)
+
+OpenHound resource registration order in
+[source.py:265-336](sccm/sccm/src/openhound_sccm/source.py) matches the PS1
+order with DHCP/WMI restored:
+
+```
+Phase 1 (LDAP):    ldap_sites, ldap_mp_site_classifications, ldap_computers,
+                   ldap_users, ldap_groups, ldap_group_memberships, ldap_sms_providers
+Phase 2 (Local/DNS/DHCP):  local_management_points, local_distribution_points,
+                           dns_management_points, dhcp_pxe_dps
+Phase 3a (RR/MSSQL):       registry_*, mssql_epa_flags
+Phase 3b (AdminService):   adminservice_*, ldap_sites_admin_extra
+Phase 3c (WMI/HTTP/SMB):   wmi_*, http_*, smb_*, ldap_sites_smb_extra
+Phase 4 (DerivedEdges):    derived_edges (sentinel)
+Phase 6 (DerivedNodes):    derived_nodes
+```
+
+Order matches PS1 intent. The structural difference is **iteration** —
+PS1 loops the per-host phase block until no host remains in
+`Pending` state, so newly-discovered targets (e.g. CAS-DB found via
+RemoteRegistry's `Multisite Component Servers`) get visited by later
+phases. OpenHound runs each resource exactly once. This is the underlying
+cause of root-cause #3 above.
+
+### Open items for the next session (prioritized)
+
+Each item below is a graph-parity ticket against PS1. Per the bug-fix
+rule, fixes that touch graph behavior land in BOTH OpenHound and
+CMBP-python. Do not edit the OpenHound framework.
+
+1. **MSSQL_Server kind emission** — biggest single ticket. Adds 3
+   MSSQL_Server nodes; rewires all 12+ MSSQL_* structural edges so they
+   reference real endpoints. After fix, expect MSSQL_Contains / HostFor /
+   ControlServer / ExecuteOnHost / ControlDB / GetAdminTGS / HostFor /
+   ServiceAccountFor to close most of their delta.
+
+2. **MSSQL ID-scheme switch** — change OH from hostname-based to
+   SID-based MSSQL ids to match PS1/CMBP-python. Touches
+   `collectors/derived.py`, `transforms.py` (the SQL view), and
+   `aggregator.py` (edge emission). Run unit tests
+   (`tests/test_parity.py`) after to catch any breakage.
+
+3. **`sccm_discovered_hosts()` gate** — extend to include hosts
+   discovered via `registry_sccm_databases` AND eagerly warm the
+   AdminService cache. Option (a) from root-cause #3 is the cleanest:
+   add a one-shot `adminservice_payloads()` call inside
+   `sccm_discovered_hosts()` *only when called from `mssql_epa_flags`*
+   (gate it on a flag like `eager_admin=True`). Or move
+   `adminservice_*` resources before `mssql_epa_flags` in the source
+   tuple.
+
+4. **Per-site fan-out for SCCM_Collection / SCCM_SecurityRole /
+   SCCM_AdminUser** — emit `<id>@<site>` per primary site in the
+   hierarchy (e.g. `SMS00001@CAS` AND `SMS00001@PS1`) rather than a
+   single deduped node. Apply in both OH and CMBP-python.
+
+5. **`CoerceAndRelaytoSMB` (lowercase `to`) vs `CoerceAndRelayToSMB`** —
+   OpenHound emits both kinds (1 of each); PS1 emits 6 of
+   `CoerceAndRelayToSMB`. This is the same typo carry-over the HANDOFF
+   bug-fix rule mentions. Standardize on the typo'd lowercase form (the
+   PS1-canonical name) and remove the capitalized variant from OH.
+
+6. **PS1 lowpriv/roanalyst sweep runs use the wrong credentials.** PS1
+   has no `-Credential` parameter and runs under the current logon
+   token (domainadmin). For true three-collector parity at the
+   lowpriv/roanalyst tier, either:
+   - Add a `-Credential` / `-Username` parameter to PS1 and impersonate
+     in the per-host calls (substantial PS1 refactor); OR
+   - Wrap PS1 invocation in `runas /netonly /user:lowpriv` inside the
+     harness's `run_collector` (smaller change, but needs
+     `runas`-permitting account context).
+
+7. **Test harness framework-conformance failures (66 subtests).**
+   `tests/test_extension_methods.py::test_extension_resources_use_{models,assets}`
+   enforce framework convention that every `@app.resource` carries a
+   `columns=<BaseAsset>`-derived Pydantic model registered with
+   `@app.asset`. The live tree's resource explosion (~40 resources)
+   violates this for ~32 raw-data resources. Fix path: define one
+   shared `RawDataAsset(BaseAsset)` decorated with `@app.asset(...)`
+   and `as_node=lambda: None` / `edges=()`, then add
+   `columns=RawDataAsset` to each bare resource. Estimated effort: ~2 hours.
+   Not blocking parity, but the user's task brief said "all tests
+   should pass."
+
+### Lab dev-box memory pressure (warning)
+
+The MAYYHEM dev box runs at ~96-98 % memory baseline. PS1's default
+`-MemoryThresholdPercent 95` triggers immediately and aborts the run.
+The harness now passes `-MemoryThresholdPercent 99` to keep PS1 going,
+but the box is on the edge. Mitigations:
+- Close VS Code (~1.4 GB) before sweep runs.
+- Run lowpriv first (smaller graph), domainadmin last.
+- Raise the dev box's allocated RAM at the proxmox level.
+
+### Where to start next session
+
+1. Read this 19th-session block in full.
+2. Read the 17th-session block below for the v12 baseline context and
+   the framework / convention notes (`Never edit the framework`,
+   `Bug fixes in BOTH collectors`, etc.).
+3. Run `uv run python tests\invoke_configmanbearpig_unit_tests.py --all-collectors -d mayyhem.com -dc 10.2.10.100 -u 'MAYYHEM\domainadmin' -p password --output-dir output\sweep\domainadmin --log-file output\sweep\domainadmin\sweep.log --disable-possible-edges --signature-compare --console-diff --verbose`
+   from `c:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\` to re-establish
+   the baseline diff before touching code. The sweep takes ~13 min.
+4. Tackle items 1-4 in the prioritized list above. Item 1 (MSSQL_Server
+   emission) is the highest-leverage fix.
+5. After each fix cluster, re-run the sweep (or pass `--limit-edge-type
+   MSSQL_Contains` for tight loops).
+6. Repeat for `MAYYHEM\lowpriv` and `MAYYHEM\roanalyst` once domainadmin
+   closes.
+7. Finally re-run all three users *without* `--disable-possible-edges`
+   to verify the possible-edge surface is also at parity.
+
+### Recursion note (19th session)
+
+`Agent` tool *was* in this session's tool surface (used for parallel
+codebase exploration during plan mode). The next session should still
+re-read this HANDOFF block + the 17th-session block + the v12 baselines
+in `sccm/ConfigManBearPig/python/baselines/MAYYHEM_<user>_oh_v12.json`
+before touching graph code.
+
+# SCCM port handoff
+
+You are picking up a port of `sccm/ConfigManBearPig/python/` (~14,600 LOC stateful SCCM
+enumeration tool, "CMBP") into the OpenHound DLT extension at `sccm/sccm/`. The goal is
+**feature parity**: identical total node count, total edge count, and per-edge-kind
+histogram for three users (`MAYYHEM\lowpriv`, `MAYYHEM\roanalyst`, `MAYYHEM\domainadmin`)
+between the CMBP zip and the new OpenHound zip.
+
 ## Project status (2026-05-06, eighteenth session — CLI port: cobra-style flags + justfile)
 
 **Headline:** every `configmanbearpig.py` CLI option is now exposed as a real

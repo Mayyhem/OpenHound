@@ -67,6 +67,12 @@ class _MSSQLSynthProperties(SCCMNodeProperties):
     SCCMSite: Optional[str] = field(default=None, metadata={"description": "SCCM site code this MSSQL principal belongs to"})
     database: Optional[str] = field(default=None, metadata={"description": "MSSQL database name (DatabaseUser only)"})
     login: Optional[str] = field(default=None, metadata={"description": "Login name backing this DatabaseUser"})
+    # ``SQLServer`` mirrors PS1: the server id (``<computer_SID>:1433``) the
+    # principal lives on. PS1 emits this on every Database / Login /
+    # DatabaseUser / DatabaseRole node; the id is already encoded in the
+    # node_id but readers expect a separate property.
+    SQLServer: Optional[str] = field(default=None, metadata={"description": "Parent MSSQL_Server node id"})
+    isFixedRole: Optional[bool] = field(default=None, metadata={"description": "True for the SQL-server-shipped roles (sysadmin / db_owner / etc.)"})
     Type: Optional[str] = field(default=None, metadata={"description": "CMBP-style Type marker"})
 
 logger = logging.getLogger(__name__)
@@ -516,42 +522,69 @@ class DerivedEdges(BaseAsset):
             logger.warning("assign_all_permissions_edges read failed: %s", exc)
 
         # --- MSSQL sysadmin fan-out (8 edges + 2 nodes per row) -------
+        # ``has_registry_confirmation`` mirrors the same flag used by
+        # ``mssql_server_hierarchy_edges`` and the matching gate in CMBP-
+        # python's ``_create_mssql_sysadmin_edges``: when
+        # ``--disable-possible-edges`` is set and the site DB host wasn't
+        # confirmed via the ``Multisite Component Servers`` registry
+        # subkey, the database-dependent edges (IsMappedTo to
+        # DatabaseUser, Database->DatabaseUser Contains, DatabaseUser->
+        # db_owner MemberOf) are skipped. The login-side fan-out
+        # (HasLogin, Server->Login Contains, Login->sysadmin MemberOf)
+        # always fires.
+        dpe_on = (
+            os.environ.get("SOURCES__SCCM__DISABLE_POSSIBLE_EDGES", "").lower()
+            in ("1", "true", "yes")
+        )
         try:
             rows = client.execute(
-                f"SELECT start_id, server_id, database_id, login_name, site_code, collection_source "
+                f"SELECT start_id, server_id, database_id, login_name, site_code, "
+                f"collection_source, has_registry_confirmation "
                 f"FROM {schema}.mssql_sysadmin_edges"
             ).fetchall()
         except Exception as exc:
             logger.warning("mssql_sysadmin_edges read failed: %s", exc)
             rows = []
-        for sysadmin_sid, server_id, database_id, login_name, site_code, collection_source in rows:
+        for (
+            sysadmin_sid,
+            server_id,
+            database_id,
+            login_name,
+            site_code,
+            collection_source,
+            has_registry_confirmation,
+        ) in rows:
             login_id = f"{login_name}@{server_id}"
             db_user_id = f"{login_name}@{database_id}"
             sysadmin_role_id = f"sysadmin@{server_id}"
             db_owner_role_id = f"db_owner@{database_id}"
 
-            # Nodes — synthesised here because no separate table exists for
-            # these convert-time MSSQL principals. Properties intentionally
-            # minimal; matches CMBP `_create_mssql_sysadmin_edges`.
-            # NOTE — synthesised MSSQL_Login / MSSQL_DatabaseUser nodes are not
-            # emitted here because OpenHound's convert pipeline only accepts
-            # ``Edge`` objects from a model's ``edges`` generator (nodes go
-            # through ``as_node`` which is single-valued). BloodHound's
-            # graph DB will create stub nodes on first reference, which is
-            # adequate for Phase 4. Phase 6 may add a dedicated synthesised-
-            # node resource if richer node properties are needed.
+            emit_db_edges = (not dpe_on) or bool(has_registry_confirmation)
 
-            # Edges
-            for e in (
+            # Login-side edges fire for every sysadmin row. These only
+            # reference MSSQL_Login / MSSQL_ServerRole sysadmin, both of
+            # which the per-server hierarchy view always emits.
+            login_edges = (
                 _emit_edge(sysadmin_sid, login_id, ek.MSSQL_HAS_LOGIN, collection_source=collection_source),
                 _emit_edge(server_id, login_id, ek.MSSQL_CONTAINS, collection_source=collection_source),
                 _emit_edge(login_id, sysadmin_role_id, ek.MSSQL_MEMBER_OF, collection_source=collection_source),
-                _emit_edge(login_id, db_user_id, ek.MSSQL_IS_MAPPED_TO, collection_source=collection_source),
-                _emit_edge(database_id, db_user_id, ek.MSSQL_CONTAINS, collection_source=collection_source),
-                _emit_edge(db_user_id, db_owner_role_id, ek.MSSQL_MEMBER_OF, collection_source=collection_source),
-            ):
+            )
+            for e in login_edges:
                 if e:
                     yield e
+
+            # Database-side edges only fire when the database hierarchy
+            # is emitted (matches CMBP-python's gate so both collectors
+            # agree on edge counts when registry isn't reachable).
+            if emit_db_edges:
+                db_edges = (
+                    _emit_edge(login_id, db_user_id, ek.MSSQL_IS_MAPPED_TO, collection_source=collection_source),
+                    _emit_edge(database_id, db_user_id, ek.MSSQL_CONTAINS, collection_source=collection_source),
+                    _emit_edge(db_user_id, db_owner_role_id, ek.MSSQL_MEMBER_OF, collection_source=collection_source),
+                )
+                for e in db_edges:
+                    if e:
+                        yield e
 
         # --- MSSQL per-server structural hierarchy edges (HostFor, ----
         # ExecuteOnHost, ControlServer, ControlDB, plus the three
@@ -617,17 +650,30 @@ class DerivedEdges(BaseAsset):
             logger.warning("has_member_edges read failed: %s", exc)
 
         # --- Phase 6: SCCM_HasClient (Site -> ClientDevice) ------------
-        # PS1 emits ONE edge per (site, device) carrying a LIST of source tags
-        # (``AdminService-ClientDevices`` + ``AdminService-SMS_R_System``).
-        # ``has_client_edges`` stores one row per (site, device, source);
-        # ``_emit_grouped_edges`` merges them into a single Edge with the
-        # multi-element ``collectionSource`` list.
+        # PS1 groups the two AdminService-source rows into one Edge per
+        # (site, device) but keeps any cmrc-synth (``LDAP-CmRcService``)
+        # row as a *separate* Edge — even when start/end match an
+        # AdminService edge. Mirror that here: AdminService rows go
+        # through ``_emit_grouped_edges``; cmrc-synth rows are emitted
+        # as standalone Edges.
         try:
             rows = client.execute(
                 f"SELECT start_id, end_id, collection_source FROM {schema}.has_client_edges"
             ).fetchall()
-            for e in _emit_grouped_edges(rows, default_kind=ek.SCCM_HAS_CLIENT):
+            adminservice_rows = []
+            cmrc_rows = []
+            for r in rows:
+                start, end, source = r
+                if source == "LDAP-CmRcService":
+                    cmrc_rows.append(r)
+                else:
+                    adminservice_rows.append(r)
+            for e in _emit_grouped_edges(adminservice_rows, default_kind=ek.SCCM_HAS_CLIENT):
                 yield e
+            for start, end, source in cmrc_rows:
+                e = _emit_edge(start, end, ek.SCCM_HAS_CLIENT, collection_source=source)
+                if e:
+                    yield e
         except Exception as exc:
             logger.warning("has_client_edges read failed: %s", exc)
 

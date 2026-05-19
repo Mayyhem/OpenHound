@@ -339,6 +339,20 @@ def _prune_to_sccm_subgraph(
         if (nk.COMPUTER in kinds or nk.USER in kinds) and props.get("SCCMInfra") is True:
             anchors.add(nid)
             continue
+        # Computers with the CmRcService SPN are SCCM clients (the SPN is
+        # registered by the SCCM client agent). PS1 (line 3262) emits a
+        # Computer node for every such host *regardless* of
+        # ``-DisablePossibleEdges`` — only the downstream SCCM_ClientDevice
+        # + SCCM_HasClient pair is DPE-gated. Anchor the Computer here so
+        # the output prune keeps it, matching CMBP's
+        # ``_collect_cmrc_service_spns`` behaviour.
+        if nk.COMPUTER in kinds:
+            spns = props.get("servicePrincipalName") or []
+            if isinstance(spns, str):
+                spns = [spns]
+            if any(str(s).lower().startswith("cmrcservice/") for s in spns):
+                anchors.add(nid)
+                continue
         for suffix in _ANCHOR_ID_SUFFIXES:
             if nid.upper().endswith("-" + suffix) or nid.upper() == suffix:
                 anchors.add(nid)

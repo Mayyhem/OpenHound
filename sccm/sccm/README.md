@@ -409,3 +409,78 @@ property-difference summary. Useful flags:
 
 Parity is achieved when the per-kind / per-property diff for each in-scope kind
 shows zero "only-in-baseline" entries.
+
+
+### 3. Unit test harness (`tests/invoke_configmanbearpig_unit_tests.py`)
+
+The integration harness runs any of the three collectors (PowerShell,
+ConfigManBearPig Python, or this OpenHound extension), tests the resulting
+OpenGraph output against
+[`tests/unit_test_expectations.py`](tests/unit_test_expectations.py)'s 116
+edge assertions, and produces a cross-collector comparison. Run from this
+directory:
+
+```pwsh
+uv run python tests\invoke_configmanbearpig_unit_tests.py --help
+```
+
+Run a single collector and assert the expected-edge set:
+
+```pwsh
+uv run python tests\invoke_configmanbearpig_unit_tests.py `
+  --collector openhound `
+  --domain mayyhem.com --domain-controller 10.2.10.100 `
+  --username 'MAYYHEM\domainadmin' --password password `
+  --output-dir output\test-da
+```
+
+Run **all three** collectors in one pass and assert that node totals, edge
+totals, per-edge-kind histograms, and canonical node/edge signatures match
+across them. Use `--verbose` to also assert console-log parity across the three
+verbose transcripts:
+
+```pwsh
+uv run python tests\invoke_configmanbearpig_unit_tests.py `
+  --all-collectors `
+  --domain mayyhem.com --domain-controller 10.2.10.100 `
+  --username 'MAYYHEM\domainadmin' --password password `
+  --output-dir output\sweep\domainadmin `
+  --log-file output\sweep\domainadmin\sweep.log `
+  --disable-possible-edges `
+  --signature-compare `
+  --console-diff `
+  --verbose
+```
+
+Flags worth knowing:
+
+- `--all-collectors` — run PowerShell, CMBP Python, and OpenHound, then
+  cross-compare their outputs.
+- `--signature-compare` — diff canonical node and edge signatures (not just
+  totals + histograms). Mismatches are grouped per node/edge kind and
+  deterministically sorted, with no truncation.
+- `-v` / `--verbose` — propagate `-v` / `-Verbose` to every collector
+  invocation and tee each collector's console output to
+  `<output-dir>/<collector>/console_<collector>.log`.
+- `--console-diff` — after the sweep completes, normalize timestamps /
+  paths / progress bars and diff the three per-collector verbose transcripts
+  to surface intent drift. Requires `--verbose`.
+- `--disable-possible-edges` — passes the same flag through to each
+  collector. Use this while triaging deterministic-edge drift, then re-run
+  without it to confirm the possible-edge surface is also at parity.
+- `--limit-edge-type <Kind>` — restrict the expected-edge assertions to
+  one edge kind, for tight triage loops.
+- `--skip-edge-tests` — skip the expected-edge assertions; only print
+  node / edge totals and per-kind histograms.
+- `--compare name=path` (repeatable) — load an extra OpenGraph ZIP / JSON /
+  directory under *name* and include it in the cross-collector comparison.
+
+Outputs land under `output/` (gitignored via the top-level `.gitignore`
+`output*` glob).
+
+Test an existing OpenGraph directory or ZIP without re-running collection:
+
+```pwsh
+uv run python tests\invoke_configmanbearpig_unit_tests.py --input-path output\sweep\domainadmin\openhound\domainadmin\graph
+uv run python tests\invoke_configmanbearpig_unit_tests.py --input-path output\sweep\domainadmin\configmanbearpig-python\bloodhound-sccm-<timestamp>.zip
+```

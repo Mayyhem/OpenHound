@@ -222,17 +222,18 @@ class SCCMLookup(LookupManager):
 
     @lru_cache
     def admin_user_collection_ids(self, collection_names: tuple[str, ...], site_code: str) -> tuple[str, ...]:
-        """Resolve a tuple of collection names to ``<collection_id>@<root_site_code>``
-        node IDs matching the SCCM_Collection node IDs emitted by
-        ``models/sccm_collection.py``.
+        """Resolve a tuple of collection names to ``<collection_id>@<site_code>``
+        node IDs matching the per-site SCCM_Collection node IDs.
 
-        Mirrors CMBP's ``collectionIDs`` resolution for SCCM_AdminUser
-        (ConfigManBearPig.ps1 lines 7819-7833). Names are matched
-        case-insensitively against ``adminservice_collections.name``.
+        Each SMS Provider reports collections tagged with its own site
+        code, so an admin discovered via the PS1-PSS provider references
+        ``SMS00001@PS1``, while the same admin discovered via the
+        CAS-PSS provider references ``SMS00001@CAS``. Mirrors CMBP's
+        ``collectionIDs`` resolution (ConfigManBearPig.ps1 lines
+        7819-7833) with the PS1 per-provider fan-out preserved.
         """
         if not collection_names or not site_code:
             return ()
-        root = self.hierarchy_root(site_code) or site_code
         names_lower = [n.lower() for n in collection_names if n]
         if not names_lower:
             return ()
@@ -245,19 +246,22 @@ class SCCMLookup(LookupManager):
             )
         except Exception:
             return ()
-        return tuple(sorted(f"{r[0]}@{root}" for r in rows if r and r[0]))
+        return tuple(sorted(f"{r[0]}@{site_code}" for r in rows if r and r[0]))
 
     @lru_cache
     def admin_user_role_ids(self, role_names: tuple[str, ...], site_code: str) -> tuple[str, ...]:
-        """Resolve a tuple of role names to ``<role_id>@<root_site_code>``
-        node IDs matching the SCCM_SecurityRole node IDs.
+        """Resolve a tuple of role names to ``<role_id>@<site_code>``
+        node IDs matching the per-site SCCM_SecurityRole node IDs.
 
-        Mirrors CMBP's ``securityRoles`` resolution for SCCM_AdminUser
-        (ConfigManBearPig.ps1 lines 7864-7888).
+        Each SMS Provider reports roles tagged with its own site code,
+        so an admin discovered via PS1-PSS references ``SMS0001R@PS1``
+        while the same admin via CAS-PSS references ``SMS0001R@CAS``.
+        Mirrors CMBP's ``securityRoles`` resolution
+        (ConfigManBearPig.ps1 lines 7864-7888) with the PS1 per-provider
+        fan-out preserved.
         """
         if not role_names or not site_code:
             return ()
-        root = self.hierarchy_root(site_code) or site_code
         names_lower = [n.lower() for n in role_names if n]
         if not names_lower:
             return ()
@@ -270,7 +274,7 @@ class SCCMLookup(LookupManager):
             )
         except Exception:
             return ()
-        return tuple(sorted(f"{r[0]}@{root}" for r in rows if r and r[0]))
+        return tuple(sorted(f"{r[0]}@{site_code}" for r in rows if r and r[0]))
 
     # -----------------------------------------------------------------
     # MSSQL EPA flag (used by post-processing coerce edges)
@@ -393,23 +397,26 @@ class SCCMLookup(LookupManager):
 
             (display_name, site_server_name, sql_server_name,
              sql_database_name, sql_service_account_name, version,
-             site_type, parent_site_code)
+             site_type, parent_site_code, install_dir)
 
         Any field absent from AdminService is returned as ``None``. The
         SCCMSite model uses these as fallbacks for its own ``None`` slots.
         """
         if not site_code:
-            return (None, None, None, None, None, None, None, None)
+            return (None, None, None, None, None, None, None, None, None)
 
         display_name: str | None = None
         site_server_name: str | None = None
         version: str | None = None
         site_type: str | None = None
         parent_site_code: str | None = None
-        # SMS_Site: display name, site server, version, type, parent.
+        install_dir: str | None = None
+        # SMS_Site: display name, site server, version, type, parent,
+        # install directory.
         try:
             row = self._find_all_objects(
-                f"SELECT site_name, server_name, version, site_type, reporting_site_code "
+                f"SELECT site_name, server_name, version, site_type, "
+                f"reporting_site_code, install_dir "
                 f"FROM {self.schema}.adminservice_sites "
                 f"WHERE LOWER(site_code) = LOWER(?) LIMIT 1",
                 [site_code],
@@ -432,6 +439,7 @@ class SCCMLookup(LookupManager):
             parent_raw = (r[4] or None) if r and len(r) > 4 else None
             if parent_raw and parent_raw != site_code:
                 parent_site_code = parent_raw
+            install_dir = (r[5] or None) if r and len(r) > 5 else None
 
         # SMS_SCI_SiteDefinition: SQL server/db, and a more reliable SiteName.
         sql_server_name: str | None = None
@@ -479,6 +487,7 @@ class SCCMLookup(LookupManager):
             version,
             site_type,
             parent_site_code,
+            install_dir,
         )
 
     @lru_cache

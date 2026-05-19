@@ -259,15 +259,18 @@ def test_computer_site_system_roles_aggregates_all_roles(lookup):
     assert "SMS Management Point@PS1" in roles
 
 
-def test_admin_user_collection_ids_resolves_via_root(lookup):
+def test_admin_user_collection_ids_uses_provider_site(lookup):
+    # PS1 emits one SCCM_Collection node per SMS Provider (site_code), so
+    # admin lookups must use the provider's raw site_code rather than the
+    # hierarchy root. The fixture row carries site_code=PS1.
     ids = lookup.admin_user_collection_ids(("All Systems",), "PS1")
-    # Hierarchy root for PS1 is CAS, so IDs should be rewritten.
-    assert ids == ("SMS00001@CAS",)
+    assert ids == ("SMS00001@PS1",)
 
 
-def test_admin_user_role_ids_resolves_via_root(lookup):
+def test_admin_user_role_ids_uses_provider_site(lookup):
+    # Same per-provider behaviour as the collection lookup above.
     ids = lookup.admin_user_role_ids(("Full Administrator",), "PS1")
-    assert ids == ("SMS0001R@CAS",)
+    assert ids == ("SMS0001R@PS1",)
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ class SCCMAdminUserProperties(SCCMNodeProperties):
     adminID: Optional[int] = field(default=None, metadata={"description": "AdminID integer (PS1 uppercase variant of adminId)"})
     lastModifiedBy: Optional[str] = field(default=None, metadata={"description": "PS1 only: who last modified the admin record"})
     lastModifiedDate: Optional[str] = field(default=None, metadata={"description": "PS1 only: when the admin record was last modified"})
+    distinguishedName: Optional[str] = field(default=None, metadata={"description": "AD distinguishedName of the user / group resolved via admin_sid"})
     domain: Optional[str] = field(default=None, metadata={"description": "AD domain"})
 
 
@@ -84,22 +85,52 @@ class SCCMAdminUser(BaseAsset):
     source_site_code: Optional[str] = None
     role_names: Optional[list[str]] = None
     collection_names: Optional[list[str]] = None
+    last_modified_by: Optional[str] = None
+    last_modified_date: Optional[str] = None
     domain: Optional[str] = None
     source: Optional[str] = "AdminService-SMS_Admin"
 
     @property
     def as_node(self) -> SCCMNode:
-        # Resolve the hierarchy root so ids are stable across CAS/Primary
-        # boundaries. See module docstring (Risk 1).
+        # PS1 fans each admin out per SMS Provider that reports it (one per
+        # primary site), so the same logon appears as both <logon>@CAS and
+        # <logon>@PS1. Use the raw site_code in the id to keep that split;
+        # rootSiteCode below still resolves to the hierarchy root for
+        # cross-site pivot queries.
+        site_for_id = self.site_code or ""
         root_site_code = (
             self._lookup.hierarchy_root(self.site_code) if self.site_code else None
         ) or self.site_code or ""
 
         logon_lower = (self.logon_name or "").lower().strip()
-        node_id = f"{logon_lower}@{root_site_code}"
+        node_id = f"{logon_lower}@{site_for_id}"
         # PS1 emits ``name`` = bare logon_name (no @site suffix). Match that
         # so BloodHound queries against ``a.name = 'mayyhem\\domainadmin'`` work.
         display = self.logon_name or node_id
+
+        # ``distinguishedName`` resolved from ``admin_sid``. The admin
+        # might be a user (most cases) or a group, so we try both
+        # ``ldap_users`` and ``ldap_groups`` keyed by ``object_sid``.
+        admin_dn: Optional[str] = None
+        if self.admin_sid:
+            try:
+                client = self._lookup.client
+                schema = self._lookup.schema
+                row = client.execute(
+                    f"SELECT distinguished_name FROM {schema}.ldap_users "
+                    f"WHERE object_sid = ? LIMIT 1",
+                    [self.admin_sid],
+                ).fetchone()
+                if not row or not row[0]:
+                    row = client.execute(
+                        f"SELECT distinguished_name FROM {schema}.ldap_groups "
+                        f"WHERE object_sid = ? LIMIT 1",
+                        [self.admin_sid],
+                    ).fetchone()
+                if row and row[0]:
+                    admin_dn = row[0]
+            except Exception:
+                pass
 
         # Resolve role names / collection names to canonical SCCM_SecurityRole /
         # SCCM_Collection node IDs so BloodHound queries like
@@ -140,6 +171,9 @@ class SCCMAdminUser(BaseAsset):
                 securityRoles=security_role_ids,
                 collectionIDs=collection_ids,
                 adminID=self.admin_id,
+                lastModifiedBy=self.last_modified_by or None,
+                lastModifiedDate=self.last_modified_date or None,
+                distinguishedName=admin_dn,
                 domain=self.domain,
             ),
         )

@@ -404,6 +404,7 @@ def _preproc_table_map() -> dict[str, str]:
         "registry_sccm_databases",
         "registry_current_users",
         "registry_sccm_components",
+        "registry_mssql_settings",
         "mssql_epa_flags",
         "adminservice_admins",
         "adminservice_collections",

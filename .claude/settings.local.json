@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(cat \"C:/Users/domainadmin/AppData/Roaming/uv/tools/openhound/Lib/site-packages/openhound/cli/collect.py\" 2>&1 | head -60)",
-      "Read(//c/Users/domainadmin/AppData/Roaming/uv/tools/openhound/Lib/site-packages/openhound/cli/**)"
+      "Read(//c/Users/domainadmin/AppData/Roaming/uv/tools/openhound/Lib/site-packages/openhound/cli/**)",
+      "Bash(cat c:/Users/domainadmin/Desktop/codex/OpenHound/sccm/sccm/README.md 2>&1 | head -100)",
+      "Read(//c/Users/domainadmin/Desktop/codex/OpenHound/sccm/sccm/**)",
+      "PowerShell(Test-Path \"C:\\\\Users\\\\domainadmin\\\\Desktop\\\\OpenHound\\\\sccm\\\\sccm\\\\output\" -ErrorAction SilentlyContinue; if \\($?\\) { \\(Get-ChildItem -Path \"C:\\\\Users\\\\domainadmin\\\\Desktop\\\\OpenHound\\\\sccm\\\\sccm\\\\output\" -Recurse -File 2>/dev/null\\).Count })",
+      "PowerShell($path = \"C:\\\\Users\\\\domainadmin\\\\Desktop\\\\OpenHound\\\\sccm\\\\sccm\\\\output\"; if \\(Test-Path $path\\) { \\(Get-ChildItem -Path $path -Recurse -File -ErrorAction SilentlyContinue | Measure-Object\\).Count } else { \"Directory does not exist\" })",
+      "Bash(git -C \"c:/Users/domainadmin/Desktop/OpenHound\" log --oneline -20)"
     ]
   }
 }
