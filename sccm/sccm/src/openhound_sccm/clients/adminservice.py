@@ -267,6 +267,7 @@ class AdminServiceClient:
                 url = url + separator + "&".join(f"{k}={v}" for k, v in odata_pairs)
             request_params = other or None
 
+        logger.verbose("AdminService GET %s", url)
         try:
             response = self._session.get(
                 url,
@@ -274,10 +275,11 @@ class AdminServiceClient:
                 timeout=self.timeout,
             )
         except requests.RequestException as exc:
-            logger.debug("adminservice request failed for %s: %s", url, exc)
+            logger.verbose("AdminService request failed for %s: %s", url, exc)
             return None
 
         status_code = response.status_code
+        logger.verbose("    Received %s from %s", status_code, url)
         if status_code == 401:
             logger.warning("adminservice 401 (auth) on %s", url)
             return None
@@ -285,10 +287,10 @@ class AdminServiceClient:
             logger.warning("adminservice 403 (forbidden) on %s", url)
             return None
         if status_code == 404:
-            logger.debug("adminservice 404 on %s", url)
+            logger.verbose("adminservice 404 on %s", url)
             return None
         if status_code >= 400:
-            logger.debug("adminservice HTTP %s on %s", status_code, url)
+            logger.verbose("adminservice HTTP %s on %s", status_code, url)
             return None
 
         if not response.content:
@@ -296,7 +298,7 @@ class AdminServiceClient:
         try:
             return response.json()
         except ValueError as exc:
-            logger.debug("adminservice JSON decode failed on %s: %s", url, exc)
+            logger.verbose("adminservice JSON decode failed on %s: %s", url, exc)
             return None
 
     def get_paginated(

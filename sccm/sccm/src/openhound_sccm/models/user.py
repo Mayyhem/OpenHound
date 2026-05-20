@@ -85,6 +85,7 @@ class User(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node_with_properties
         display = self.display_name or self.sam_account_name or self.object_sid
         # Tag SCCMInfra=True when this User appears in
         # adminservice_r_user_security_groups (i.e. SMS_R_User found
@@ -136,29 +137,43 @@ class User(BaseAsset):
                     stored_in_site = row[0]
             except Exception:
                 pass
-        return SCCMNode(
-            kinds=[nk.USER, nk.BASE],
-            properties=UserProperties(
-                node_id=self.object_sid,
-                name=display,
-                displayname=display,
-                environmentid=self.domain or None,
-                distinguishedName=self.distinguished_name,
-                objectGuid=self.object_guid,
-                servicePrincipalName=self.service_principal_names,
-                collectionSource=["LDAP"],
-                Type="User",
-                # PS1-style PascalCase AD-property casing.
-                Domain=self.domain,
-                SamAccountName=self.sam_account_name,
-                Enabled=self.enabled,
-                IsDomainPrincipal=True,
-                UserPrincipalName=self.user_principal_name,
-                SCCMResourceIDs=sccm_resource_ids,
-                storedInSCCMSite=stored_in_site,
-                SCCMInfra=sccm_infra,
-            ),
+        # collectionSource — LDAP plus any extras from
+        # ldap_system_management_acl when this user holds GenericAll on
+        # the System Management container (PS1: ConfigManBearPig.ps1:3502).
+        collection_sources: list[str] = ["LDAP"]
+        try:
+            acl_row = client.execute(
+                f"SELECT 1 FROM {schema}.ldap_system_management_acl "
+                f"WHERE principal_sid = ? LIMIT 1",
+                [self.object_sid],
+            ).fetchone()
+            if acl_row:
+                collection_sources.append("LDAP-GenericAllSystemManagement")
+        except Exception:
+            pass
+
+        props = UserProperties(
+            node_id=self.object_sid,
+            name=display,
+            displayname=display,
+            environmentid=self.domain or None,
+            distinguishedName=self.distinguished_name,
+            objectGuid=self.object_guid,
+            servicePrincipalName=self.service_principal_names,
+            collectionSource=collection_sources,
+            Type="User",
+            # PS1-style PascalCase AD-property casing.
+            Domain=self.domain,
+            SamAccountName=self.sam_account_name,
+            Enabled=self.enabled,
+            IsDomainPrincipal=True,
+            UserPrincipalName=self.user_principal_name,
+            SCCMResourceIDs=sccm_resource_ids,
+            storedInSCCMSite=stored_in_site,
+            SCCMInfra=sccm_infra,
         )
+        trace_node_with_properties("User", self.object_sid, display, props)
+        return SCCMNode(kinds=[nk.USER, nk.BASE], properties=props)
 
     @property
     def edges(self):

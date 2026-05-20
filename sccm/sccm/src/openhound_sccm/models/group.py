@@ -76,6 +76,7 @@ class Group(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node_with_properties
         display = self.name or self.sam_account_name or self.object_sid
         # SCCMResourceIDs for groups — PS1 emits the ResourceID@SiteCode
         # entries of users whose ``SecurityGroupName`` references this
@@ -104,26 +105,42 @@ class Group(BaseAsset):
         except Exception:
             pass
 
-        return SCCMNode(
-            kinds=[nk.GROUP, nk.BASE],
-            properties=GroupProperties(
-                node_id=self.object_sid,
-                name=display,
-                displayname=display,
-                environmentid=self.domain or None,
-                distinguishedName=self.distinguished_name,
-                objectGuid=self.object_guid,
-                groupType=self.group_type,
-                collectionSource=["LDAP"],
-                Type="Group",
-                # PS1-style PascalCase AD-property casing.
-                Domain=self.domain,
-                SamAccountName=self.sam_account_name,
-                Enabled=True,
-                IsDomainPrincipal=True,
-                SCCMResourceIDs=sccm_resource_ids,
-            ),
+        # collectionSource — LDAP plus any extras from
+        # ldap_system_management_acl when this group holds GenericAll on
+        # the System Management container (PS1: ConfigManBearPig.ps1:3508).
+        collection_sources: list[str] = ["LDAP"]
+        try:
+            lookup = getattr(self, "_lookup", None)
+            if lookup is not None:
+                acl_row = lookup.client.execute(
+                    f"SELECT 1 FROM {lookup.schema}.ldap_system_management_acl "
+                    f"WHERE principal_sid = ? LIMIT 1",
+                    [self.object_sid],
+                ).fetchone()
+                if acl_row:
+                    collection_sources.append("LDAP-GenericAllSystemManagement")
+        except Exception:
+            pass
+
+        props = GroupProperties(
+            node_id=self.object_sid,
+            name=display,
+            displayname=display,
+            environmentid=self.domain or None,
+            distinguishedName=self.distinguished_name,
+            objectGuid=self.object_guid,
+            groupType=self.group_type,
+            collectionSource=collection_sources,
+            Type="Group",
+            # PS1-style PascalCase AD-property casing.
+            Domain=self.domain,
+            SamAccountName=self.sam_account_name,
+            Enabled=True,
+            IsDomainPrincipal=True,
+            SCCMResourceIDs=sccm_resource_ids,
         )
+        trace_node_with_properties("Group", self.object_sid, display, props)
+        return SCCMNode(kinds=[nk.GROUP, nk.BASE], properties=props)
 
     @property
     def edges(self):

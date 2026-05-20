@@ -552,7 +552,10 @@ class ADClient:
         """
         conn = self.bind()
         base_dn = base or self.base_dn
-        logger.debug("LDAP search: base=%s filter=%s", base_dn, search_filter)
+        # Promoted to VERBOSE so ``-vv`` shows the same per-query trace PS1's
+        # AD resolver emits at ``[Verbose]`` for each ADSISearcher / DirectorySearcher
+        # attempt. ``--debug`` still gets the same line.
+        logger.verbose("LDAP search: base=%s filter=%s", base_dn, search_filter)
         total = 0
         page = 0
         try:
@@ -598,7 +601,7 @@ class ADClient:
         except LDAPException as e:
             logger.warning("LDAP search failed (filter=%s, base=%s): %s", search_filter, base_dn, e)
         finally:
-            logger.debug(
+            logger.verbose(
                 "LDAP search complete: base=%s filter=%s entries=%d pages=%d",
                 base_dn,
                 search_filter,

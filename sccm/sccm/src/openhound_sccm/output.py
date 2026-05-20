@@ -472,6 +472,32 @@ def package(
     temp_dir = output_dir / f"openhound-sccm-{timestamp}"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
+    # PS1-equivalent end-of-collection statistics block. ConfigManBearPig.ps1
+    # emits these at INFO ("Collection Statistics" / "Total targets identified" /
+    # "Total nodes created" / "Total edges created" / "Writing N <kind> nodes
+    # to <path>"). Mirror the same intent so an OH operator sees the same
+    # human-readable summary at the end of every run.
+    from collections import Counter
+    logger.info("Collection Statistics:")
+    logger.info("Total nodes created: %d", len(nodes))
+    logger.info("Total edges created: %d", len(edges))
+    node_kind_counts: Counter = Counter()
+    for n in nodes:
+        for k in (n.get("kinds") or []):
+            if k != "Base":  # "Base" is on every AD node — would dominate the table
+                node_kind_counts[k] += 1
+                break  # first non-Base kind is the canonical one
+    edge_kind_counts: Counter = Counter(e.get("kind") for e in edges if e.get("kind"))
+    if node_kind_counts:
+        logger.info("Node counts by kind:")
+        for k, c in sorted(node_kind_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            logger.info("    %-25s %d", k, c)
+    if edge_kind_counts:
+        logger.info("Edge counts by kind:")
+        for k, c in sorted(edge_kind_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            logger.info("    %-25s %d", k, c)
+
+    logger.info("Writing BloodHound data...")
     split = _split_nodes(nodes)
     files: list[pathlib.Path] = []
 
@@ -485,10 +511,12 @@ def package(
         path = temp_dir / f"{stem}.json"
         _write_graph_json(path, group_nodes, [], include_source_kind=False)
         files.append(path)
+        logger.info("Writing %d %s nodes to: %s", len(group_nodes), stem, path)
 
     sccm_path = temp_dir / "sccm.json"
     _write_graph_json(sccm_path, split["sccm"], edges, include_source_kind=True)
     files.append(sccm_path)
+    logger.info("Writing %d sccm nodes and %d edges to: %s", len(split["sccm"]), len(edges), sccm_path)
 
     seed_path = temp_dir / "seed_data.json"
     _write_seed_data(seed_path)

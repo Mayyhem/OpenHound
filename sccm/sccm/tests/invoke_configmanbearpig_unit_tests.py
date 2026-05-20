@@ -154,10 +154,20 @@ class Logger:
             "Test": "\033[36m",
             "Verbose": "\033[35m",
         }
+        # Windows cp1252 console can't encode arbitrary Unicode (e.g. the
+        # ``�`` replacement char that shows up in normalized diff
+        # output). Replace unencodable chars rather than crash mid-print.
+        def _safe_print(text: str) -> None:
+            try:
+                print(text)
+            except UnicodeEncodeError:
+                enc = getattr(__import__("sys").stdout, "encoding", "utf-8") or "utf-8"
+                print(text.encode(enc, errors="replace").decode(enc, errors="replace"))
+
         if self.use_color and level in color_map:
-            print(f"{color_map[level]}{message}\033[0m")
+            _safe_print(f"{color_map[level]}{message}\033[0m")
         else:
-            print(message)
+            _safe_print(message)
         if self.log_file:
             with self.log_file.open("a", encoding="utf-8") as handle:
                 handle.write(rendered + "\n")
@@ -1211,7 +1221,10 @@ def run_collector(
         env = openhound_env(args)
         if log_path:
             env["OPENHOUND_SCCM_LOG_FILE"] = str(log_path)
-        verbose_flag = ["-v"] if args.verbose else []
+        # OH's ``-v`` is INFO (step summaries); PS1-parity verbose tier is ``-vv``.
+        # The harness's own ``--verbose`` flag wants per-line intent parity, so
+        # propagate ``-vv`` here.
+        verbose_flag = ["-vv"] if args.verbose else []
         run_command(
             ["uv", "run", "openhound", "collect", "sccm", str(raw), "--progress", "log", *verbose_flag],
             OPENHOUND_SCCM,

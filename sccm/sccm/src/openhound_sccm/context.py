@@ -24,7 +24,7 @@ imports cleanly without creating cycles.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .clients.ad import ADClient
@@ -75,6 +75,13 @@ class SourceContext:
     # cached and re-served to every adminservice_* resource. This avoids 9x
     # HTTP traffic against the same provider.
     _adminservice_payloads: Optional[dict[str, dict[str, Any]]] = None
+    # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when
+    # the LDAP phase first asks for it; the network call is bracketed by
+    # ``phase_context("LDAP")`` so the resulting log line is tagged as an
+    # LDAP event regardless of which resource forces the lazy build. PS1
+    # also runs this query exactly once during its LDAP once-phase
+    # (``ConfigManBearPig.ps1:3221``).
+    _cmrc_spn_matches: Optional[list[dict[str, Any]]] = None
     # Per-host SMB share enumeration cache. Populated lazily on first access
     # by ``smb_shares()``; re-used by the smb_site_servers /
     # smb_distribution_points / smb_signing_status resources AND by the
@@ -93,6 +100,20 @@ class SourceContext:
     # pipeline target list — CMBP runs MSSQL phase only on discovered targets,
     # not against every domain computer).
     _sccm_discovered_hosts: Optional[set[str]] = None
+    # Mutable per-host probe-target accumulator. PS1's ``Add-DeviceToTargets``
+    # appends to a live list and each subsequent per-host phase iterates the
+    # *updated* list — so an MP discovered mid-run via MPLIST XML parsing
+    # still gets RemoteRegistry / MSSQL / WMI / HTTP / SMB probes. The OH
+    # per-host resources call ``target_hosts_snapshot()`` to read this set
+    # at iteration time so late additions are picked up.
+    #
+    # Stored as a dict mapping ``hostname`` (lowercased FQDN or short name)
+    # to a metadata dict ``{"hostname", "sid", "sam", "name", "sources"}``.
+    # ``sources`` is a list of provenance tags (LDAP-mSSMSManagementPoint,
+    # HTTP-MPLIST, AdminService-SMS_Site, etc.) so multiple discovery paths
+    # contributing the same host don't lose attribution.
+    _target_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _target_hosts_lock: Any = field(default=None)
     # Site codes (UPPERCASE) emitted into the ``ldap_sites`` DLT table by
     # any of the three resources that write to it: ``ldap_sites`` (Phase 1,
     # LDAP-only mSSMSSite + mSSMSManagementPoint), ``ldap_sites_admin_extra``
@@ -246,6 +267,139 @@ class SourceContext:
             )
         return out
 
+    # ---- Mutable target-host accumulator (PS1 ``Add-DeviceToTargets`` mirror) ----
+    # The per-host probe resources (registry, mssql, wmi, http, smb) iterate
+    # ``target_hosts_snapshot()`` instead of ``ldap_computer_hosts()`` so a
+    # host registered mid-extract (e.g. an MP discovered by parsing the
+    # MPLIST XML response) gets probed by every subsequent phase.
+
+    def _ensure_target_lock(self) -> Any:
+        if self._target_hosts_lock is None:
+            import threading
+            self._target_hosts_lock = threading.Lock()
+        return self._target_hosts_lock
+
+    def register_target(
+        self,
+        hostname: Optional[str],
+        *,
+        sid: Optional[str] = None,
+        sam: Optional[str] = None,
+        name: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> None:
+        """Append ``hostname`` to the per-host probe target set, merging
+        provenance when the host is already known.
+
+        Idempotent and thread-safe. Empty hostnames are silently dropped.
+        Mirrors PS1's ``Add-DeviceToTargets`` (CallStack from
+        ConfigManBearPig.ps1: LDAP-mSSMSManagementPoint, LDAP-CmRcService,
+        LDAP-connectionPoint, LDAP-GenericAll, HTTP-MPKEYINFORMATION,
+        HTTP-MPLIST, AdminService-SMS_Site, etc. all hit this helper).
+        """
+        if not hostname:
+            return
+        key = hostname.strip().lower()
+        if not key:
+            return
+        with self._ensure_target_lock():
+            existing = self._target_hosts.get(key)
+            if existing is None:
+                existing = {
+                    "hostname": key,
+                    "sid": sid,
+                    "sam": sam,
+                    "name": name,
+                    "sources": [],
+                }
+                self._target_hosts[key] = existing
+            # Don't overwrite an already-known identifier with None.
+            if sid and not existing.get("sid"):
+                existing["sid"] = sid
+            if sam and not existing.get("sam"):
+                existing["sam"] = sam
+            if name and not existing.get("name"):
+                existing["name"] = name
+            if source and source not in existing["sources"]:
+                existing["sources"].append(source)
+
+    def _seed_targets_from_ldap_computers(self) -> None:
+        """Initialise the target accumulator from the LDAP computer snapshot.
+        Called the first time ``target_hosts_snapshot()`` is consulted, but
+        also safe to call repeatedly — ``register_target`` is idempotent."""
+        for h in self.ldap_computer_hosts():
+            self.register_target(
+                h.get("hostname"),
+                sid=h.get("sid"),
+                sam=h.get("sam"),
+                name=h.get("name"),
+                source="LDAP-Computers",
+            )
+
+    def target_hosts_snapshot(self) -> list[dict[str, Any]]:
+        """Return the *current* list of probe targets at the moment this is
+        called. Per-host resources iterate this so late-registered hosts are
+        picked up by phases that haven't started yet.
+
+        First call seeds from ``ldap_computer_hosts()``. Returns a shallow
+        copy of the list so iteration is safe against concurrent
+        ``register_target`` mutations.
+        """
+        with self._ensure_target_lock():
+            if not self._target_hosts:
+                # Outside the lock to avoid recursion (ldap_computer_hosts
+                # may take its own lock indirectly). Release and re-acquire.
+                pass
+        if not self._target_hosts:
+            self._seed_targets_from_ldap_computers()
+        with self._ensure_target_lock():
+            return [dict(v) for v in self._target_hosts.values()]
+
+    # ---- CmRcService SPN match cache ----------------------------------------
+    # PS1 (ConfigManBearPig.ps1:3216-3289) does the ``(servicePrincipalName=
+    # CmRcService/*)`` LDAP search exactly once in its LDAP once-phase and
+    # creates the LDAP-synth SCCM_ClientDevice nodes from the results.
+    # OpenHound previously buried this network call inside
+    # ``adminservice_client_devices`` (so it ran during the AdminService
+    # extract and the log line was mistagged ``[AdminService]``). This
+    # cache + the LDAP-phase resource that drives it move the search back
+    # to where it belongs.
+
+    def cmrc_spn_matches(self) -> list[dict[str, Any]]:
+        """Return the list of LDAP entries carrying a ``CmRcService/*`` SPN.
+
+        Lazy. The actual LDAP search runs the first time this is called.
+        Returns ``[]`` when the LDAP collection method is disabled — that
+        matches PS1's gate (``-CollectionMethods`` excludes ``LDAP`` →
+        no SPN-based ClientDevice synthesis).
+        """
+        from .log_context import phase_context, target_context
+
+        if self._cmrc_spn_matches is not None:
+            return self._cmrc_spn_matches
+        if not self.method_enabled("LDAP"):
+            self._cmrc_spn_matches = []
+            return self._cmrc_spn_matches
+        with target_context(self.domain or None), phase_context("LDAP"):
+            try:
+                rows = list(
+                    self.ad.paged_search(
+                        search_filter="(servicePrincipalName=CmRcService/*)",
+                        attributes=[
+                            "objectSid", "sAMAccountName", "name", "dNSHostName",
+                        ],
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ldap CmRcService search failed: %s", exc)
+                rows = []
+            logger.info(
+                "ldap CmRcService: found %d SCCM client computer(s) via SPN",
+                len(rows),
+            )
+        self._cmrc_spn_matches = rows
+        return rows
+
     # ---- AdminService payload cache ----------------------------------------
     # Each SMS Provider's AdminService is queried once per source run. The
     # adminservice_* resources all share this cache so we don't hit each
@@ -338,6 +492,26 @@ class SourceContext:
                 if payload is None:
                     continue
                 out[host] = payload
+                # Register every host the AdminService payload mentions as a
+                # probe target. This is the OH-side equivalent of PS1's
+                # ``Add-DeviceToTargets`` calls inside its AdminService
+                # collector — devices that SCCM knows about but that didn't
+                # show up via LDAP-by-name (e.g. cross-forest clients) still
+                # get RemoteRegistry / WMI / HTTP / SMB probes.
+                for dev in payload.get("client_devices") or []:
+                    dns = (dev.get("dns_host_name") or "").lower() or None
+                    machine = (dev.get("machine_name") or "").strip() or None
+                    self.register_target(
+                        dns or machine,
+                        sid=dev.get("ad_object_sid") or None,
+                        name=machine,
+                        source="AdminService-SMS_R_System",
+                    )
+                for ss in payload.get("site_systems") or []:
+                    self.register_target(
+                        (ss.get("hostname") or "").strip() or None,
+                        source="AdminService-SMS_SCI_SysResUse",
+                    )
 
         self._adminservice_payloads = out
         return out

@@ -105,12 +105,15 @@ from .collectors.http import (  # noqa: E402
     http_smsproviders,
 )
 from .collectors.ldap import (  # noqa: E402
+    ldap_cmrc_devices,
     ldap_computers,
     ldap_group_memberships,
     ldap_groups,
     ldap_mp_site_classifications,
+    ldap_network_boot_servers,
     ldap_sites,
     ldap_sms_providers,
+    ldap_system_management_acl,
     ldap_users,
 )
 from .collectors.local import (  # noqa: E402
@@ -272,6 +275,9 @@ def source(
         ldap_groups(ctx),
         ldap_group_memberships(ctx),
         ldap_sms_providers(ctx),
+        ldap_cmrc_devices(ctx),
+        ldap_network_boot_servers(ctx),
+        ldap_system_management_acl(ctx),
         # Phase 2 — Local / DNS / DHCP once-phases. Each runs locally on the
         # collector machine (no per-host fan-out) and contributes provenance
         # rows to ``sccm.targets`` via the SQL union in ``transforms.py``.

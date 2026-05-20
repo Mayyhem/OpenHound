@@ -73,6 +73,7 @@ class SCCMSecurityRole(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node
         # PS1 polls every SMS Provider and tags each role with that
         # provider's site code, so the same SR id shows up as <id>@CAS and
         # <id>@PS1 as two distinct nodes. Keep that split by using the raw
@@ -84,6 +85,7 @@ class SCCMSecurityRole(BaseAsset):
         ) or self.site_code or ""
 
         node_id = f"{self.role_id}@{site_for_id}"
+        trace_node("SCCM_SecurityRole", node_id, self.role_name)
         # PS1 emits ``name`` = bare role_name (no @site suffix). Match that
         # so BloodHound queries against ``r.name = 'Full Administrator'`` work.
         display = self.role_name or node_id

@@ -111,6 +111,7 @@ class Computer(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node_with_properties
         display = self.name or (self.sam_account_name or "").rstrip("$") or self.object_sid
         # Look up SCCM-infra role membership at convert time so the
         # output-stage prune can keep this Computer when there's no
@@ -192,6 +193,28 @@ class Computer(BaseAsset):
                 if reached:
                     hosts_content_library = False
                     is_pxe_enabled = False
+        except Exception:
+            pass
+
+        # PS1 also flips ``networkBootServer=True`` when an
+        # ``(&(objectclass=connectionPoint)(netbootserver=*))`` or
+        # ``(objectclass=intellimirrorSCP)`` object exists under the
+        # computer's DN (ConfigManBearPig.ps1:3367-3371). This is an
+        # LDAP-only signal — independent of the SMB DP probe — so a
+        # caller running ``-m LDAP`` still gets PXE-DP marking. Join by
+        # parent DN against ``ldap_network_boot_servers``.
+        try:
+            if self.distinguished_name:
+                nbs_row = client.execute(
+                    f"SELECT 1 FROM {schema}.ldap_network_boot_servers "
+                    f"WHERE LOWER(parent_dn) = LOWER(?) LIMIT 1",
+                    [self.distinguished_name],
+                ).fetchone()
+                if nbs_row:
+                    # Promote to True regardless of what SMB said. If SMB
+                    # contradicted (returned False), the LDAP evidence is
+                    # at least as strong — PS1 unconditionally sets True.
+                    is_pxe_enabled = True
         except Exception:
             pass
 
@@ -291,45 +314,81 @@ class Computer(BaseAsset):
                         sccm_resource_ids = extra
         except Exception:
             pass
-        return SCCMNode(
-            kinds=[nk.COMPUTER, nk.BASE],
-            properties=ComputerProperties(
-                node_id=self.object_sid,
-                name=display,
-                displayname=display,
-                environmentid=self.domain or None,
-                distinguishedName=self.distinguished_name,
-                objectGuid=self.object_guid,
-                operatingSystem=self.operating_system,
-                operatingSystemVersion=self.operating_system_version,
-                servicePrincipalName=self.service_principal_names,
-                collectionSource=[self.source] if self.source else None,
-                Type="Computer",
-                # PS1-style PascalCase names — leave the base-class
-                # camelCase ones None so they don't double-emit.
-                Domain=self.domain,
-                SamAccountName=self.sam_account_name,
-                DNSHostName=self.dns_host_name,
-                Enabled=self.enabled,
-                IsDomainPrincipal=True,
-                CN=cn,
-                objectClass=["top", "person", "organizationalPerson", "user", "computer"],
-                SCCMHasClientRemoteControlSPN=has_cmrc_spn,
-                SMBSigningRequired=smb_signing,
-                SCCMHostsContentLibrary=hosts_content_library,
-                SCCMIsPXESupportEnabled=is_pxe_enabled,
-                # PS1 also surfaces ``networkBootServer`` as a synonym
-                # for ``SCCMIsPXESupportEnabled`` (both reflect WDS/PXE).
-                networkBootServer=is_pxe_enabled,
-                SCCMResourceIDs=sccm_resource_ids,
-                SCCMClientDeviceIdentifier=sccm_client_device_id,
-                disableLoopbackCheck=disable_loopback,
-                restrictReceivingNtlmTraffic=restrict_ntlm,
-                SCCMClientCertificateRequired=sccm_client_cert_required,
-                SCCMInfra=sccm_infra,
-                SCCMSiteSystemRoles=sccm_site_system_roles,
-            ),
+
+        # Build the per-Computer collectionSource list. ``self.source`` carries
+        # the discovery channel that produced this LDAP row; we then fold in
+        # additional sources that other resources contributed:
+        #   * ``LDAP-connectionPoint`` / ``LDAP-intellimirrorSCP`` — when this
+        #     Computer is the parent of a network-boot SCP object
+        #     (ldap_network_boot_servers).
+        #   * ``LDAP-GenericAllSystemManagement`` — when this Computer's SID
+        #     appears in the System Management container's DACL with
+        #     GenericAll rights (ldap_system_management_acl).
+        # Both gates mirror PS1's per-source collectionSource fan-out so
+        # downstream queries against the array see the same values.
+        collection_sources: list[str] = []
+        if self.source:
+            collection_sources.append(self.source)
+        try:
+            if self.distinguished_name:
+                for (src,) in client.execute(
+                    f"SELECT DISTINCT source FROM {schema}.ldap_network_boot_servers "
+                    f"WHERE LOWER(parent_dn) = LOWER(?)",
+                    [self.distinguished_name],
+                ).fetchall():
+                    if src and src not in collection_sources:
+                        collection_sources.append(src)
+        except Exception:
+            pass
+        try:
+            acl_row = client.execute(
+                f"SELECT 1 FROM {schema}.ldap_system_management_acl "
+                f"WHERE principal_sid = ? LIMIT 1",
+                [self.object_sid],
+            ).fetchone()
+            if acl_row and "LDAP-GenericAllSystemManagement" not in collection_sources:
+                collection_sources.append("LDAP-GenericAllSystemManagement")
+        except Exception:
+            pass
+
+        props = ComputerProperties(
+            node_id=self.object_sid,
+            name=display,
+            displayname=display,
+            environmentid=self.domain or None,
+            distinguishedName=self.distinguished_name,
+            objectGuid=self.object_guid,
+            operatingSystem=self.operating_system,
+            operatingSystemVersion=self.operating_system_version,
+            servicePrincipalName=self.service_principal_names,
+            collectionSource=collection_sources or None,
+            Type="Computer",
+            # PS1-style PascalCase names — leave the base-class
+            # camelCase ones None so they don't double-emit.
+            Domain=self.domain,
+            SamAccountName=self.sam_account_name,
+            DNSHostName=self.dns_host_name,
+            Enabled=self.enabled,
+            IsDomainPrincipal=True,
+            CN=cn,
+            objectClass=["top", "person", "organizationalPerson", "user", "computer"],
+            SCCMHasClientRemoteControlSPN=has_cmrc_spn,
+            SMBSigningRequired=smb_signing,
+            SCCMHostsContentLibrary=hosts_content_library,
+            SCCMIsPXESupportEnabled=is_pxe_enabled,
+            # PS1 also surfaces ``networkBootServer`` as a synonym
+            # for ``SCCMIsPXESupportEnabled`` (both reflect WDS/PXE).
+            networkBootServer=is_pxe_enabled,
+            SCCMResourceIDs=sccm_resource_ids,
+            SCCMClientDeviceIdentifier=sccm_client_device_id,
+            disableLoopbackCheck=disable_loopback,
+            restrictReceivingNtlmTraffic=restrict_ntlm,
+            SCCMClientCertificateRequired=sccm_client_cert_required,
+            SCCMInfra=sccm_infra,
+            SCCMSiteSystemRoles=sccm_site_system_roles,
         )
+        trace_node_with_properties("Computer", self.object_sid, display, props)
+        return SCCMNode(kinds=[nk.COMPUTER, nk.BASE], properties=props)
 
     @property
     def edges(self):

@@ -92,11 +92,13 @@ class DerivedNode(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode | None:
+        from ...log_context import trace_node
         spec = _KIND_MAP.get(self.kind)
         if spec is None:
             return None
         node_kind, type_marker = spec
         name = self.name or self.node_id
+        trace_node(self.kind, self.node_id, name)
         # ``SQLServer`` is the parent server id (``<computer_SID>:1433``).
         # For Server itself, this is just the node_id. For Database /
         # Login / DatabaseUser / Role kinds, the server id is the prefix

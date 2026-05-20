@@ -126,27 +126,31 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
             os.environ[env_name] = str(value)
 
 
-def _apply_log_level(verbose: bool, debug: bool) -> None:
-    """Adjust console logging when ``-v`` / ``--verbose`` or ``--debug`` is set,
-    and install the ``[target][phase]`` prefix filter.
+def _apply_log_level(verbose: int, debug: bool) -> None:
+    """Adjust console logging based on verbosity flags + install the
+    ``[target][phase]`` prefix filter.
 
-    ``-v``      → INFO (status messages like auto-detected domain / resolved DC).
-    ``--debug`` → DEBUG (everything, including dlt and ldap3 internals).
-    Both        → DEBUG wins.
-    Neither     → leave the framework's default (CLI level ERROR).
+    ``-v``      → INFO   (collection-step summaries: "Starting LDAP collection…")
+    ``-vv``     → VERBOSE (PS1 ``[Verbose]`` parity tier: per-AD-resolution, per-
+                  node-add, per-edge dedupe traces)
+    ``--debug`` → DEBUG  (everything, including dlt and ldap3 internals)
 
-    Stdlib-only: keeps the openhound framework's RichHandler in place and just
-    plugs in a ``LogContextFilter`` that rewrites each ``LogRecord.msg`` to
-    prepend ``[<host>][<phase>] `` based on the currently-active
-    ``target_context`` / ``phase_context`` (see ``log_context.py``). The
-    framework keeps colorizing levels / timestamps as before; only the message
-    text gets the prefix.
+    Highest-set wins. Neither flag → framework default (file-only at INFO).
+
+    The framework's default config uses a ``RichHandler`` (or stdout
+    ``StreamHandler`` in container mode) wired up by
+    ``openhound/core/logging.py``. We keep those handlers in place — the
+    user prefers the framework's ``time=…, msg=…`` format — and only swap
+    the formatter to drop the trailing ``(openhound_version=…)`` suffix
+    that ``OpenHoundRichFormatter`` appends to every line.
     """
-    from .log_context import install_filter
+    from .log_context import VERBOSE, install_filter
 
     if debug:
         level_name, level = "DEBUG", logging.DEBUG
-    elif verbose:
+    elif verbose >= 2:
+        level_name, level = "VERBOSE", VERBOSE
+    elif verbose >= 1:
         level_name, level = "INFO", logging.INFO
     else:
         level_name, level = None, None
@@ -154,12 +158,153 @@ def _apply_log_level(verbose: bool, debug: bool) -> None:
     if level_name is not None:
         os.environ["RUNTIME__LOG_LEVEL"] = level_name
         os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
-        for log in (logging.getLogger(), logging.getLogger("dlt")):
-            log.setLevel(level)
+        root = logging.getLogger()
+        # Lower the root logger so records of the requested level can reach
+        # any handler. Existing file handlers keep their own level.
+        if root.level == 0 or root.level > level:
+            root.setLevel(level)
+        for log in (root, logging.getLogger("dlt")):
             for handler in log.handlers:
-                handler.setLevel(level)
+                if handler.level == 0 or handler.level > level:
+                    handler.setLevel(level)
+        # The OpenHound framework's CLI handler uses ``OpenHoundRichFormatter``
+        # (see ``openhound/core/logging.py:170``) which appends
+        # `` (openhound_version=<v>)`` to every line. Swap the formatter
+        # for one that produces the same ``time=…, msg=…`` shape minus
+        # that suffix — keeps the framework's preferred format without
+        # touching OpenHound code. The JSON file handler keeps its own
+        # formatter so the structured log is untouched.
+        _strip_version_suffix_from_handlers()
 
     install_filter()
+
+
+class _NoVersionRichFormatter(logging.Formatter):
+    """Mirror of ``openhound.core.logging.OpenHoundRichFormatter`` minus the
+    trailing ``(openhound_version=…)`` suffix. Used by ``_apply_log_level``
+    to swap the framework's CLI formatter in place."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return f"time={self.formatTime(record, '%Y-%m-%d %H:%M:%S')}, msg={record.getMessage()}"
+
+
+def _strip_version_suffix_from_handlers() -> None:
+    """Replace any ``OpenHoundRichFormatter`` instance on console handlers
+    with ``_NoVersionRichFormatter``. Identifies by class name to avoid
+    importing the framework symbol (which would tie us to its module layout).
+    Idempotent: re-running it on already-swapped handlers is a no-op.
+
+    Also installs a defensive ``doRollover`` shim on the framework's
+    ``RotatingFileHandler`` instances so a rollover triggered while
+    ``alive_progress`` has wrapped the standard streams doesn't crash with
+    ``AttributeError: 'NoneType' object has no attribute 'close'`` (the
+    alive_progress ``hook_manager`` proxies ``self.stream.close()`` to its
+    inner ``_stream`` which is ``None`` once the progress bar finishes).
+    The original method is called inside a try/except so on success
+    rotation still works; on the alive_progress collision the rollover is
+    skipped and logging continues to the existing file.
+    """
+    seen_loggers = (
+        logging.getLogger(),
+        logging.getLogger("dlt"),
+        logging.getLogger("openhound"),
+    )
+    replacement = _NoVersionRichFormatter()
+    for log in seen_loggers:
+        for handler in log.handlers:
+            fmt = handler.formatter
+            if fmt is None:
+                continue
+            if type(fmt).__name__ == "OpenHoundRichFormatter":
+                handler.setFormatter(replacement)
+    # Wrap doRollover on every rotating handler we can find.
+    _patch_rollover_for_alive_progress(seen_loggers)
+
+
+def _patch_rollover_for_alive_progress(loggers) -> None:
+    """Swallow errors raised by ``doRollover`` so a midnight-crossing run
+    doesn't print noisy ``Logging error`` tracebacks. Two failure modes:
+
+    1. ``AttributeError: 'NoneType' object has no attribute 'close'`` —
+       ``alive_progress.hook_manager`` proxies ``self.stream.close()`` to a
+       ``_stream`` that is ``None`` once the progress bar finishes.
+
+    2. ``PermissionError: [WinError 32]`` — Windows refuses to rename
+       ``openhound.log`` because another handle (this process, a concurrent
+       ``openhound`` instance, or the OS not yet releasing) still has it
+       open. Native ``TimedRotatingFileHandler.rotate`` does ``os.rename``
+       which is non-atomic with the prior ``self.stream.close()``.
+
+    Both are non-fatal — the existing log file just doesn't roll until next
+    invocation. Idempotent via ``_oh_sccm_rollover_safe`` sentinel.
+    """
+    for log in loggers:
+        for handler in log.handlers:
+            if getattr(handler, "_oh_sccm_rollover_safe", False):
+                continue
+            original = getattr(handler, "doRollover", None)
+            if original is None:
+                continue
+            # Only wrap classes that look like file rollers (avoid touching
+            # arbitrary StreamHandlers that don't have rollover semantics).
+            if not hasattr(handler, "baseFilename"):
+                continue
+
+            def _safe_rollover(_orig=original, _h=handler):
+                try:
+                    _orig()
+                except (AttributeError, OSError):
+                    # AttributeError: alive_progress NoneType stream wrap.
+                    # OSError (includes PermissionError WinError 32):
+                    # Windows file-in-use during rename. Either way, leave
+                    # the existing log file in place and continue.
+                    #
+                    # Critical: advance ``rolloverAt`` so subsequent log
+                    # emits don't keep retrying the failing rollover —
+                    # otherwise every log line in the rest of the run
+                    # triggers the same crash again. Native
+                    # ``TimedRotatingFileHandler.doRollover`` does this at
+                    # its end; we have to mirror it manually because the
+                    # rename step raised before that statement ran.
+                    if hasattr(_h, "computeRollover") and hasattr(_h, "rolloverAt"):
+                        import time as _t
+                        try:
+                            _h.rolloverAt = _h.computeRollover(int(_t.time()))
+                        except Exception:
+                            # Worst case: bump by one day so we don't keep
+                            # retrying every emit.
+                            _h.rolloverAt = int(_t.time()) + 86400
+                    # Re-open the file if the handler ended up with a
+                    # closed stream after the failed rollover. Native
+                    # ``FileHandler._open`` returns a fresh handle.
+                    try:
+                        if getattr(_h, "stream", None) is not None:
+                            try:
+                                _h.stream.close()
+                            except Exception:
+                                pass
+                        if hasattr(_h, "_open"):
+                            _h.stream = _h._open()
+                    except Exception:
+                        pass
+                    return
+
+            handler.doRollover = _safe_rollover  # type: ignore[method-assign]
+            handler._oh_sccm_rollover_safe = True  # type: ignore[attr-defined]
+
+
+# Patch the framework's RotatingFileHandler at module-import time so the
+# very first ``logger.info`` call from the framework's extension-loader
+# (which fires before ``collect_sccm`` runs) doesn't crash on rollover.
+# ``_strip_version_suffix_from_handlers`` is safe to call before
+# ``_apply_log_level``; it only touches handlers that already exist.
+try:
+    _strip_version_suffix_from_handlers()
+except Exception:
+    # Pre-CLI patching is best-effort — if it fails the in-CLI call from
+    # ``_apply_log_level`` still fires later and patches before any
+    # user-visible work runs.
+    pass
 
 
 def _detect_windows_domain() -> Optional[str]:
@@ -313,7 +458,7 @@ def collect_sccm(
     # ---- Network (CMBP --socks-proxy) ----
     socks_proxy: Optional[str] = typer.Option(None, "--socks-proxy", help="SOCKS5 proxy HOST:PORT for DHCP/TFTP collection."),
     # ---- General (CMBP -v / --verbose, --debug) ----
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
     debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug)
@@ -329,7 +474,59 @@ def collect_sccm(
     src = sccm_source()
     if not src:
         return None
-    return collector.run(src)
+    load_info = collector.run(src)
+    # Clear the [target][phase] log context so the summary block reads as a
+    # global section rather than inheriting whatever phase ran last.
+    from .log_context import phase_context, target_context
+    with target_context(None), phase_context(None):
+        _log_collect_summary(load_info, output_path)
+    return load_info
+
+
+def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.Path) -> None:
+    """Emit a PS1-equivalent end-of-collection summary at INFO level.
+
+    PS1's ConfigManBearPig.ps1 prints a ``Collection Statistics:`` block at
+    the end of every run; mirror the same intent for ``openhound collect
+    sccm …``. The final node/edge totals aren't known yet at this phase —
+    those come from ``output.py::package`` after convert. We emit row
+    counts per resource so the operator sees what was extracted before
+    moving on to preprocess/convert.
+
+    Row counts are read by counting JSONL rows on disk under
+    ``<output>/sccm/<table>/`` — that's authoritative and avoids the
+    DLT ``LoadInfo`` schema-version dance (the structured ``extract_data_info``
+    layout shifted between DLT 0.5 and 1.x).
+    """
+    logger.info("Collection complete.")
+    logger.info("Raw output directory: %s", output_path)
+    try:
+        dataset_dir = output_path / "sccm"
+        if not dataset_dir.is_dir():
+            return
+        per_resource: dict[str, int] = {}
+        import gzip
+        for table_dir in sorted(dataset_dir.iterdir()):
+            if not table_dir.is_dir() or table_dir.name.startswith("_dlt"):
+                continue
+            row_count = 0
+            for f in table_dir.glob("*.jsonl*"):
+                try:
+                    opener = gzip.open if f.suffix == ".gz" else open
+                    with opener(f, "rt", encoding="utf-8", errors="replace") as fh:
+                        row_count += sum(1 for line in fh if line.strip())
+                except OSError:
+                    continue
+            per_resource[table_dir.name] = row_count
+        if per_resource:
+            total = sum(per_resource.values())
+            logger.info("Extracted %d rows across %d resources:", total, len(per_resource))
+            for name, count in sorted(per_resource.items(), key=lambda kv: (-kv[1], kv[0])):
+                logger.info("    %-40s %d", name, count)
+        logger.info("Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then 'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'")
+    except Exception as exc:  # noqa: BLE001
+        # Summary is best-effort — never fail the collect because of a log line.
+        logger.debug("Collection-summary emit failed: %s", exc)
 
 
 # Set at module scope so `CollectorManager.validate_extension` (which runs at
@@ -354,7 +551,7 @@ def preprocess_sccm(
     domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
     debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt internals)."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug)
@@ -393,6 +590,9 @@ def _preproc_table_map() -> dict[str, str]:
         "ldap_sites",
         "ldap_mp_site_classifications",
         "ldap_sms_providers",
+        "ldap_cmrc_devices",
+        "ldap_network_boot_servers",
+        "ldap_system_management_acl",
         "ldap_group_memberships",
         # Once-phase enrichment (Phase 2)
         "local_management_points",
@@ -455,7 +655,7 @@ def convert_sccm(
     domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose output (INFO level)."),
+    verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
     debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt internals)."),
 ) -> Optional[LoadInfo]:
     import duckdb

@@ -151,6 +151,8 @@ def _emit_edge(
         )
     else:
         props = EdgeProperties(traversable=traversable)
+    from ...log_context import trace_edge
+    trace_edge(kind, start, end)
     return Edge(
         kind=kind,
         start=EdgePath(value=start, match_by="id"),

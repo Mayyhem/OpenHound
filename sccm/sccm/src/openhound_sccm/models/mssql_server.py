@@ -83,6 +83,7 @@ class MSSQLServer(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node
         port = self.port or 1433
         host = (self.hostname or "").lower()
         display = self.fqdn or host
@@ -92,6 +93,7 @@ class MSSQLServer(BaseAsset):
         # something still gets emitted.
         computer_sid = self._lookup.computer_sid_by_hostname(host) if host else None
         node_id = f"{computer_sid}:{port}" if computer_sid else f"{host}:{port}"
+        trace_node("MSSQL_Server", node_id, display)
 
         # Look up the PS1-style fields. ``adminservice_site_systems``
         # carries one row per (site_code, role, hostname, service_account)

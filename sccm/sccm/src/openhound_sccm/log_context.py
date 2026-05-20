@@ -33,7 +33,28 @@ import contextvars
 import functools
 import inspect
 import logging
-from typing import Callable, Iterator, Optional, TypeVar
+from typing import Any, Callable, Iterator, Optional, TypeVar
+
+
+# ---------------------------------------------------------------------------
+# VERBOSE log level — sits between INFO (20) and DEBUG (10) so ``-vv``
+# can surface PS1's ``[Verbose]`` tier without the noise of DLT / ldap3
+# internals that ``--debug`` brings in. Importing this module installs the
+# level globally and adds ``Logger.verbose()`` so collector code reads as
+# ``logger.verbose(...)`` rather than ``logger.log(VERBOSE, ...)``.
+# ---------------------------------------------------------------------------
+VERBOSE = 15
+logging.addLevelName(VERBOSE, "VERBOSE")
+
+
+def _verbose(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None:
+    """``logger.verbose(...)`` shortcut for the VERBOSE level."""
+    if self.isEnabledFor(VERBOSE):
+        self._log(VERBOSE, message, args, **kwargs)
+
+
+if not hasattr(logging.Logger, "verbose"):
+    logging.Logger.verbose = _verbose  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +113,13 @@ class LogContextFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Filters run once per handler invocation. The same ``LogRecord`` may
+        # be passed through multiple handlers (e.g. a file handler + a stream
+        # handler when ``-v`` is set) — mutating ``record.msg`` each time
+        # would duplicate the prefix. Use a sentinel attribute to short-circuit
+        # on subsequent passes.
+        if getattr(record, "_oh_sccm_prefixed", False):
+            return True
         target = _current_target.get(None)
         phase = _current_phase.get(None)
         if not target and not phase:
@@ -107,6 +135,7 @@ class LogContextFilter(logging.Filter):
         # Mutating ``msg`` is the conventional way; ``args`` stay untouched
         # so percent-format substitution still works.
         record.msg = prefix + str(record.msg)
+        record._oh_sccm_prefixed = True  # type: ignore[attr-defined]
         return True
 
 
@@ -193,13 +222,31 @@ def with_log_context(
         if inspect.isgeneratorfunction(func):
             @functools.wraps(func)
             def gen_wrapper(*args, **kwargs):
+                # DLT runs resource generators interleaved — it pulls one
+                # value from generator A, then one from B, then A again,
+                # etc. If we push ``phase_context(phase)`` once around the
+                # whole generator, the contextvar set by the LAST
+                # generator-to-enter leaks into other generators' yields
+                # because contextvars are process/thread-wide.
+                #
+                # Solution: push the phase / target context **per next()
+                # call** so each iteration of the inner generator sees the
+                # right values exclusively. The yield itself happens
+                # outside the context (no logging there) so no interleaved
+                # caller sees our values.
                 resolved_target = _resolve_target(args, kwargs)
-                with contextlib.ExitStack() as stack:
-                    if phase is not None:
-                        stack.enter_context(phase_context(phase))
-                    if resolved_target is not None:
-                        stack.enter_context(target_context(resolved_target))
-                    yield from func(*args, **kwargs)
+                inner = func(*args, **kwargs)
+                while True:
+                    try:
+                        with contextlib.ExitStack() as stack:
+                            if phase is not None:
+                                stack.enter_context(phase_context(phase))
+                            if resolved_target is not None:
+                                stack.enter_context(target_context(resolved_target))
+                            value = next(inner)
+                    except StopIteration:
+                        return
+                    yield value
             return gen_wrapper  # type: ignore[return-value]
 
         @functools.wraps(func)
@@ -264,12 +311,130 @@ def per_pair_iter(items) -> Iterator:
             yield key, value
 
 
+# ---------------------------------------------------------------------------
+# Cache-with-verbose-logging — replaces ``@lru_cache`` on hot lookups so
+# we can emit PS1-equivalent "Resolved X from cache" / "Resolving X" traces.
+# ``lru_cache`` itself has no per-call hit indicator, so we keep our own
+# dict and log explicitly.
+# ---------------------------------------------------------------------------
+def cached_with_log(label: str) -> Callable[[_F], _F]:
+    """Decorate an instance method so every call logs at VERBOSE whether the
+    lookup hit the cache or fell through to the underlying query.
+
+    ``label`` is a short noun phrase used in the log line — typically the
+    kind of thing being resolved (e.g. ``"Computer SID"``, ``"User SAM"``).
+    Mirrors PS1's ``"Resolved <key> in domain <d> from cache"`` /
+    ``"Attempting to resolve <key>"`` Upsert-Node trace.
+
+    Replaces ``@lru_cache`` 1:1: drop-in compatible with bound methods,
+    keyed on the positional argument tuple.
+    """
+    logger = logging.getLogger("openhound_sccm.lookup")
+
+    def decorator(func: _F) -> _F:
+        cache: dict[tuple, object] = {}
+
+        @functools.wraps(func)
+        def wrapper(self, *args):
+            key = args
+            if key in cache:
+                key_text = ", ".join(repr(a) for a in args)
+                logger.verbose("Resolved %s %s from cache", label, key_text)
+                return cache[key]
+            key_text = ", ".join(repr(a) for a in args)
+            logger.verbose("Resolving %s %s via DuckDB", label, key_text)
+            result = func(self, *args)
+            cache[key] = result
+            if result is None:
+                logger.verbose("No %s found for %s", label, key_text)
+            return result
+
+        wrapper.cache_clear = lambda: cache.clear()  # type: ignore[attr-defined]
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
+
+
+# ---------------------------------------------------------------------------
+# Per-node / per-edge VERBOSE trace helpers used by SCCM model classes.
+# PS1's Upsert-Node / Upsert-Edge emit these at the framework boundary; in
+# OH the equivalent boundary is each model's ``as_node`` / ``edges`` body.
+# ---------------------------------------------------------------------------
+def trace_node(kind: str, node_id: str, name: Optional[str] = None) -> None:
+    """Emit a PS1-equivalent ``Found existing <kind> node: <id> (<name>)`` line."""
+    logger = logging.getLogger("openhound_sccm.graph")
+    suffix = f" ({name})" if name else ""
+    logger.verbose("Found existing %s node: %s%s", kind, node_id, suffix)
+
+
+def trace_edge(kind: str, start: str, end: str) -> None:
+    """Emit a PS1-equivalent ``Found existing edge X -[K]-> Y with identical
+    properties, no changes made`` line. OH's emission stage dedupes upstream,
+    so this fires for every yielded edge (same intent as PS1's per-touch log)."""
+    logger = logging.getLogger("openhound_sccm.graph")
+    logger.verbose("Found existing edge %s -[%s]-> %s with identical properties, no changes made", start, kind, end)
+
+
+def trace_property_added(kind: str, node_id: str, prop_name: str, value) -> None:
+    """Emit a PS1-equivalent multi-line ``Added: <prop>: <value>`` trace
+    fragment as a single verbose line per property. PS1 emits these inside
+    ``Upsert-Node``'s structured update report; we flatten to one line
+    per property so each event is independently filterable / greppable.
+    Only call when ``value`` is non-None / non-empty to avoid log spam."""
+    logger = logging.getLogger("openhound_sccm.graph")
+    logger.verbose("    Added on %s %s: %s = %r", kind, node_id, prop_name, value)
+
+
+def trace_node_with_properties(kind: str, node_id: str, name: Optional[str], properties: Any) -> None:
+    """Emit a PS1-equivalent multi-line block: ``Found existing <kind> node:
+    <id> (<name>)`` followed by one ``    Added: <prop>: <value>`` line per
+    non-None / non-empty property.
+
+    Designed to be called *after* the SCCMNode has been built. ``properties``
+    is the SCCM ``*Properties`` dataclass instance (Pydantic model classes
+    don't gain ``__dataclass_fields__`` since these are stdlib dataclasses
+    that happen to layer on ``SCCMNodeProperties``). We iterate
+    ``dataclasses.fields(properties)`` and emit a line for each populated
+    field, skipping framework boilerplate (``node_id``, ``displayname``,
+    ``name``, ``environmentid``, ``last_seen``).
+    """
+    import dataclasses
+    trace_node(kind, node_id, name)
+    if properties is None:
+        return
+    skip = {"node_id", "displayname", "name", "environmentid", "last_seen"}
+    try:
+        if not dataclasses.is_dataclass(properties):
+            return
+        for field in dataclasses.fields(properties):
+            if field.name in skip:
+                continue
+            try:
+                value = getattr(properties, field.name)
+            except Exception:
+                continue
+            # Skip None / empty list / empty string — PS1 only logs values that
+            # actually change. ``False`` and ``0`` are real values worth showing.
+            if value is None or value == [] or value == "":
+                continue
+            trace_property_added(kind, node_id, field.name, value)
+    except Exception:
+        # Belt-and-suspenders: a logging helper must never crash the caller.
+        pass
+
+
 __all__ = [
     "LogContextFilter",
+    "VERBOSE",
+    "cached_with_log",
     "install_filter",
     "per_host_iter",
     "per_pair_iter",
     "phase_context",
     "target_context",
+    "trace_edge",
+    "trace_node",
+    "trace_node_with_properties",
+    "trace_property_added",
     "with_log_context",
 ]

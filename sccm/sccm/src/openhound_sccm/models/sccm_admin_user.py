@@ -92,6 +92,7 @@ class SCCMAdminUser(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
+        from ..log_context import trace_node
         # PS1 fans each admin out per SMS Provider that reports it (one per
         # primary site), so the same logon appears as both <logon>@CAS and
         # <logon>@PS1. Use the raw site_code in the id to keep that split;
@@ -104,6 +105,7 @@ class SCCMAdminUser(BaseAsset):
 
         logon_lower = (self.logon_name or "").lower().strip()
         node_id = f"{logon_lower}@{site_for_id}"
+        trace_node("SCCM_AdminUser", node_id, self.logon_name)
         # PS1 emits ``name`` = bare logon_name (no @site suffix). Match that
         # so BloodHound queries against ``a.name = 'mayyhem\\domainadmin'`` work.
         display = self.logon_name or node_id

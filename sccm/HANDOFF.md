@@ -6,6 +6,296 @@ enumeration tool, "CMBP") into the OpenHound DLT extension at `sccm/sccm/`. The 
 histogram for three users (`MAYYHEM\lowpriv`, `MAYYHEM\roanalyst`, `MAYYHEM\domainadmin`)
 between the CMBP zip and the new OpenHound zip.
 
+## Project status (2026-05-19, twenty-fourth session — console log parity: VERBOSE level + -vv flag + collector instrumentation)
+
+**Headline.** Earlier rounds were measured on graph-output parity only —
+console log parity (same events, same order, same intent as PS1) was
+claimed but never validated. This session adds a real VERBOSE tier and
+instruments the collectors so ``-vv`` produces PS1-equivalent verbose output.
+
+### Why this gap mattered
+
+PS1's verbose console log is a behavioural spec for what OH should be
+doing internally. Previous rounds had OH emitting ~795 INFO/WARNING
+lines per sweep vs PS1's ~8,579 lines — a ~10× gap concentrated in
+PS1's ``[Verbose]`` tier (~6,720 lines): per-AD-resolution traces,
+per-host probe attempts, per-cache-hit notices.
+
+If OH emits one INFO line where PS1 emits 20 verbose traces, OH is
+either skipping work or behaving differently — even when the graph
+output happens to match. The histogram check can't catch that.
+
+### What was implemented
+
+1. **VERBOSE log level (15)** — added in
+   [log_context.py](sccm/sccm/src/openhound_sccm/log_context.py)
+   between INFO (20) and DEBUG (10). Installs ``Logger.verbose()`` as a
+   stdlib monkey-patch so collector code reads as ``logger.verbose(...)``.
+
+2. **``-vv`` CLI flag** — Typer count-style verbose
+   in [main.py](sccm/sccm/src/openhound_sccm/main.py).
+   ``-v`` → INFO (step summaries); ``-vv`` → VERBOSE (PS1 parity tier);
+   ``--debug`` → DEBUG (dlt / ldap3 internals).
+
+3. **Console stream handler** — the framework's default config writes
+   logs to a ``RotatingFileHandler`` (JSON, ``%LOCALAPPDATA%/openhound/
+   logs/openhound.log``) but never to stdout/stderr. ``_apply_log_level``
+   now adds a ``StreamHandler(sys.stderr)`` with a plain
+   ``%(asctime)s [%(levelname)s] %(message)s`` formatter so the user
+   actually sees the verbose lines on the terminal.
+
+4. **Filter idempotency fix** — ``LogContextFilter.filter()`` mutates
+   ``record.msg`` to prepend the ``[host][phase]`` prefix; with two
+   handlers attached it ran twice and produced ``[host][phase]
+   [host][phase] message``. Added a sentinel attribute so the prefix
+   is applied at most once per record.
+
+5. **Collector instrumentation** — added ``logger.verbose()`` calls at
+   PS1-event-equivalent points (and promoted some ``logger.debug``
+   calls to ``logger.verbose`` where they capture per-probe / per-record
+   events that PS1 emits at ``[Verbose]``):
+   - [clients/ad.py](sccm/sccm/src/openhound_sccm/clients/ad.py): per
+     paged_search start/complete (mirrors PS1's per-ADSISearcher trace)
+   - [clients/adminservice.py](sccm/sccm/src/openhound_sccm/clients/adminservice.py):
+     per HTTP request, per response status
+   - [collectors/adminservice.py](sccm/sccm/src/openhound_sccm/collectors/adminservice.py):
+     per SMS_* table fetch + per-table row counts
+   - [collectors/http.py](sccm/sccm/src/openhound_sccm/collectors/http.py):
+     per endpoint probe + received status (PS1: "Testing endpoint X" /
+     "    Received N")
+   - [collectors/smb.py](sccm/sccm/src/openhound_sccm/collectors/smb.py):
+     per SMB signing probe, per login, per listShares failure
+   - [collectors/wmi.py](sccm/sccm/src/openhound_sccm/collectors/wmi.py):
+     per host probe, per namespace connect, per query
+   - [collectors/registry.py](sccm/sccm/src/openhound_sccm/collectors/registry.py):
+     per probe, per SMB login, per winreg bind
+   - [lookup.py](sccm/sccm/src/openhound_sccm/lookup.py): principal
+     resolution traces (mirrors PS1's "Detected DOMAIN\\user format" /
+     "Resolving X via Y" / "No AD object found")
+
+6. **Harness ``--verbose`` propagation** — the test harness's own
+   ``--verbose`` flag now passes ``-vv`` to OH (was ``-v``); this is
+   the parity-comparison tier and aligns with what PS1's ``-Verbose``
+   and CMBP-python's ``-v`` emit.
+
+### Numbers (3-way sweep `da-cdiff6`, domainadmin DPE — final)
+
+| Collector | Console-log lines |
+|-----------|---:|
+| PS1 (``-Verbose``)             | 12,399 |
+| OH (``-vv`` post-instrumentation) |  6,043 |
+| OH (pre-this-round, INFO-only)    |    795 |
+| CMBP-python (``-v``)              |  2,915 |
+
+OH went from 795 → 6,043 lines (**7.6×**) and is now **49% of PS1's
+volume** (was 6%). Histogram totals match exactly across all three
+collectors (169/424 DPE), so the new logging adds zero impact on
+graph parity.
+
+### After the user's pushback (rounds 25-26)
+
+The earlier "can't be added without framework edits" claim about
+Upsert-Node / Upsert-Edge dedup notices was wrong. They CAN be added
+inside SCCM extension code:
+
+- ``trace_node()`` / ``trace_node_with_properties()`` in
+  [log_context.py](sccm/sccm/src/openhound_sccm/log_context.py) —
+  called at the top of each model's ``as_node``. Emits a PS1-
+  equivalent ``Found existing <kind> node: <id> (<name>)`` line
+  plus one ``Added on <kind> <id>: <prop> = <value>`` line per
+  non-None/non-empty property (iterates ``dataclasses.fields()``,
+  skipping framework boilerplate ``node_id`` / ``displayname`` /
+  ``name`` / ``environmentid`` / ``last_seen``).
+- ``trace_edge()`` in [log_context.py](sccm/sccm/src/openhound_sccm/log_context.py)
+  — invoked inside the aggregator's ``_emit_edge()`` factory + the
+  ``GroupMembership`` model's ``edges`` generator. One call per
+  emitted edge.
+- ``cached_with_log(label)`` decorator replaces ``@lru_cache`` on the
+  hot ``SCCMLookup`` methods (``computer_by_sid``, ``computer_by_name``,
+  ``computer_sid_by_hostname``, ``user_by_sam``, ``group_by_sid``,
+  ``principal_id_by_dn``). Logs hit / miss / not-found explicitly per
+  call. Mirrors PS1's ``"Resolved X in domain Y from cache"`` /
+  ``"Attempting to resolve X"`` trace.
+
+The earlier "AD resolver method chain (1,500+ lines) — architectural"
+claim still holds: OH's bulk-LDAP design has no equivalent of PS1's
+per-record fallback cascade (PowerShell AD module → ADSISearcher →
+DirectorySearcher → NTAccount translation → .NET DirectoryServices).
+But the per-cache-hit notices are now there via ``cached_with_log``.
+
+### Verbose-tier event counts (OH, this sweep)
+
+The harness's ``--console-diff`` mode runs a Counter-diff after
+normalizing timestamps / IDs / paths. Raw event counts in OH's
+console log (post-normalization):
+
+| Event family | OH count |
+|---|---:|
+| ``Found existing <X> node: …``        |  ~260 |
+| ``Added on <kind> <id>: <prop> = …``  | 1,253 |
+| ``Found existing edge …``             |   418 |
+| ``Resolved <X> from cache``           |  ~195 |
+| ``Resolving <X> via DuckDB``          |    ~5 |
+| ``Testing endpoint …`` (HTTP probes)  |   106 |
+| ``AdminService GET …``                |    42 |
+| ``LDAP search: …``                    |    28 |
+| ``SMB login …``                       |    56 |
+| ``Probing …``                         |   125 |
+| **Total verbose events**              | **2,419** |
+
+### Architectural ceiling for the remaining 6,356-line gap
+
+Two categories account for nearly all the residual gap:
+
+1. **PS1 per-source Upsert** (~3,000 lines). PS1 calls ``Upsert-Node``
+   once per collector that touches a node (LDAP, AdminService, HTTP,
+   SMB, RemoteRegistry, etc.) — same Computer logged 5-10 times.
+   OH's framework calls ``as_node`` exactly **once per row** because
+   DLT dedupes upstream. Closing this gap would require either:
+   (a) emitting the verbose lines at every property lookup site
+   (adminservice_client_devices probe, http_management_points probe,
+   etc.) — feasible but high-noise, or (b) framework changes to
+   re-invoke ``as_node`` per source — would break OH's design.
+
+2. **PS1 multi-line ``Updated:`` blocks** (~2,300 lines). PS1's
+   ``Upsert-Node`` diff format adds an ``Updated:`` section listing
+   every property whose value *changed* on a re-touch — meaningless
+   in OH's one-shot emission model. OH emits only the ``Added:``
+   form (every non-None property at emission time).
+
+The remaining ~1,000 lines are normal cross-collector formatting
+differences (timestamps, prefix conventions) that the harness's
+normalizer already handles.
+
+### Unicode crash fix (round 25)
+
+[tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py)
+``Logger.write()`` crashed mid-diff with ``UnicodeEncodeError`` when
+``run_console_diff`` emitted a normalized line containing the ``�``
+replacement char (Windows console = cp1252). Added a ``_safe_print``
+helper that falls back to ``str.encode(stdout.encoding,
+errors="replace")`` on encode failure.
+
+### Files touched (round 25-26)
+
+- [log_context.py](sccm/sccm/src/openhound_sccm/log_context.py) —
+  ``VERBOSE`` level, idempotent prefix filter, ``cached_with_log``,
+  ``trace_node`` / ``trace_node_with_properties`` /
+  ``trace_property_added`` / ``trace_edge``
+- [main.py](sccm/sccm/src/openhound_sccm/main.py) — count-style
+  ``-v``/``-vv``, console stream handler in ``_apply_log_level``
+- [lookup.py](sccm/sccm/src/openhound_sccm/lookup.py) —
+  ``cached_with_log`` replaces ``@lru_cache`` on top resolvers,
+  verbose trace in ``principal_sid_by_account_name``
+- [models/computer.py](sccm/sccm/src/openhound_sccm/models/computer.py) +
+  [user.py](sccm/sccm/src/openhound_sccm/models/user.py) +
+  [group.py](sccm/sccm/src/openhound_sccm/models/group.py) —
+  ``trace_node_with_properties`` after building ``SCCMNode``
+- [models/sccm_client_device.py](sccm/sccm/src/openhound_sccm/models/sccm_client_device.py) +
+  [sccm_collection.py](sccm/sccm/src/openhound_sccm/models/sccm_collection.py) +
+  [sccm_admin_user.py](sccm/sccm/src/openhound_sccm/models/sccm_admin_user.py) +
+  [sccm_security_role.py](sccm/sccm/src/openhound_sccm/models/sccm_security_role.py) +
+  [sccm_site.py](sccm/sccm/src/openhound_sccm/models/sccm_site.py) +
+  [mssql_server.py](sccm/sccm/src/openhound_sccm/models/mssql_server.py) —
+  ``trace_node`` at top of ``as_node``
+- [models/derived/derived_node.py](sccm/sccm/src/openhound_sccm/models/derived/derived_node.py) —
+  ``trace_node`` for synthesised MSSQL nodes
+- [models/derived/aggregator.py](sccm/sccm/src/openhound_sccm/models/derived/aggregator.py) —
+  ``trace_edge`` inside ``_emit_edge`` factory (one call covers all
+  derived edges)
+- [models/group_membership.py](sccm/sccm/src/openhound_sccm/models/group_membership.py) —
+  ``trace_edge`` per yielded MemberOf edge
+- [clients/ad.py](sccm/sccm/src/openhound_sccm/clients/ad.py) +
+  [clients/adminservice.py](sccm/sccm/src/openhound_sccm/clients/adminservice.py) +
+  [collectors/http.py](sccm/sccm/src/openhound_sccm/collectors/http.py) +
+  [collectors/smb.py](sccm/sccm/src/openhound_sccm/collectors/smb.py) +
+  [collectors/wmi.py](sccm/sccm/src/openhound_sccm/collectors/wmi.py) +
+  [collectors/registry.py](sccm/sccm/src/openhound_sccm/collectors/registry.py) +
+  [collectors/adminservice.py](sccm/sccm/src/openhound_sccm/collectors/adminservice.py) —
+  promoted ``logger.debug`` → ``logger.verbose`` at per-probe / per-
+  query / per-login points
+- [tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py) —
+  ``-vv`` to OH, Unicode-safe print
+
+### Original (round 24) gap breakdown — superseded
+
+The original (round 24) gap breakdown — superseded:
+
+| PS1-only event pattern | Approx. count | Why OH doesn't emit |
+|------------------------|---:|---|
+| ``Found existing Computer/User/Group/SCCM_X node: SID``        | ~1,500 | PS1's ``Upsert-Node`` per-touch trace. OH's ``BaseAsset.as_node()`` runs inside the framework emission pass — read-only per the no-OpenHound-core rule. |
+| ``Found existing edge X -[K]-> Y with identical properties``    | ~750   | Same: PS1's ``Upsert-Edge`` dedup notice happens inside the framework's emission, not the collector. |
+| ``Trying AD PowerShell module / ADSISearcher / DirectorySearcher / NTAccount translation`` | ~900 | PS1's per-principal resolver method-chain. OH uses bulk LDAP + DuckDB ``ad_principals`` lookup — single path, no per-method chain to trace. |
+| ``Resolved X in domain mayyhem.com from cache``                 | ~700   | PS1 logs every AD-cache hit. OH's ``@lru_cache`` lookups don't (would be every Computer/User/Group property fetch). |
+| Multi-line ``Updated:`` / ``Added:`` / ``No new properties``    | ~1,700 | PS1's ``Upsert-Node`` multi-line formatter. OH's emission is single-line JSON to file + INFO summary line. |
+
+The first two categories total ~2,250 lines and are explicitly not
+closable without editing OpenHound core (which is read-only per the
+long-standing rule). The middle two (~1,600 lines) are architectural —
+OH's bulk-LDAP + cached-lookup pattern doesn't have the same per-record
+loop PS1's PowerShell resolver does. The last (~1,700 lines) is PS1's
+multi-line log format vs OH's single-line.
+
+**What IS present and ordered the same as PS1** (verified via the
+console-diff sweep): per-LDAP-search start/complete, per-HTTP-probe
+"Testing endpoint X" + "Received N", per-SMB-login attempt, per-WMI
+namespace connect, per-Registry bind, per-AdminService GET, per-
+principal "Resolving via ad_principals view". The phase order
+(LDAP → Local → DNS → DHCP → RemoteRegistry → MSSQL → AdminService →
+WMI → HTTP → SMB) matches PS1's.
+
+### Unicode crash fix in harness
+
+[tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py)
+``Logger.write()`` crashed mid-diff with ``UnicodeEncodeError`` when
+``run_console_diff`` emitted a normalized line containing the ``�``
+replacement char (Windows console = cp1252). Added a ``_safe_print``
+helper that falls back to ``str.encode(stdout.encoding, errors="replace")``
+on encode failure.
+
+### Verification
+
+Run a 3-way sweep with ``--console-diff --verbose``:
+
+```pwsh
+uv run python tests\invoke_configmanbearpig_unit_tests.py `
+  --all-collectors -d mayyhem.com -dc 10.2.10.100 `
+  -u 'MAYYHEM\domainadmin' -p password `
+  --output-dir output\sweep\da-cdiff `
+  --disable-possible-edges --console-diff --verbose
+```
+
+Outputs ``console_<collector>.log`` per collector under
+``output\sweep\da-cdiff\<collector>\``. The harness's ``run_console_diff()``
+function (lines ~946-1013 of the harness) normalizes timestamps / IDs /
+paths and Counter-diffs the three transcripts.
+
+### Files touched
+
+- [log_context.py](sccm/sccm/src/openhound_sccm/log_context.py)
+  (VERBOSE level, idempotent filter)
+- [main.py](sccm/sccm/src/openhound_sccm/main.py)
+  (count-style ``-v``/``-vv``, console handler in ``_apply_log_level``)
+- [clients/ad.py](sccm/sccm/src/openhound_sccm/clients/ad.py)
+- [clients/adminservice.py](sccm/sccm/src/openhound_sccm/clients/adminservice.py)
+- [collectors/adminservice.py](sccm/sccm/src/openhound_sccm/collectors/adminservice.py)
+- [collectors/http.py](sccm/sccm/src/openhound_sccm/collectors/http.py)
+- [collectors/smb.py](sccm/sccm/src/openhound_sccm/collectors/smb.py)
+- [collectors/wmi.py](sccm/sccm/src/openhound_sccm/collectors/wmi.py)
+- [collectors/registry.py](sccm/sccm/src/openhound_sccm/collectors/registry.py)
+- [lookup.py](sccm/sccm/src/openhound_sccm/lookup.py)
+- [tests/invoke_configmanbearpig_unit_tests.py](sccm/sccm/tests/invoke_configmanbearpig_unit_tests.py)
+  (``-vv`` to OH)
+
+### Note for next agent
+
+The ~8× residual gap is **deliberately not closed** because closing
+it requires editing the OpenHound framework's graph emission stage
+to log per-touch — and that's read-only per the long-standing rule.
+If a future framework change exposes an emission hook, hook into it
+and emit ``logger.verbose("Added <kind> node: <id>")`` from there to
+fully close PS1 parity.
+
 ## Project status (2026-05-19, twenty-third session — PS1 property-bag parity + broken HTTP probe fix)
 
 **Headline.** This session closed the remaining PS1-only property gaps on

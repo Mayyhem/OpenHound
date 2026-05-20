@@ -12,10 +12,16 @@ that's a real possibility.
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
 from duckdb import DuckDBPyConnection
 from openhound.core.lookup import LookupManager
+
+from . import log_context  # noqa: F401 — installs VERBOSE level on Logger
+from .log_context import cached_with_log
+
+logger = logging.getLogger(__name__)
 
 
 class SCCMLookup(LookupManager):
@@ -66,7 +72,7 @@ class SCCMLookup(LookupManager):
     # AD principal resolution
     # -----------------------------------------------------------------
 
-    @lru_cache
+    @cached_with_log("Computer SID")
     def computer_by_sid(self, sid: str) -> str | None:
         """Return the canonical id of a Computer node by SID."""
         try:
@@ -77,7 +83,7 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("Computer name")
     def computer_by_name(self, name: str) -> str | None:
         """Return the SID of a Computer node by its sAMAccountName or short hostname."""
         if not name:
@@ -93,7 +99,7 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("Computer hostname")
     def computer_sid_by_hostname(self, hostname: str) -> str | None:
         """Resolve a hostname (FQDN or short name) to a Computer SID.
 
@@ -136,23 +142,33 @@ class SCCMLookup(LookupManager):
         bare = account.split("\\", 1)[-1].strip().lower().rstrip("$")
         if not bare:
             return None
+        # ``-vv`` parity tier with PS1's "Detected DOMAIN\\username format for
+        # X; resolving username Y" + "Attempting to resolve Y in domain" trace.
+        if "\\" in account:
+            logger.verbose("Detected DOMAIN\\username format for '%s'; resolving username '%s'", account, bare)
+        logger.verbose("Resolving principal '%s' via ad_principals view", bare)
         try:
             # ``ad_principals`` stores ``sam_account_bare`` with trailing $
             # already stripped for computer rows, so a single equality matches
             # both `mssqlsvc` (user) and `cas-pss` (computer, originally
             # `cas-pss$`). ``ORDER BY kind`` is alphabetical and puts
             # 'computer' before 'user' — we want the opposite, so we negate.
-            return self._find_single_object(
+            sid = self._find_single_object(
                 f"SELECT object_sid FROM {self.schema}.ad_principals "
                 f"WHERE sam_account_bare = ? "
                 f"ORDER BY CASE WHEN kind = 'user' THEN 0 ELSE 1 END "
                 f"LIMIT 1",
                 [bare],
             )
+            if sid:
+                logger.verbose("Resolved '%s' to %s", bare, sid)
+            else:
+                logger.verbose("No AD object found for '%s'", bare)
+            return sid
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("User SAM")
     def user_by_sam(self, sam: str) -> str | None:
         try:
             return self._find_single_object(
@@ -162,7 +178,7 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("Group SID")
     def group_by_sid(self, sid: str) -> str | None:
         try:
             return self._find_single_object(
@@ -172,7 +188,7 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("Principal DN")
     def principal_id_by_dn(self, dn: str) -> str | None:
         """Resolve an AD distinguishedName to its objectSid by checking users,
         computers, then groups in turn.
