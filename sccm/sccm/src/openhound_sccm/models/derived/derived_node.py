@@ -38,6 +38,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node
 from openhound_sccm.main import app
 
 from .aggregator import _MSSQLSynthProperties
@@ -92,7 +93,6 @@ class DerivedNode(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode | None:
-        from ...log_context import trace_node
         spec = _KIND_MAP.get(self.kind)
         if spec is None:
             return None

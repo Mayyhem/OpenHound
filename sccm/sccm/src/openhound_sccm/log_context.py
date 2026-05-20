@@ -237,27 +237,32 @@ def with_log_context(
                 resolved_target = _resolve_target(args, kwargs)
                 inner = func(*args, **kwargs)
                 while True:
+                    phase_token = _current_phase.set(phase) if phase is not None else None
+                    target_token = _current_target.set(resolved_target) if resolved_target is not None else None
                     try:
-                        with contextlib.ExitStack() as stack:
-                            if phase is not None:
-                                stack.enter_context(phase_context(phase))
-                            if resolved_target is not None:
-                                stack.enter_context(target_context(resolved_target))
-                            value = next(inner)
+                        value = next(inner)
                     except StopIteration:
                         return
+                    finally:
+                        if target_token is not None:
+                            _current_target.reset(target_token)
+                        if phase_token is not None:
+                            _current_phase.reset(phase_token)
                     yield value
             return gen_wrapper  # type: ignore[return-value]
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             resolved_target = _resolve_target(args, kwargs)
-            with contextlib.ExitStack() as stack:
-                if phase is not None:
-                    stack.enter_context(phase_context(phase))
-                if resolved_target is not None:
-                    stack.enter_context(target_context(resolved_target))
+            phase_token = _current_phase.set(phase) if phase is not None else None
+            target_token = _current_target.set(resolved_target) if resolved_target is not None else None
+            try:
                 return func(*args, **kwargs)
+            finally:
+                if target_token is not None:
+                    _current_target.reset(target_token)
+                if phase_token is not None:
+                    _current_phase.reset(phase_token)
         return wrapper  # type: ignore[return-value]
 
     return decorator
@@ -337,15 +342,18 @@ def cached_with_log(label: str) -> Callable[[_F], _F]:
         @functools.wraps(func)
         def wrapper(self, *args):
             key = args
+            verbose_enabled = logger.isEnabledFor(VERBOSE)
             if key in cache:
-                key_text = ", ".join(repr(a) for a in args)
-                logger.verbose("Resolved %s %s from cache", label, key_text)
+                if verbose_enabled:
+                    key_text = ", ".join(repr(a) for a in args)
+                    logger.verbose("Resolved %s %s from cache", label, key_text)
                 return cache[key]
-            key_text = ", ".join(repr(a) for a in args)
-            logger.verbose("Resolving %s %s via DuckDB", label, key_text)
+            if verbose_enabled:
+                key_text = ", ".join(repr(a) for a in args)
+                logger.verbose("Resolving %s %s via DuckDB", label, key_text)
             result = func(self, *args)
             cache[key] = result
-            if result is None:
+            if result is None and verbose_enabled:
                 logger.verbose("No %s found for %s", label, key_text)
             return result
 
@@ -398,6 +406,11 @@ def trace_node_with_properties(kind: str, node_id: str, name: Optional[str], pro
     field, skipping framework boilerplate (``node_id``, ``displayname``,
     ``name``, ``environmentid``, ``last_seen``).
     """
+    # Walking dataclass fields and reading every attribute is non-trivial work
+    # per node; short-circuit when VERBOSE is filtered so the convert hot path
+    # pays nothing.
+    if not logging.getLogger("openhound_sccm.graph").isEnabledFor(VERBOSE):
+        return
     import dataclasses
     trace_node(kind, node_id, name)
     if properties is None:

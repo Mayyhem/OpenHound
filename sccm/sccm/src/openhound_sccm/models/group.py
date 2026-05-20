@@ -20,6 +20,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node_with_properties
 from openhound_sccm.main import app
 
 
@@ -76,7 +77,6 @@ class Group(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node_with_properties
         display = self.name or self.sam_account_name or self.object_sid
         # SCCMResourceIDs for groups — PS1 emits the ResourceID@SiteCode
         # entries of users whose ``SecurityGroupName`` references this
@@ -86,11 +86,10 @@ class Group(BaseAsset):
         # ``adminservice_r_user_security_groups`` (which stores it as
         # ``"<DOMAIN>\<SAM>"``).
         sccm_resource_ids: Optional[list[str]] = None
-        try:
-            lookup = getattr(self, "_lookup", None)
-            if lookup is not None and self.sam_account_name:
-                client = lookup.client
-                schema = lookup.schema
+        if self.sam_account_name:
+            try:
+                client = self._lookup.client
+                schema = self._lookup.schema
                 needle = f"%\\{self.sam_account_name}"
                 rows = client.execute(
                     f"SELECT DISTINCT resource_id, site_code "
@@ -102,25 +101,15 @@ class Group(BaseAsset):
                 ).fetchall()
                 if rows:
                     sccm_resource_ids = [f"{rid}@{sc}" for rid, sc in rows]
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         # collectionSource — LDAP plus any extras from
         # ldap_system_management_acl when this group holds GenericAll on
         # the System Management container (PS1: ConfigManBearPig.ps1:3508).
         collection_sources: list[str] = ["LDAP"]
-        try:
-            lookup = getattr(self, "_lookup", None)
-            if lookup is not None:
-                acl_row = lookup.client.execute(
-                    f"SELECT 1 FROM {lookup.schema}.ldap_system_management_acl "
-                    f"WHERE principal_sid = ? LIMIT 1",
-                    [self.object_sid],
-                ).fetchone()
-                if acl_row:
-                    collection_sources.append("LDAP-GenericAllSystemManagement")
-        except Exception:
-            pass
+        if self._lookup.has_system_management_acl(self.object_sid):
+            collection_sources.append("LDAP-GenericAllSystemManagement")
 
         props = GroupProperties(
             node_id=self.object_sid,
@@ -139,7 +128,7 @@ class Group(BaseAsset):
             IsDomainPrincipal=True,
             SCCMResourceIDs=sccm_resource_ids,
         )
-        trace_node_with_properties("Group", self.object_sid, display, props)
+        trace_node_with_properties(nk.GROUP, self.object_sid, display, props)
         return SCCMNode(kinds=[nk.GROUP, nk.BASE], properties=props)
 
     @property

@@ -345,11 +345,10 @@ class SourceContext:
         copy of the list so iteration is safe against concurrent
         ``register_target`` mutations.
         """
-        with self._ensure_target_lock():
-            if not self._target_hosts:
-                # Outside the lock to avoid recursion (ldap_computer_hosts
-                # may take its own lock indirectly). Release and re-acquire.
-                pass
+        # Cheap unlocked check first; the seed call (and the snapshot copy) take
+        # the lock themselves. ``register_target`` is idempotent, so a benign
+        # double-seed under a race only does the LDAP enumeration twice, never
+        # corrupts state.
         if not self._target_hosts:
             self._seed_targets_from_ldap_computers()
         with self._ensure_target_lock():
@@ -373,8 +372,6 @@ class SourceContext:
         matches PS1's gate (``-CollectionMethods`` excludes ``LDAP`` →
         no SPN-based ClientDevice synthesis).
         """
-        from .log_context import phase_context, target_context
-
         if self._cmrc_spn_matches is not None:
             return self._cmrc_spn_matches
         if not self.method_enabled("LDAP"):

@@ -20,6 +20,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node_with_properties
 from openhound_sccm.main import app
 
 
@@ -111,7 +112,6 @@ class Computer(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node_with_properties
         display = self.name or (self.sam_account_name or "").rstrip("$") or self.object_sid
         # Look up SCCM-infra role membership at convert time so the
         # output-stage prune can keep this Computer when there's no
@@ -340,16 +340,10 @@ class Computer(BaseAsset):
                         collection_sources.append(src)
         except Exception:
             pass
-        try:
-            acl_row = client.execute(
-                f"SELECT 1 FROM {schema}.ldap_system_management_acl "
-                f"WHERE principal_sid = ? LIMIT 1",
-                [self.object_sid],
-            ).fetchone()
-            if acl_row and "LDAP-GenericAllSystemManagement" not in collection_sources:
-                collection_sources.append("LDAP-GenericAllSystemManagement")
-        except Exception:
-            pass
+        if self._lookup.has_system_management_acl(self.object_sid) and (
+            "LDAP-GenericAllSystemManagement" not in collection_sources
+        ):
+            collection_sources.append("LDAP-GenericAllSystemManagement")
 
         props = ComputerProperties(
             node_id=self.object_sid,
@@ -387,7 +381,7 @@ class Computer(BaseAsset):
             SCCMInfra=sccm_infra,
             SCCMSiteSystemRoles=sccm_site_system_roles,
         )
-        trace_node_with_properties("Computer", self.object_sid, display, props)
+        trace_node_with_properties(nk.COMPUTER, self.object_sid, display, props)
         return SCCMNode(kinds=[nk.COMPUTER, nk.BASE], properties=props)
 
     @property

@@ -28,6 +28,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node
 from openhound_sccm.main import app
 
 
@@ -106,8 +107,7 @@ class SCCMSite(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node
-        trace_node("SCCM_Site", self.site_code, self.display_name or self.site_code)
+        trace_node(nk.SCCM_SITE, self.site_code, self.display_name or self.site_code)
         # `_lookup` is injected by the framework at convert time, but parity
         # tests instantiate SCCMSite without one — keep the outer `_lookup is
         # not None` guard so `test_sccm_site_node_tolerates_missing_enrichment`

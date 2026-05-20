@@ -47,6 +47,7 @@ from pydantic import ConfigDict
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties, SCCMEdgeProperties
 from openhound_sccm.kinds import edges as ek
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_edge
 from openhound_sccm.main import app
 
 
@@ -151,7 +152,6 @@ def _emit_edge(
         )
     else:
         props = EdgeProperties(traversable=traversable)
-    from ...log_context import trace_edge
     trace_edge(kind, start, end)
     return Edge(
         kind=kind,

@@ -27,6 +27,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.kinds import edges as ek
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_edge
 from openhound_sccm.main import app
 
 
@@ -93,7 +94,6 @@ class GroupMembership(BaseAsset):
         # Group->Group overshoot we see for full-access users.
         if self._lookup.is_group_sid(member_sid) and self._lookup.adminservice_membership_available():
             return
-        from ..log_context import trace_edge
         trace_edge(ek.MEMBER_OF, member_sid, self.group_sid)
         yield Edge(
             kind=ek.MEMBER_OF,

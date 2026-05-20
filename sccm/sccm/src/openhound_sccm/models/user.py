@@ -20,6 +20,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node_with_properties
 from openhound_sccm.main import app
 
 
@@ -85,7 +86,6 @@ class User(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node_with_properties
         display = self.display_name or self.sam_account_name or self.object_sid
         # Tag SCCMInfra=True when this User appears in
         # adminservice_r_user_security_groups (i.e. SMS_R_User found
@@ -141,16 +141,8 @@ class User(BaseAsset):
         # ldap_system_management_acl when this user holds GenericAll on
         # the System Management container (PS1: ConfigManBearPig.ps1:3502).
         collection_sources: list[str] = ["LDAP"]
-        try:
-            acl_row = client.execute(
-                f"SELECT 1 FROM {schema}.ldap_system_management_acl "
-                f"WHERE principal_sid = ? LIMIT 1",
-                [self.object_sid],
-            ).fetchone()
-            if acl_row:
-                collection_sources.append("LDAP-GenericAllSystemManagement")
-        except Exception:
-            pass
+        if self._lookup.has_system_management_acl(self.object_sid):
+            collection_sources.append("LDAP-GenericAllSystemManagement")
 
         props = UserProperties(
             node_id=self.object_sid,
@@ -172,7 +164,7 @@ class User(BaseAsset):
             storedInSCCMSite=stored_in_site,
             SCCMInfra=sccm_infra,
         )
-        trace_node_with_properties("User", self.object_sid, display, props)
+        trace_node_with_properties(nk.USER, self.object_sid, display, props)
         return SCCMNode(kinds=[nk.USER, nk.BASE], properties=props)
 
     @property

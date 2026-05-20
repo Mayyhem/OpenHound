@@ -21,6 +21,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node
 from openhound_sccm.main import app
 
 
@@ -121,14 +122,13 @@ class SCCMClientDevice(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node
         node_id = f"GUID:{self.guid}"
         display = (
             f"{(self.machine_name or '').upper()}@{self.site_code}"
             if self.machine_name
             else node_id
         )
-        trace_node("SCCM_ClientDevice", node_id, display)
+        trace_node(nk.SCCM_CLIENT_DEVICE, node_id, display)
 
         def _split_user(s: Optional[str]) -> tuple[Optional[str], Optional[str]]:
             """Split ``DOMAIN\\sam`` into ``(domain, sam)``; ``(None, sam)``

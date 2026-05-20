@@ -21,6 +21,7 @@ from pydantic import ConfigDict
 
 from openhound_sccm.graph import SCCMNode, SCCMNodeProperties
 from openhound_sccm.kinds import nodes as nk
+from openhound_sccm.log_context import trace_node
 from openhound_sccm.main import app
 
 
@@ -86,7 +87,6 @@ class SCCMCollection(BaseAsset):
 
     @property
     def as_node(self) -> SCCMNode:
-        from ..log_context import trace_node
         # PS1 polls every SMS Provider in the hierarchy (one per primary
         # site) and tags each collection with that provider's site code.
         # The same collection therefore shows up as <id>@CAS *and* <id>@PS1
@@ -94,12 +94,11 @@ class SCCMCollection(BaseAsset):
         # preserves that split. ``rootSiteCode`` below still resolves to
         # the hierarchy root so cross-site queries can pivot on it.
         site_for_id = self.site_code or ""
-        trace_node("SCCM_Collection", f"{self.collection_id}@{site_for_id}", self.name)
+        node_id = f"{self.collection_id}@{site_for_id}"
+        trace_node(nk.SCCM_COLLECTION, node_id, self.name)
         root_site_code = (
             self._lookup.hierarchy_root(self.site_code) if self.site_code else None
         ) or self.site_code or ""
-
-        node_id = f"{self.collection_id}@{site_for_id}"
         # PS1 emits ``name`` = bare collection name (no @site suffix). Match
         # so BloodHound queries against ``c.name = 'All Systems'`` work.
         display = self.name or node_id

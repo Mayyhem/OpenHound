@@ -128,7 +128,7 @@ class SCCMLookup(LookupManager):
         except Exception:
             return None
 
-    @lru_cache
+    @cached_with_log("Principal SAM")
     def principal_sid_by_account_name(self, account: str) -> str | None:
         """Resolve a service-account string (``DOMAIN\\sam`` or bare ``sam``)
         to an AD SID. Reads the precomputed ``sccm.ad_principals`` view
@@ -142,29 +142,21 @@ class SCCMLookup(LookupManager):
         bare = account.split("\\", 1)[-1].strip().lower().rstrip("$")
         if not bare:
             return None
-        # ``-vv`` parity tier with PS1's "Detected DOMAIN\\username format for
-        # X; resolving username Y" + "Attempting to resolve Y in domain" trace.
         if "\\" in account:
             logger.verbose("Detected DOMAIN\\username format for '%s'; resolving username '%s'", account, bare)
-        logger.verbose("Resolving principal '%s' via ad_principals view", bare)
         try:
             # ``ad_principals`` stores ``sam_account_bare`` with trailing $
             # already stripped for computer rows, so a single equality matches
             # both `mssqlsvc` (user) and `cas-pss` (computer, originally
             # `cas-pss$`). ``ORDER BY kind`` is alphabetical and puts
             # 'computer' before 'user' — we want the opposite, so we negate.
-            sid = self._find_single_object(
+            return self._find_single_object(
                 f"SELECT object_sid FROM {self.schema}.ad_principals "
                 f"WHERE sam_account_bare = ? "
                 f"ORDER BY CASE WHEN kind = 'user' THEN 0 ELSE 1 END "
                 f"LIMIT 1",
                 [bare],
             )
-            if sid:
-                logger.verbose("Resolved '%s' to %s", bare, sid)
-            else:
-                logger.verbose("No AD object found for '%s'", bare)
-            return sid
         except Exception:
             return None
 
@@ -667,6 +659,23 @@ class SCCMLookup(LookupManager):
         try:
             return bool(self._find_single_object(
                 f"SELECT 1 FROM {self.schema}.ldap_groups WHERE LOWER(object_sid) = LOWER(?) LIMIT 1",
+                [sid],
+            ))
+        except Exception:
+            return False
+
+    @lru_cache
+    def has_system_management_acl(self, sid: str) -> bool:
+        """Return True if *sid* appears in ``ldap_system_management_acl`` —
+        i.e. holds an applicable ACE (GenericAll) on the System Management
+        container. Used by Computer / User / Group models to add the
+        ``LDAP-GenericAllSystemManagement`` collectionSource tag.
+        """
+        if not sid:
+            return False
+        try:
+            return bool(self._find_single_object(
+                f"SELECT 1 FROM {self.schema}.ldap_system_management_acl WHERE principal_sid = ? LIMIT 1",
                 [sid],
             ))
         except Exception:

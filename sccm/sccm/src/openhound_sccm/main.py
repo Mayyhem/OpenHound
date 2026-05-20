@@ -179,13 +179,18 @@ def _apply_log_level(verbose: int, debug: bool) -> None:
     install_filter()
 
 
+# Hard-frozen to the framework's current timestamp format. We identify the
+# formatter to swap by class name, so format divergence is a visible signal.
+_LOG_TIMESTAMP_FMT = "%Y-%m-%d %H:%M:%S"
+
+
 class _NoVersionRichFormatter(logging.Formatter):
     """Mirror of ``openhound.core.logging.OpenHoundRichFormatter`` minus the
     trailing ``(openhound_version=…)`` suffix. Used by ``_apply_log_level``
     to swap the framework's CLI formatter in place."""
 
     def format(self, record: logging.LogRecord) -> str:
-        return f"time={self.formatTime(record, '%Y-%m-%d %H:%M:%S')}, msg={record.getMessage()}"
+        return f"time={self.formatTime(record, _LOG_TIMESTAMP_FMT)}, msg={record.getMessage()}"
 
 
 def _strip_version_suffix_from_handlers() -> None:
@@ -254,29 +259,15 @@ def _patch_rollover_for_alive_progress(loggers) -> None:
                 try:
                     _orig()
                 except (AttributeError, OSError):
-                    # AttributeError: alive_progress NoneType stream wrap.
-                    # OSError (includes PermissionError WinError 32):
-                    # Windows file-in-use during rename. Either way, leave
-                    # the existing log file in place and continue.
-                    #
-                    # Critical: advance ``rolloverAt`` so subsequent log
-                    # emits don't keep retrying the failing rollover —
-                    # otherwise every log line in the rest of the run
-                    # triggers the same crash again. Native
-                    # ``TimedRotatingFileHandler.doRollover`` does this at
-                    # its end; we have to mirror it manually because the
-                    # rename step raised before that statement ran.
+                    # The rename step raised before native doRollover bumped
+                    # rolloverAt — mirror that bump manually so subsequent
+                    # log emits don't keep retrying the failing rollover.
                     if hasattr(_h, "computeRollover") and hasattr(_h, "rolloverAt"):
                         import time as _t
                         try:
                             _h.rolloverAt = _h.computeRollover(int(_t.time()))
                         except Exception:
-                            # Worst case: bump by one day so we don't keep
-                            # retrying every emit.
                             _h.rolloverAt = int(_t.time()) + 86400
-                    # Re-open the file if the handler ended up with a
-                    # closed stream after the failed rollover. Native
-                    # ``FileHandler._open`` returns a fresh handle.
                     try:
                         if getattr(_h, "stream", None) is not None:
                             try:
