@@ -1,0 +1,56 @@
+[project]
+name = "sccm"
+version = "0.0.1"
+description = "OpenGraph collector for sccm using OpenHound"
+readme = "README.md"
+requires-python = "<=3.14,>=3.13"
+authors = [
+  {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
+]
+dependencies = [
+    # LDAP client used by the LDAP collection phase (clients/ad.py).
+    # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
+    # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
+    # LDAP channel binding tokens against signing-required DCs.
+    "ldap3>=2.10.2rc4",
+    # Windows-only Kerberos backend for ldap3 SASL GSSAPI. Drives the
+    # "no explicit creds → bind with the current user's TGT via SSPI"
+    # path in clients/ad.py. Wheels exist for CPython 3.13/3.14 on Windows
+    # x64; on Linux/macOS this package is ignored (and ldap3 falls back to
+    # the `gssapi` package, which we don't bundle — Linux collectors that
+    # need integrated auth should `pip install gssapi[kerberos]`).
+    "winkerberos>=0.10.0; sys_platform == 'win32'",
+    # Windows SSPI bindings used for current-user NTLM fallback when no
+    # explicit password is provided and Kerberos cannot build an LDAP SPN
+    # (for example --dc is an IP address with no reverse DNS).
+    "pywin32>=306; sys_platform == 'win32'",
+    # DNS SRV / ADIDNS lookups for the DNS phase (Phase 2).
+    "dnspython>=2.4.0",
+]
+
+[tool.uv]
+# Prefer system / official Pythons over uv-managed (python-build-standalone) on
+# Windows: their libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim,
+# so any TLS handshake aborts the process. On Linux this preference is harmless
+# (the bug doesn't exist there).
+python-preference = "only-system"
+
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openhound_sccm"]
+
+[dependency-groups]
+dev = [
+    "openhound @ git+https://github.com/SpecterOps/openhound.git",
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.1",
+    "ruff>=0.15.5",
+    "mypy>=1.19.1",
+    "zensical>=0.0.27",
+]
+
+[project.entry-points."openhound.sources"]
+sccm = "openhound_sccm.main:app"
