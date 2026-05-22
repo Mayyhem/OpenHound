@@ -397,7 +397,7 @@ def _require_domain_or_explain(flag_kwargs: dict) -> None:
         msg = (
             "Running on a non-Windows host: -d / --domain is required "
             "(auto-detection of the current user's domain context is Windows-only). "
-            "-dc / --domain-controller will be resolved from the domain via DNS SRV "
+            "--dc / --domain-controller will be resolved from the domain via DNS SRV "
             "if omitted. -u / --username and -p / --password are also required for "
             "any phase that needs AD/SCCM auth."
         )
@@ -419,9 +419,9 @@ def collect_sccm(
     tables: Contract = typer.Option(Contract.evolve, help="Contract for newly-seen resources/tables."),
     columns: Contract = typer.Option(Contract.evolve, help="Contract for unknown fields."),
     data_type: Contract = typer.Option(Contract.freeze, help="Contract for type mismatches."),
-    # ---- Connection (CMBP -d/-dc/-u/-p/--ldap-port/--ldaps) ----
+    # ---- Connection (CMBP -d/--dc/-u/-p/--ldap-port/--ldaps) ----
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN; on Linux/macOS this flag is required."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
+    domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username", help="DOMAIN\\\\user for explicit auth."),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password for explicit auth."),
     ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389+sign/seal). 636/3269 → LDAPS; any other port → LDAP."),
@@ -539,7 +539,7 @@ def preprocess_sccm(
     output_file: pathlib.Path = typer.Argument(DEFAULT_LOOKUP_FILE, help="Path to write the DuckDB lookup file."),
     progress: Progress = typer.Option(Progress.tqdm, help="Progress tracker."),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN. Required on Linux/macOS."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
+    domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
     verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
@@ -643,7 +643,7 @@ def convert_sccm(
     progress: Progress = typer.Option(Progress.tqdm, help="Progress tracker."),
     lookup_file: pathlib.Path = typer.Option(DEFAULT_LOOKUP_FILE, "--lookup-file", help="DuckDB lookup file path."),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN. Required on Linux/macOS."),
-    domain_controller: Optional[str] = typer.Option(None, "-dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
+    domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username"),
     password: Optional[str] = typer.Option(None, "-p", "--password"),
     verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
