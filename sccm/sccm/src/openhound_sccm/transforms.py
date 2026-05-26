@@ -80,6 +80,9 @@ def _safe_exec(con: duckdb.DuckDBPyConnection, sql: str, label: str) -> None:
 _EMPTY_SCHEMAS: dict[str, str] = {
     "site_types": "(site_code VARCHAR, site_type VARCHAR, parent_site_code VARCHAR)",
     "hierarchies": "(root_code VARCHAR, member_code VARCHAR)",
+    "computer_mp_roles": "(hostname VARCHAR, role VARCHAR, site_code VARCHAR)",
+    "computer_fsp_roles": "(hostname VARCHAR, role VARCHAR, site_code VARCHAR)",
+    "computer_site_system_roles": "(hostname VARCHAR, role VARCHAR, site_code VARCHAR)",
 }
 
 
@@ -145,13 +148,70 @@ def _build_computer_sccm_infra(con: duckdb.DuckDBPyConnection, schema: str) -> N
 
 
 
-def create_joined_tables(con, schema: str = "sccm"):
-    """ Example to create another table. In this case, just an example of creating a single table out of two tables using union"""
-    con.execute(f"""CREATE OR REPLACE TABLE {schema}.new_table AS 
-        SELECT * FROM {schema}.example_assets
-        UNION ALL
-        SELECT * FROM {schema}.example_assets
-    """)
+def _build_site_types(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    if not _table_exists(con, schema, "ldap_management_points_raw"):
+        _ensure_empty(con, schema, "site_types")
+        return
+    _safe_exec(
+        con,
+        f"""CREATE OR REPLACE TABLE {schema}.site_types AS
+            SELECT site_code, site_type, parent_site_code
+            FROM {schema}.ldap_management_points_raw
+            WHERE site_code IS NOT NULL""",
+        "site_types",
+    )
+
+
+def _build_computer_mp_roles(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    if not _table_exists(con, schema, "ldap_management_points_raw"):
+        _ensure_empty(con, schema, "computer_mp_roles")
+        return
+    _safe_exec(
+        con,
+        f"""CREATE OR REPLACE TABLE {schema}.computer_mp_roles AS
+            SELECT
+                mp_hostname AS hostname,
+                'SMS Management Point@' || site_code AS role,
+                site_code
+            FROM {schema}.ldap_management_points_raw
+            WHERE mp_hostname IS NOT NULL AND site_code IS NOT NULL""",
+        "computer_mp_roles",
+    )
+
+
+def _build_computer_fsp_roles(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    if not _table_exists(con, schema, "ldap_management_points_raw"):
+        _ensure_empty(con, schema, "computer_fsp_roles")
+        return
+    _safe_exec(
+        con,
+        f"""CREATE OR REPLACE TABLE {schema}.computer_fsp_roles AS
+            SELECT
+                UNNEST(fsp_hostnames) AS hostname,
+                'SMS Fallback Status Point@' || site_code AS role,
+                site_code
+            FROM {schema}.ldap_management_points_raw
+            WHERE fsp_hostnames IS NOT NULL AND LEN(fsp_hostnames) > 0""",
+        "computer_fsp_roles",
+    )
+
+
+def _build_computer_site_system_roles(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    parts: list[str] = []
+    for table in ("computer_mp_roles", "computer_fsp_roles"):
+        if _table_exists(con, schema, table):
+            parts.append(
+                f"SELECT hostname, role, site_code FROM {schema}.{table}"
+            )
+    if not parts:
+        _ensure_empty(con, schema, "computer_site_system_roles")
+        return
+    _safe_exec(
+        con,
+        f"CREATE OR REPLACE TABLE {schema}.computer_site_system_roles AS "
+        + " UNION ALL ".join(parts),
+        "computer_site_system_roles",
+    )
 
 
 def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
@@ -161,4 +221,8 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
         con: The DuckDB connection to use for creating computed tables.
         schema: The DuckDB schema name containing the source tables.
     """
-    create_joined_tables(con, schema)
+    _build_site_types(con, schema)
+    _build_computer_mp_roles(con, schema)
+    _build_computer_fsp_roles(con, schema)
+    _build_computer_site_system_roles(con, schema)
+    _build_computer_sccm_infra(con, schema)
