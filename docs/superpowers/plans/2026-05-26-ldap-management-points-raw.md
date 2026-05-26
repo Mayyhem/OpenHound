@@ -135,7 +135,11 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
     Returns a dict with keys: site_type, parent_site_code,
     command_line_site_code, root_site_code, fsp_hostnames.
     Returns safe defaults on parse failure or empty input.
+
+    Mirrors PS1 ConfigManBearPig.ps1:3095-3210 (_collect_management_points).
     """
+    # Determine site type based on design specification (PS1:3122-3123)
+    # Default assumption until capabilities XML is parsed
     result: dict = {
         "site_type": "Secondary Site",
         "parent_site_code": "Undetermined",
@@ -146,10 +150,12 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
     if not capabilities_str:
         return result
     try:
+        # Clean XML entities before parsing (PS1:3099)
         clean = re.sub(r"&(?!amp;|lt;|gt;|quot;|apos;)", "&amp;", str(capabilities_str))
         root = ET.fromstring(clean)
 
-        # CommandLine site code
+        # Extract CommandLine site code (PS1:3103-3106)
+        # ClientOperationalSettings.CCM.CommandLine contains "SMSSITECODE=XYZ"
         ccm = root.find(".//CCM")
         if ccm is not None:
             cmd = ccm.get("CommandLine", "") or ""
@@ -160,12 +166,14 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
             if m:
                 result["command_line_site_code"] = m.group(1).upper()
 
-        # Root site code
+        # Extract root site code (PS1:3109)
+        # ClientOperationalSettings.RootSiteCode identifies the hierarchy root
         rs = root.find("RootSiteCode") or root.find(".//RootSiteCode")
         if rs is not None and rs.text:
             result["root_site_code"] = rs.text.strip().upper()
 
-        # FSP hostnames
+        # Parse for fallback status points (PS1:3193-3195)
+        # ClientOperationalSettings.FSP.FSPServer nodes each name an FSP host
         fsp_elem = root.find("FSP") or root.find(".//FSP")
         if fsp_elem is not None:
             result["fsp_hostnames"] = [
@@ -174,18 +182,29 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
                 if s.text and s.text.strip()
             ]
 
-        # Site type classification (mirrors PS1 ConfigManBearPig.ps1:3126-3143)
+        # Determine site type based on design specification (PS1:3121-3143)
         mp_code = mp_site_code.upper() if mp_site_code else ""
         cmd_code = result["command_line_site_code"]
         root_code = result["root_site_code"]
 
+        # Check if this MP's CommandLine site code matches the site code we're
+        # analyzing (PS1:3126)
         if cmd_code and cmd_code == mp_code:
+            # Primary Site: mSSMSManagementPoint exists where
+            # CommandLine.SMSSITECODE == this site code (PS1:3127-3128)
             result["site_type"] = "Primary Site"
+            # Check if there's a different root site code (indicates hierarchy)
+            # (PS1:3131-3135)
             result["parent_site_code"] = root_code if (root_code and root_code != mp_code) else "None"
         elif root_code and root_code == mp_code and cmd_code != mp_code:
+            # Central Administration Site: mSSMSManagementPoint exists where
+            # RootSiteCode == this site code but CommandLine.SMSSITECODE is
+            # different (PS1:3137-3141)
             result["site_type"] = "Central Administration Site"
             result["parent_site_code"] = "None"
         else:
+            # If neither condition above is met, it remains "Secondary Site"
+            # (PS1:3143); parent = root if available, else commandLine
             result["site_type"] = "Secondary Site"
             if root_code and root_code != mp_code:
                 result["parent_site_code"] = root_code
@@ -252,6 +271,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             mp_site_code = (entry.get("mSSMSSiteCode") or "").strip()
             mp_code_upper = mp_site_code.upper() if mp_site_code else None
 
+            # Register the management point as a collection target (PS1:3198
+            # Add-DeviceToTargets); mirrors the Computer node upsert at PS1:3205
             if mp_hostname:
                 if not mp_site_code:
                     logger.warning("mSSMSManagementPoint missing site code: %s", mp_hostname)
@@ -263,8 +284,12 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 if mp_target and mp_target.is_new:
                     logger.info("Found management point: %s (site: %s)", mp_hostname, mp_site_code)
 
+            # Parse capabilities to determine site relationships and extract
+            # FSP hostnames (PS1:3095-3096)
             parsed = _parse_mp_capabilities(entry.get("mSSMSCapabilities") or "", mp_site_code)
 
+            # Register fallback status points as collection targets (PS1:3198-3210)
+            # Each FSPServer node in the capabilities XML names a separate host
             for fsp_hostname in parsed["fsp_hostnames"]:
                 fsp_target = ctx.register_target(
                     fsp_hostname,
@@ -275,6 +300,9 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     logger.info("Found fallback status point: %s (site: %s)", fsp_hostname, mp_site_code)
 
             mp_count += 1
+            # Yield one flat row per mSSMSManagementPoint entry; preproc
+            # transforms fan this into site_types, computer_mp_roles, and
+            # computer_fsp_roles tables
             yield {
                 "mp_hostname": mp_hostname,
                 "site_code": mp_site_code,
