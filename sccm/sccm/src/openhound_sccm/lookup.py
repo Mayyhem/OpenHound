@@ -59,3 +59,34 @@ class SCCMLookup(LookupManager):
         except Exception:
             return ()
         return tuple(r[0] for r in rows if r and r[0])
+
+    # -----------------------------------------------------------------
+    # Site system roles (populated from LDAP mSSMSManagementPoint)
+    # -----------------------------------------------------------------
+
+    @lru_cache
+    def computer_site_system_roles(self, object_sid: str | None, dns_host_name: str | None) -> tuple[str, ...]:
+        """Return site system roles for a computer as 'RoleName@SiteCode' strings.
+
+        Matches against computer_site_system_roles by FQDN and short name so that
+        'mp.contoso.com' matches a hostname stored as either form.
+        Returns empty tuple when the table is absent or no roles are found.
+        """
+        # object_sid is a cache-key discriminator only — it is not used in the
+        # query, but including it prevents false hits when two computers from
+        # different domains share the same short hostname.
+        if not dns_host_name:
+            return ()
+        hostname_lower = dns_host_name.lower()
+        short = hostname_lower.split(".")[0]
+        try:
+            rows = self._find_all_objects(
+                f"""SELECT DISTINCT role
+                    FROM {self.schema}.computer_site_system_roles
+                    WHERE LOWER(hostname) = ?
+                       OR LOWER(SPLIT_PART(hostname, '.', 1)) = ?""",
+                [hostname_lower, short],
+            )
+        except Exception:
+            return ()
+        return tuple(r[0] for r in rows if r and r[0])

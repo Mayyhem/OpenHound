@@ -88,7 +88,7 @@ def test_graceful_degradation_no_raw_table(con):
     # transforms() must not crash when ldap_management_points_raw is absent
     transforms(con)
     # empty placeholder tables should exist
-    for table in ("site_types", "computer_site_system_roles"):
+    for table in ("site_types", "computer_mp_roles", "computer_fsp_roles", "computer_site_system_roles"):
         count = con.execute(
             f"SELECT COUNT(*) FROM information_schema.tables "
             f"WHERE table_schema = '{SCHEMA}' AND table_name = '{table}'"
