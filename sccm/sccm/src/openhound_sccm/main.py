@@ -604,7 +604,7 @@ def _preproc_table_map() -> dict[str, str]:
         "ldap_users",
         "ldap_groups",
         "ldap_sites",
-        "ldap_mp_site_classifications",
+        "ldap_management_points_raw",
         "ldap_sms_providers",
         "ldap_cmrc_devices",
         "ldap_network_boot_servers",

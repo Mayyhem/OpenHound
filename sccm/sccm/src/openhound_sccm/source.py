@@ -7,6 +7,7 @@ from .context import SourceContext
 from .main import app
 
 from .collectors.ldap import (
+    ldap_management_points_raw,
     ldap_sites,
 )
 
@@ -121,4 +122,5 @@ def source(
 
     return (
         ldap_sites(ctx),
+        ldap_management_points_raw(ctx),
     )
