@@ -7,14 +7,8 @@ PRIMARY_XML = """<ClientOperationalSettings>
   <RootSiteCode>CAS</RootSiteCode>
 </ClientOperationalSettings>"""
 
-CAS_XML = """<ClientOperationalSettings>
+SECONDARY_CMDLINE_FALLBACK_XML = """<ClientOperationalSettings>
   <CCM CommandLine="SMSSITECODE=PS1" />
-  <RootSiteCode>CAS</RootSiteCode>
-</ClientOperationalSettings>"""
-
-SECONDARY_XML = """<ClientOperationalSettings>
-  <CCM CommandLine="SMSSITECODE=PS1" />
-  <RootSiteCode>CAS</RootSiteCode>
 </ClientOperationalSettings>"""
 
 FSP_XML = """<ClientOperationalSettings>
@@ -40,15 +34,22 @@ def test_primary_site_with_cas_parent():
 
 
 def test_cas_site():
-    result = _parse_mp_capabilities(CAS_XML, "CAS")
+    result = _parse_mp_capabilities(PRIMARY_XML, "CAS")
     assert result["site_type"] == "Central Administration Site"
     assert result["parent_site_code"] == "None"
 
 
 def test_secondary_site():
-    result = _parse_mp_capabilities(SECONDARY_XML, "SEC")
+    result = _parse_mp_capabilities(PRIMARY_XML, "SEC")
     assert result["site_type"] == "Secondary Site"
     assert result["parent_site_code"] == "CAS"
+
+
+def test_secondary_site_cmdline_fallback_parent():
+    # Secondary with no RootSiteCode — parent falls back to CommandLine site code
+    result = _parse_mp_capabilities(SECONDARY_CMDLINE_FALLBACK_XML, "SEC")
+    assert result["site_type"] == "Secondary Site"
+    assert result["parent_site_code"] == "PS1"
 
 
 def test_primary_standalone_no_root():
