@@ -484,21 +484,63 @@ def collect_sccm(
     _apply_connection_context(flag_kwargs)
     _require_domain_or_explain(flag_kwargs)
 
+    from openhound_collector_utils import TargetQueue
+    from .source import PER_HOST_RESOURCE_NAMES, set_shared_queue, set_shared_ad_cache, set_shared_discovered_domains
+    from .source import source as sccm_source
+
+    queue = TargetQueue(list(PER_HOST_RESOURCE_NAMES))
+    ad_cache: dict = {}
+    discovered_domains: set = set()
+    set_shared_queue(queue)
+    set_shared_ad_cache(ad_cache)
+    set_shared_discovered_domains(discovered_domains)
+
     collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
     ctx = CollectContext(pipeline=collector)
-    from .source import source as sccm_source
 
     src = sccm_source()
     if not src:
+        set_shared_queue(None)
+        set_shared_ad_cache(None)
+        set_shared_discovered_domains(None)
         return None
+    
+    # Pass 0 — full initial run (replace disposition, all resources).
     load_info = collector.run(src)
+
+    # Queue loop — run subsequent passes for any targets discovered mid-run
+    # (e.g. hosts found via HTTP MPKEYINFORMATION that weren't in LDAP).
+    pass_num = 1
+    while queue.has_pending():
+        new_hosts = sorted(queue.pending_hosts())
+        logger.info(
+            "Queue pass %d: %d new host(s) with pending phases — %s",
+            pass_num, len(new_hosts), ", ".join(new_hosts),
+        )
+        os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
+        try:
+            sub_src = sccm_source()
+            if sub_src:
+                sub_src = sub_src.with_resources(*PER_HOST_RESOURCE_NAMES)
+                collector.pipeline.run(
+                    sub_src,
+                    write_disposition="append",
+                    loader_file_format="jsonl",
+                )
+        finally:
+            os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
+        pass_num += 1
+
+    set_shared_queue(None)
+    set_shared_ad_cache(None)
+    set_shared_discovered_domains(None)
+
     # Clear the [target][phase] log context so the summary block reads as a
     # global section rather than inheriting whatever phase ran last.
     from .log_context import phase_context, target_context
     with target_context(None), phase_context(None):
         _log_collect_summary(load_info, output_path)
     return load_info
-
 
 def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.Path) -> None:
     """Emit an end-of-collection summary at INFO level.
@@ -547,3 +589,71 @@ def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.P
 # `@app.collect()` convenience decorator would do this for us, but we register
 # directly on the framework's Typer group to keep CMBP-style flag surface.
 app.collector = collect_sccm
+
+
+def _preproc_table_map() -> dict[str, str]:
+    """Return the DuckDB-table → JSONL-path mapping consumed by ``preprocess``.
+
+    Tables that aren't present yet are still listed so future phases land
+    without an extra edit — DLT silently skips entries whose JSONL directory
+    is missing.
+    """
+    base_tables = [
+        # LDAP base tables (Phase 1)
+        "ldap_computers",
+        "ldap_users",
+        "ldap_groups",
+        "ldap_sites",
+        "ldap_mp_site_classifications",
+        "ldap_sms_providers",
+        "ldap_cmrc_devices",
+        "ldap_network_boot_servers",
+        "ldap_system_management_acl",
+        "ldap_group_memberships",
+        # Once-phase enrichment (Phase 2)
+        "local_management_points",
+        "local_distribution_points",
+        "local_naa_secrets",
+        "dns_management_points",
+        "dhcp_pxe_dps",
+        # Per-host enrichment (Phase 3)
+        "registry_sccm_databases",
+        "registry_current_users",
+        "registry_sccm_components",
+        "registry_mssql_settings",
+        "mssql_epa_flags",
+        "adminservice_admins",
+        "adminservice_collections",
+        "adminservice_collection_members",
+        "adminservice_security_roles",
+        "adminservice_role_members",
+        "adminservice_client_devices",
+        "adminservice_task_sequences",
+        "adminservice_collection_variables",
+        "adminservice_site_systems",
+        "adminservice_sites",
+        "adminservice_site_definitions",
+        "adminservice_r_system_security_groups",
+        "adminservice_r_user_security_groups",
+        "adminservice_reserved_accounts",
+        "wmi_clients",
+        "wmi_users_seen",
+        "wmi_sql_service_accounts",
+        "http_management_points",
+        "http_smsproviders",
+        "http_distribution_points",
+        "http_naa_secrets",
+        "http_collection_secrets",
+        "smb_site_servers",
+        "smb_distribution_points",
+        "smb_signing_status",
+        "derived_edges",
+        "derived_nodes",
+    ]
+    return {table: f"sccm/{table}" for table in base_tables}
+
+
+@app.preproc(transformer=transforms)
+def preproc(ctx: PreProcContext) -> dict[str, str]:
+    """Build a DuckDB lookup database from collected SCCM JSONL."""
+    return _preproc_table_map()

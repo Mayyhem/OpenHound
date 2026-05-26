@@ -8,6 +8,8 @@ authors = [
   {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
 ]
 dependencies = [
+    # Shared target queue for multi-pass per-host collection.
+    "openhound-collector-utils",
     # LDAP client used by the LDAP collection phase (clients/ad.py).
     # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
     # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
@@ -27,6 +29,9 @@ dependencies = [
     # DNS SRV / ADIDNS lookups for the DNS phase (Phase 2).
     "dnspython>=2.4.0",
 ]
+
+[tool.uv.sources]
+openhound-collector-utils = { path = "../../collector-utils", editable = true }
 
 [tool.uv]
 # Prefer system / official Pythons over uv-managed (python-build-standalone) on

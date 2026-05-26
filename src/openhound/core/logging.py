@@ -58,6 +58,15 @@ class RotatingFileHandler(TimedRotatingFileHandler):
         TimedRotatingFileHandler: The original TimedRotatingFileHandler which rotates logs based on intervals
     """
 
+    SIZE_ROLLOVER_SUFFIX = "%Y-%m-%d_%H-%M-%S"
+    ROTATION_SUFFIX_MATCH = re.compile(
+        r"(?<!\d)\d{4}-\d{2}-\d{2}"
+        r"(?:_\d{2}(?:-\d{2}(?:-\d{2})?)?)?"
+        r"(?:\.\d{3})?"
+        r"(?!\d)",
+        re.ASCII,
+    )
+
     def __init__(
         self,
         filename,
@@ -85,6 +94,7 @@ class RotatingFileHandler(TimedRotatingFileHandler):
         super().__init__(filename, when, interval, backupCount, encoding, delay, utc)
         self.max_bytes = max_bytes
         self._size_triggered = False
+        self.extMatch = self.ROTATION_SUFFIX_MATCH
 
     def shouldRollover(self, record: logging.LogRecord) -> bool:
         self._size_triggered = False
@@ -104,18 +114,81 @@ class RotatingFileHandler(TimedRotatingFileHandler):
 
         return False
 
-    def doRollover(self):
+    def _interval_start_tuple(self, current_time: int) -> time.struct_time:
+        interval_start = self.rolloverAt - self.interval
+        if self.utc:
+            return time.gmtime(interval_start)
+
+        time_tuple = time.localtime(interval_start)
+        dst_now = time.localtime(current_time)[-1]
+        dst_then = time_tuple[-1]
+        if dst_now != dst_then:
+            addend = 3600 if dst_now else -3600
+            time_tuple = time.localtime(interval_start + addend)
+        return time_tuple
+
+    def _current_time_tuple(self, current_time: int) -> time.struct_time:
+        if self.utc:
+            return time.gmtime(current_time)
+        return time.localtime(current_time)
+
+    @staticmethod
+    def _unique_rollover_path(path: str) -> str:
+        if not os.path.exists(path):
+            return path
+
+        for index in range(1, 1000):
+            candidate = f"{path}.{index:03d}"
+            if not os.path.exists(candidate):
+                return candidate
+
+        raise FileExistsError(f"Unable to find a unique rollover path for {path}")
+
+    def _time_rollover_filename(self, current_time: int) -> str:
+        interval_tuple = self._interval_start_tuple(current_time)
+        default_suffix = time.strftime(self.suffix, interval_tuple)
+        default_path = self.rotation_filename(f"{self.baseFilename}.{default_suffix}")
+        if not os.path.exists(default_path):
+            return default_path
+
+        interval_date = time.strftime("%Y-%m-%d", interval_tuple)
+        current_hms = time.strftime(
+            "%H-%M-%S", self._current_time_tuple(current_time)
+        )
+        collision_path = self.rotation_filename(
+            f"{self.baseFilename}.{interval_date}_{current_hms}"
+        )
+        return self._unique_rollover_path(collision_path)
+
+    def _size_rollover_filename(self, current_time: int) -> str:
+        suffix = time.strftime(
+            self.SIZE_ROLLOVER_SUFFIX, self._current_time_tuple(current_time)
+        )
+        return self._unique_rollover_path(
+            self.rotation_filename(f"{self.baseFilename}.{suffix}")
+        )
+
+    def doRollover(self) -> None:
         """Override doRollover to handle both time based rollovers and file size based rollovers"""
+        current_time = int(time.time())
         if self._size_triggered:
-            # If the rollover was triggered by file size, also add the minutes+seconds to the suffix to prevent
-            # the default TimedRotatingFileHandler condition from skipping the rollover since the default
-            # filename may already exist due to the standard naming convention
-            original_suffix = self.suffix
-            self.suffix = time.strftime("%Y-%m-%d_%H-%M-%S")
-            super().doRollover()
-            self.suffix = original_suffix
+            rollover_filename = self._size_rollover_filename(current_time)
         else:
-            super().doRollover()
+            rollover_filename = self._time_rollover_filename(current_time)
+
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+
+        self.rotate(self.baseFilename, rollover_filename)
+        if self.backupCount > 0:
+            for filename in self.getFilesToDelete():
+                os.remove(filename)
+
+        if not self.delay:
+            self.stream = self._open()
+
+        self.rolloverAt = self.computeRollover(current_time)
 
 
 class OpenHoundJSONFormatter(logging.Formatter):
@@ -329,12 +402,6 @@ class CustomLogger:
             max_bytes=self.max_bytes,
         )
         rotating_file_handler.setFormatter(json_formatter)
-        # This regular expression overrides the default extMatch to recognize both
-        # default time based rotation filenames and size based rotation filenames (which gets a seconds added as well)
-        rotating_file_handler.extMatch = re.compile(
-            r"(?<!\d)\d{4}-\d{2}-\d{2}_\d{2}(-\d{2}-\d{2})?(?!\d)", re.ASCII
-        )
-
         logger.addHandler(rotating_file_handler)
 
     def cli_handlers(self, logger: logging.Logger, file_path: Path) -> None:
@@ -364,12 +431,6 @@ class CustomLogger:
             max_bytes=self.max_bytes,
         )
         rotating_file_handler.setFormatter(json_formatter)
-        # This regular expression overrides the default extMatch to recognize both
-        # default time based rotation filenames and size based rotation filenames (which gets a seconds added as well)
-        rotating_file_handler.extMatch = re.compile(
-            r"(?<!\d)\d{4}-\d{2}-\d{2}_\d{2}(-\d{2}-\d{2})?(?!\d)", re.ASCII
-        )
-
         logger.addHandler(rotating_file_handler)
 
     def service_handlers(self, logger: logging.Logger, file_path: Path) -> None:
@@ -383,11 +444,6 @@ class CustomLogger:
             max_bytes=self.max_bytes,
         )
         rotating_file_handler.setFormatter(json_formatter)
-        # This regular expression overrides the default extMatch to recognize both
-        # default time based rotation filenames and size based rotation filenames (which gets a seconds added as well)
-        rotating_file_handler.extMatch = re.compile(
-            r"(?<!\d)\d{4}-\d{2}-\d{2}_\d{2}(-\d{2}-\d{2})?(?!\d)", re.ASCII
-        )
         logger.addHandler(rotating_file_handler)
 
     @property

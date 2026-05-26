@@ -1,5 +1,7 @@
 import json
 import logging
+import time
+from pathlib import Path
 
 from openhound.core.logging import RotatingFileHandler, logger_override
 
@@ -106,3 +108,61 @@ def test_log_routing_content(tmp_path, caplog):
     assert ext_logs_json[0]["message"] == "Extension DLT log", (
         "The extension log message should be present in 'ext_test_extension.log'"
     )
+
+
+def test_midnight_rollover_retention_matches_date_only_backups(tmp_path):
+    """Midnight rotations use YYYY-MM-DD suffixes and must be pruned."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("current\n")
+    handler = RotatingFileHandler(log_file, when="midnight", backupCount=3)
+    try:
+        for suffix in (
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-03",
+            "2026-01-04_12",
+            "2026-01-05_12-00",
+            "2026-01-06_12-00-00",
+            "2026-01-07_12-00-00.001",
+            "2026-01-08-prerun",
+        ):
+            (tmp_path / f"app.log.{suffix}").write_text("backup\n")
+
+        assert {Path(path).name for path in handler.getFilesToDelete()} == {
+            "app.log.2026-01-01",
+            "app.log.2026-01-02",
+            "app.log.2026-01-03",
+            "app.log.2026-01-04_12",
+        }
+    finally:
+        handler.close()
+
+
+def test_time_rollover_uses_unique_destination_when_default_exists(tmp_path):
+    """A stale overnight handler should still roll when another run made today's backup."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("active before rollover\n")
+    handler = RotatingFileHandler(log_file, when="midnight", backupCount=14)
+    try:
+        current_time = int(time.time())
+        handler.rolloverAt = current_time
+        default_suffix = time.strftime(
+            handler.suffix, handler._interval_start_tuple(current_time)
+        )
+        default_backup = tmp_path / f"app.log.{default_suffix}"
+        default_backup.write_text("previous rollover\n")
+
+        handler.doRollover()
+
+        backups = [
+            path
+            for path in tmp_path.iterdir()
+            if path.name.startswith("app.log.") and path != default_backup
+        ]
+        assert default_backup.read_text() == "previous rollover\n"
+        assert len(backups) == 1
+        assert backups[0].read_text() == "active before rollover\n"
+        assert backups[0].name != default_backup.name
+        assert handler.rolloverAt >= current_time
+    finally:
+        handler.close()

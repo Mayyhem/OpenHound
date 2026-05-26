@@ -1,4 +1,6 @@
 import dlt
+import logging
+import pathlib
 
 from .clients.ad import ADClient, ADCredentials
 from .context import SourceContext
@@ -8,6 +10,37 @@ from .collectors.ldap import (
     ldap_sites,
 )
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared target queue — set by collect_sccm() before each pipeline.run() call
+# so that the SourceContext created inside source() carries the same queue
+# instance across multiple passes.
+# ---------------------------------------------------------------------------
+_shared_queue = None
+_shared_ad_cache = None
+_shared_discovered_domains = None
+
+def set_shared_queue(queue) -> None:
+    """Plant (or clear) the shared TargetQueue for the next source() call."""
+    global _shared_queue
+    _shared_queue = queue
+
+def set_shared_ad_cache(cache) -> None:
+    """Plant (or clear) the shared AD resolution cache for the next source() call."""
+    global _shared_ad_cache
+    _shared_ad_cache = cache
+
+def set_shared_discovered_domains(domains) -> None:
+    """Plant (or clear) the shared discovered-domains set for the next source() call."""
+    global _shared_discovered_domains
+    _shared_discovered_domains = domains
+
+# Names of every per-host resource. collect_sccm() passes this to
+# source().with_resources() for subsequent queue-loop passes
+PER_HOST_RESOURCE_NAMES: tuple[str, ...] = (
+    "registry_sccm_components",
+)
 
 @app.source(name="sccm", max_table_nesting=0)
 def source(
@@ -47,6 +80,26 @@ def source(
     use_altauth = bool(use_altauth)
     registration_sleep = registration_sleep if registration_sleep is not None else 10
 
+    # Parse allowed targets from --computers and --computer-file.
+    # Both FQDN and short-name forms are added so Test-AllowedTarget matching
+    # works regardless of how a discovered host is later presented.
+    allowed: set[str] = set()
+    for raw in (computers or "").split(","):
+        name = raw.strip().lower()
+        if name:
+            allowed.add(name)
+            if "." in name:
+                allowed.add(name.split(".")[0])
+    if computer_file:
+        p = pathlib.Path(computer_file)
+        if p.exists():
+            for line in p.read_text().splitlines():
+                name = line.strip().lower()
+                if name:
+                    allowed.add(name)
+                    if "." in name:
+                        allowed.add(name.split(".")[0])
+
     creds = ADCredentials(
         domain=domain,
         domain_controller=domain_controller,
@@ -60,8 +113,12 @@ def source(
         username=username,
         password=password,
         collection_methods=collection_methods or "All",
+        allowed_targets=frozenset(allowed),
+        target_queue=_shared_queue,
+        ad_resolution_cache=_shared_ad_cache if _shared_ad_cache is not None else {},
+        discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
     )
-    
+
     return (
         ldap_sites(ctx),
     )

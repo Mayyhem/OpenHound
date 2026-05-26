@@ -818,6 +818,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "openhound-collector-utils"
+version = "0.0.1"
+source = { editable = "../../collector-utils" }
+
+[[package]]
 name = "orjson"
 version = "3.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -1338,6 +1343,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dnspython" },
     { name = "ldap3" },
+    { name = "openhound-collector-utils" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "winkerberos", marker = "sys_platform == 'win32'" },
 ]
@@ -1356,6 +1362,7 @@ dev = [
 requires-dist = [
     { name = "dnspython", specifier = ">=2.4.0" },
     { name = "ldap3", specifier = ">=2.10.2rc4" },
+    { name = "openhound-collector-utils", editable = "../../collector-utils" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
     { name = "winkerberos", marker = "sys_platform == 'win32'", specifier = ">=0.10.0" },
 ]

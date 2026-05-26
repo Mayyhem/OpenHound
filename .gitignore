@@ -4,6 +4,7 @@ ui_catalog.db
 site/
 addons/
 collectors/
+ConfigManBearPig.ps1
 
 notebooks
 

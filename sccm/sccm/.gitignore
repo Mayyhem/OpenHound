@@ -8,6 +8,7 @@ graph
 logs
 dbt_packages
 .vscode
+./ConfigManBearPig.ps1
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
