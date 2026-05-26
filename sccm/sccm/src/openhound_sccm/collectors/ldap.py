@@ -186,7 +186,6 @@ def ldap_mp_site_classifications(ctx: SourceContext) -> Iterable[dict[str, Any]]
     mp_count = 0
 
     try:
-        import xml.etree.ElementTree as ET
         for entry in ctx.ad.paged_search(
             search_filter="(objectClass=mSSMSManagementPoint)",
             base=ctx.system_management_dn,
