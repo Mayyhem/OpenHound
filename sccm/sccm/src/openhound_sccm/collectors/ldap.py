@@ -8,7 +8,7 @@ passed into each resource. All decorators register onto the same
 import logging
 import re
 import xml.etree.ElementTree as ET
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 from ..context import SourceContext
 from ..log_context import with_log_context
@@ -163,25 +163,16 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     logger.info("Found %d mSSMSSite objects", site_count)
 
 
-@app.resource(name="ldap_mp_site_classifications", parallelized=False, columns=raw_table_asset("ldap_mp_site_classifications"))
+@app.resource(name="ldap_management_points_raw", parallelized=False, columns=raw_table_asset("ldap_management_points_raw"))
 @with_log_context(phase="LDAP", target_from_ctx_domain=True)
-def ldap_mp_site_classifications(ctx: SourceContext) -> Iterable[dict[str, Any]]:
-    """Per-site (siteType, parent_site_code) classification derived from
-    each ``mSSMSManagementPoint`` object's ``mSSMSCapabilities`` XML.
+def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+    """Management points, FSP hosts, and site classification from mSSMSManagementPoint.
 
-    Mirrors CMBP's ``ldap_collector::_collect_management_points`` parse:
-
-      * commandLineSiteCode == mp_site_code AND rootSiteCode != mp -> Primary, parent=root
-      * rootSiteCode == mp_site_code AND commandLine != mp         -> CAS, parent=None
-      * (default)                                                  -> Secondary,
-            parent = rootSiteCode (which is the parent Primary), or
-                     commandLineSiteCode if rootSiteCode is missing
-
-    The transforms read this table at preproc to set ``site_type`` even
-    when AdminService is unavailable (low-priv users), closing the
-    ``SCCM_AdminsReplicatedTo`` gap for Secondary sites.
+    One row per mSSMSManagementPoint entry. Registers both the MP hostname and
+    any FSP hostnames parsed from mSSMSCapabilities as collection targets.
+    Preproc transforms derive site_types, computer_mp_roles, computer_fsp_roles,
+    and computer_site_system_roles from this table.
     """
-    
     logger.info("Collecting mSSMSManagementPoint objects in System Management container...")
     mp_count = 0
 
@@ -193,85 +184,49 @@ def ldap_mp_site_classifications(ctx: SourceContext) -> Iterable[dict[str, Any]]
         ):
             mp_hostname = entry.get("mSSMSMPName")
             mp_site_code = (entry.get("mSSMSSiteCode") or "").strip()
+            mp_code_upper = mp_site_code.upper() if mp_site_code else None
 
+            # Register the management point as a collection target so its
+            # per-host resources run in subsequent passes
             if mp_hostname:
                 if not mp_site_code:
-                    logger.warning("mSSMSManagementPoint object is missing site code: %s", mp_hostname)
-
+                    logger.warning("mSSMSManagementPoint missing site code: %s", mp_hostname)
                 mp_target = ctx.register_target(
-                    hostname=mp_hostname,
-                    site_code=mp_site_code.upper() if mp_site_code else None,
+                    mp_hostname,
+                    site_code=mp_code_upper,
                     source="LDAP-mSSMSManagementPoint",
                 )
-
                 if mp_target and mp_target.is_new:
                     logger.info("Found management point: %s (site: %s)", mp_hostname, mp_site_code)
 
+            # Parse capabilities to determine site relationships and extract
+            # FSP hostnames from the capabilities XML
+            parsed = _parse_mp_capabilities(entry.get("mSSMSCapabilities") or "", mp_site_code)
+
+            # Register each fallback status point as a collection target;
+            # FSP hostnames come from FSPServer nodes inside the capabilities XML
+            for fsp_hostname in parsed["fsp_hostnames"]:
+                fsp_target = ctx.register_target(
+                    fsp_hostname,
+                    site_code=mp_code_upper,
+                    source="LDAP-mSSMSManagementPoint",
+                )
+                if fsp_target and fsp_target.is_new:
+                    logger.info("Found fallback status point: %s (site: %s)", fsp_hostname, mp_site_code)
+
             mp_count += 1
-            mp_code_upper = mp_site_code.upper()
-            
-            capabilities_str = entry.get("mSSMSCapabilities")
-            command_line_site_code: Optional[str] = None
-            root_site_code: Optional[str] = None
-            if capabilities_str:
-                try:
-                    clean_xml = re.sub(
-                        r"&(?!amp;|lt;|gt;|quot;|apos;)", "&amp;", str(capabilities_str)
-                    )
-                    root = ET.fromstring(clean_xml)
-                    ccm = root.find(".//CCM")
-                    if ccm is not None:
-                        cmd = ccm.get("CommandLine", "") or ""
-                        if not cmd:
-                            cl_elem = ccm.find("CommandLine")
-                            cmd = (cl_elem.text or "") if cl_elem is not None else (ccm.text or "")
-                        cmd_match = re.search(r"SMSSITECODE=([A-Z0-9]{3})", cmd, re.IGNORECASE)
-                        if cmd_match:
-                            command_line_site_code = cmd_match.group(1).upper()
-                    rs = root.find("RootSiteCode")
-                    if rs is None:
-                        rs = root.find(".//RootSiteCode")
-                    if rs is not None and rs.text:
-                        root_site_code = rs.text.strip().upper()
-                except Exception as parse_err:
-                    logger.debug(
-                        "mSSMSCapabilities parse failed for %s: %s", mp_site_code, parse_err
-                    )
-
-            site_type: Optional[str] = "Secondary Site" # Default assumption
-            parent_site_code: Optional[str] = "Undetermined" 
-
-            # Check if this MP's CommandLine site code matches the site code we're analyzing
-            if command_line_site_code == mp_code_upper:
-                # Primary Site: mSSMSManagementPoint exists where CommandLine.SMSSITECODE = this site code
-                site_type = "Primary"
-
-                # Check if there's a different root site code (indicates hierarchy)
-                if root_site_code and root_site_code != mp_code_upper:
-                    parent_site_code = root_site_code
-                else:
-                    # No parent, this is a standalone primary site
-                    parent_site_code = "None"
-
-            elif root_site_code == mp_code_upper and command_line_site_code != mp_code_upper:
-                # Central Administration Site: mSSMSManagementPoint exists where RootSiteCode = this site code
-                # but CommandLine.SMSSITECODE is different
-                site_type = "Central Administration Site"
-                parent_site_code = "None"
-            else:
-                site_type = "Secondary Site"
-                if root_site_code and root_site_code != mp_code_upper:
-                    parent_site_code = root_site_code
-                elif command_line_site_code and command_line_site_code != mp_code_upper:
-                    parent_site_code = command_line_site_code
-
+            # One flat row per entry; preproc transforms fan this into
+            # site_types, computer_mp_roles, and computer_fsp_roles tables
             yield {
+                "mp_hostname": mp_hostname,
                 "site_code": mp_site_code,
-                "site_type": site_type,
-                "parent_site_code": parent_site_code,
-                "command_line_site_code": command_line_site_code,
-                "root_site_code": root_site_code,
+                "site_type": parsed["site_type"],
+                "parent_site_code": parsed["parent_site_code"],
+                "command_line_site_code": parsed["command_line_site_code"],
+                "root_site_code": parsed["root_site_code"],
+                "fsp_hostnames": parsed["fsp_hostnames"],
             }
     except Exception as e:
-        logger.warning("ldap_mp_site_classifications resource failed: %s", e)
+        logger.warning("ldap_management_points_raw resource failed: %s", e)
+
     logger.info("Found %d mSSMSManagementPoint objects", mp_count)
