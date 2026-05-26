@@ -227,6 +227,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "fsp_hostnames": parsed["fsp_hostnames"],
             }
     except Exception as e:
-        logger.warning("ldap_management_points_raw resource failed: %s", e)
+        logger.error("Failed to search System Management container: %s", e)
+        logger.warning("The System Management container may not exist or access is denied")
 
     logger.info("Found %d mSSMSManagementPoint objects", mp_count)
