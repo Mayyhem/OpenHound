@@ -376,13 +376,13 @@ class ADClient:
                     exc,
                 )
                 continue
-            except Exception as exc:
+            except Exception as ex:
                 if attempt.auth_mode == "kerberos":
                     last_exc = exc
                     logger.debug(
                         "LDAP bind via %s failed (%s); trying next profile",
                         attempt.label,
-                        exc,
+                        ex,
                     )
                     continue
                 raise
@@ -771,8 +771,8 @@ class ADClient:
                     raise LDAPBindError(conn.last_error)
             except LDAPException:
                 raise
-            except Exception as exc:
-                raise LDAPBindError(f"current-user NTLM via Windows SSPI failed: {exc}") from exc
+            except Exception as ex:
+                raise LDAPBindError(f"current-user NTLM via Windows SSPI failed: {ex}") from ex
             finally:
                 conn.sasl_in_progress = False
 

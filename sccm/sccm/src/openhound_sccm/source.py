@@ -9,6 +9,8 @@ from .main import app
 from .collectors.ldap import (
     ldap_management_points_raw,
     ldap_sites,
+    ldap_cmrc_devices,
+    ldap_network_boot_servers,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,4 +125,6 @@ def source(
     return (
         ldap_sites(ctx),
         ldap_management_points_raw(ctx),
+        ldap_cmrc_devices(ctx),
+        ldap_network_boot_servers(ctx),
     )

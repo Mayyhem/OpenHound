@@ -9,6 +9,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ldap3 import BASE
+
 from .clients.ad import ADClient
 from .models.target_entry import TargetEntry
 
@@ -41,6 +43,14 @@ class SourceContext:
     # dedup set, a single SCCM site visible from all three channels would
     # produce three SCCM_Site nodes with the same node_id.
     _emitted_site_codes: Optional[set] = None
+
+    # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when
+    # the LDAP phase first asks for it; the network call is bracketed by
+    # ``phase_context("LDAP")`` so the resulting log line is tagged as an
+    # LDAP event regardless of which resource forces the lazy build. PS1
+    # also runs this query exactly once during its LDAP once-phase
+    # (``ConfigManBearPig.ps1:3221``).
+    _cmrc_spn_matches: Optional[list[dict[str, Any]]] = None
 
     # Mutable per-host probe-target accumulator. PS1's ``Add-DeviceToTargets``
     # appends to a live list and each subsequent per-host phase iterates the
@@ -123,8 +133,18 @@ class SourceContext:
         - Tries domains in order: [hint, configured, previously-discovered]
         - Per-domain cache keys ("domain|name") + all-domains-tried sentinel ("all|name")
         - Both hits and misses cached; second call for the same name never fires LDAP
+        - DNs (contain "=") are resolved directly via BASE scope, bypassing domain iteration
         """
         name = identifier.strip()
+
+        # Distinguished names are fully qualified — no domain iteration needed
+        if "=" in name:
+            cache_key = f"dn|{name.lower()}"
+            if cache_key in self.ad_resolution_cache:
+                return self.ad_resolution_cache[cache_key]
+            result = self._ldap_resolve_dn(name)
+            self.ad_resolution_cache[cache_key] = result
+            return result
 
         # Strip DOMAIN\username prefix; use prefix as domain hint
         hint_domain: Optional[str] = None
@@ -160,6 +180,17 @@ class SourceContext:
         # All domains exhausted — store sentinel so repeat calls short-circuit
         self.ad_resolution_cache[f"all|{name}"] = None
         return None
+
+    def _ldap_resolve_dn(self, dn: str) -> Optional[dict]:
+        """Fetch a single AD object by its distinguished name using BASE scope."""
+        attrs = [
+            "sAMAccountName", "objectSid", "dNSHostName", "cn",
+            "distinguishedName", "objectClass", "userPrincipalName", "name",
+        ]
+        return next(
+            self.ad.paged_search("(objectClass=*)", attrs, base=dn, scope=BASE),
+            None,
+        )
 
     def _ldap_resolve(self, name: str, domain: str) -> Optional[dict]:
         """Fire a single paged_search for name within the given domain's base DN."""
@@ -203,6 +234,7 @@ class SourceContext:
         identifier: Optional[str],
         source: Optional[str] = None,
         site_code: Optional[str] = None,
+        ad_object: Optional[dict] = None,
     ) -> Optional[TargetEntry]:
         """Register a device as a probe target, mirroring PS1's Add-DeviceToTargets.
 
@@ -214,11 +246,11 @@ class SourceContext:
             return None
 
         # Step 1: Resolve to AD object (best-effort, non-fatal)
-        ad_object: Optional[dict] = None
-        try:
-            ad_object = self.resolve_principal(identifier)
-        except Exception:
-            logger.warning("AD resolution failed for %r", identifier)
+        if not ad_object:
+            try:
+                ad_object = self.resolve_principal(identifier)
+            except Exception:
+                logger.warning("AD resolution failed for %r", identifier)
 
         # Step 2: Allowed-targets filter
         if not self._is_allowed_target(identifier, ad_object):
@@ -231,7 +263,7 @@ class SourceContext:
             canonical = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
         else:
             canonical = identifier
-            logger.warning("Could not resolve %r to a domain object; adding by name", identifier)
+            logger.warning("Could not resolve %r to a domain object; adding target by name", identifier)
         canonical_lower = canonical.lower()
 
         with self._ensure_target_lock():

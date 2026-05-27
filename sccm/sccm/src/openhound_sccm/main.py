@@ -357,8 +357,8 @@ def _resolve_dc_via_dns(domain: str) -> Optional[str]:
         srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
         if srvs:
             return str(srvs[0].target).rstrip(".")
-    except Exception as exc:  # dnspython errors, timeouts, no SRV records
-        logger.warning("DNS SRV lookup for domain controller failed: %s", exc)
+    except Exception as ex:  # dnspython errors, timeouts, no SRV records
+        logger.warning("DNS SRV lookup for domain controller failed: %s", ex)
     return None
 
 
@@ -514,8 +514,8 @@ def collect_sccm(
     while queue.has_pending():
         new_hosts = sorted(queue.pending_hosts())
         logger.info(
-            "Queue pass %d: %d new host(s) with pending phases — %s",
-            pass_num, len(new_hosts), ", ".join(new_hosts),
+            "Queue pass %d: %d new host(s) with pending phases: %s\n",
+            pass_num, len(new_hosts), "\n".join(new_hosts),
         )
         os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
         try:
@@ -579,9 +579,9 @@ def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.P
             for name, count in sorted(per_resource.items(), key=lambda kv: (-kv[1], kv[0])):
                 logger.info("    %-40s %d", name, count)
         logger.info("Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then 'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'")
-    except Exception as exc:
+    except Exception as ex:
         # Summary is best-effort — never fail the collect because of a log line.
-        logger.debug("Collection-summary emit failed: %s", exc)
+        logger.debug("Collection-summary emit failed: %s", ex)
 
 
 # Set at module scope so `CollectorManager.validate_extension` (which runs at

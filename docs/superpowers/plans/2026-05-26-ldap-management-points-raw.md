@@ -205,8 +205,8 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
             elif cmd_code and cmd_code != mp_code:
                 result["parent_site_code"] = cmd_code
 
-    except Exception as parse_err:
-        logger.debug("mSSMSCapabilities parse failed for %s: %s", mp_site_code, parse_err)
+    except Exception as ex:
+        logger.debug("mSSMSCapabilities parse failed for %s: %s", mp_site_code, ex)
     return result
 ```
 
@@ -305,8 +305,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "root_site_code": parsed["root_site_code"],
                 "fsp_hostnames": parsed["fsp_hostnames"],
             }
-    except Exception as e:
-        logger.warning("ldap_management_points_raw resource failed: %s", e)
+    except Exception as ex:
+        logger.warning("ldap_management_points_raw resource failed: %s", ex)
 
     logger.info("Found %d mSSMSManagementPoint objects", mp_count)
 ```

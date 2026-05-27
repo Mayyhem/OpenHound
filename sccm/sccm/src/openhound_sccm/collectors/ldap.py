@@ -119,6 +119,8 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     """
     SCCM sites discovered via mSSMSSite objects in the System Management container.
     """
+    if not ctx.method_enabled("LDAP"):
+        return
 
     if ctx._emitted_site_codes is None:
         ctx._emitted_site_codes = set()
@@ -156,8 +158,8 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "site_guid": site_guid,
                 "source_forest": entry.get("mSSMSSourceForest"),
             }
-    except Exception as e:
-        logger.error("Failed to search System Management container: %s", e)
+    except Exception as ex:
+        logger.error("Failed to search System Management container: %s", ex)
         logger.warning("The System Management container may not exist or access is denied")
         return
     logger.info("Found %d mSSMSSite objects", site_count)
@@ -173,8 +175,12 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     Preproc transforms derive site_types, computer_mp_roles, computer_fsp_roles,
     and computer_site_system_roles from this table.
     """
+    if not ctx.method_enabled("LDAP"):
+        return
+    
     logger.info("Collecting mSSMSManagementPoint objects in System Management container...")
     mp_count = 0
+    fsp_count = 0
 
     try:
         for entry in ctx.ad.paged_search(
@@ -197,7 +203,10 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     source="LDAP-mSSMSManagementPoint",
                 )
                 if mp_target and mp_target.is_new:
-                    logger.info("Found management point: %s (site: %s)", mp_hostname, mp_site_code)
+                    mp_sid = mp_target.ad_object.get("object_sid")
+                    sid_suffix = f" ({mp_sid})" if mp_sid else ""
+                    logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
+                    mp_count += 1
 
             # Parse capabilities to determine site relationships and extract
             # FSP hostnames from the capabilities XML
@@ -212,11 +221,11 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     source="LDAP-mSSMSManagementPoint",
                 )
                 if fsp_target and fsp_target.is_new:
-                    logger.info("Found fallback status point: %s (site: %s)", fsp_hostname, mp_site_code)
+                    fsp_sid = fsp_target.ad_object.get("object_sid")
+                    sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
+                    logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
+                    fsp_count += 1
 
-            mp_count += 1
-            # One flat row per entry; preproc transforms fan this into
-            # site_types, computer_mp_roles, and computer_fsp_roles tables
             yield {
                 "mp_hostname": mp_hostname,
                 "site_code": mp_site_code,
@@ -226,8 +235,160 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "root_site_code": parsed["root_site_code"],
                 "fsp_hostnames": parsed["fsp_hostnames"],
             }
-    except Exception as e:
-        logger.error("Failed to search System Management container: %s", e)
+    except Exception as ex:
+        logger.error("Failed to search System Management container: %s", ex)
         logger.warning("The System Management container may not exist or access is denied")
 
-    logger.info("Found %d mSSMSManagementPoint objects", mp_count)
+    logger.info("Found %d management points and %d fallback status points", mp_count, fsp_count)
+
+
+@app.resource(name="ldap_cmrc_devices", parallelized=False, columns=raw_table_asset("ldap_cmrc_devices"))
+@with_log_context(phase="LDAP", target_from_ctx_domain=True)
+def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+    """
+    Computers with the CmRcService SPN registered, indicating they have the SCCM client remote control service installed.
+    One row per computer with the CmRcService SPN. Registers each computer as a collection target for subsequent passes.
+    """
+    if not ctx.method_enabled("LDAP"):
+        return
+
+    logger.info("Searching for computers with Remote Control SPN (CmRcService/*)...")
+
+    try:
+        rows = list(
+            ctx.ad.paged_search(
+                search_filter="(servicePrincipalName=CmRcService/*)",
+                attributes = [
+                    "dNSHostName", "distinguishedName", "objectClass", "servicePrincipalName", 
+                    "objectSid", "cn", "name", "samAccountName"
+                ]            
+            )
+        )
+    except Exception as ex:
+        logger.warning("CmRcService search failed: %s", ex)
+        rows = []
+
+    logger.info("Found %d computers with CmRcService SPN in %s", len(rows), ctx.domain)
+    
+    # Give this client device the first primary site code published to AD. This could 
+    # very well be wrong in multi-site environments, but it should be in the same hierarchy, 
+    # so it's better than nothing for offensive use case and will be replaced if privileged
+    # collection is conducted later
+    site_code = sorted(ctx._emitted_site_codes)[0] if ctx._emitted_site_codes else None
+
+    for entry in rows:
+        sid = entry.get("object_sid")
+        if not sid:
+            continue
+        dns_host_name = (entry.get("dNSHostName") or "").lower() or None
+        sam_account_name = (entry.get("sAMAccountName") or "").strip() or None
+        name = entry.get("name") or None
+
+        logger.verbose("Found computer with Remote Control SPN: %s (%s)", entry.get("dNSHostName"), sid)
+
+        # Do NOT register the computer as a target. This could be any domain computer.
+
+        yield {
+            "object_sid": sid,
+            "sam_account_name": sam_account_name,
+            "name": name,
+            "dns_host_name": dns_host_name,
+            "domain": ctx.domain,
+        }
+
+
+@app.resource(name="ldap_network_boot_servers", parallelized=False, columns=raw_table_asset("ldap_network_boot_servers"))
+@with_log_context(phase="LDAP", target_from_ctx_domain=True)
+def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+    """
+    Searches for connectionPoint objects with netbootserver attribute and 
+    intellimirrorSCP objects, which are likely WDS/PXE-enabled distribution points.
+    """
+    if not ctx.method_enabled("LDAP"):
+        return
+
+    logger.info("Searching for network boot servers (PXE-enabled DPs)...")
+
+    # Search for connectionPoint objects with netbootserver
+    try:
+        netbootserver_rows = list(
+            ctx.ad.paged_search(
+                search_filter="(&(objectClass=connectionPoint)(netbootserver=*))",
+                attributes = ["distinguishedName","objectClass"]            
+            )
+        )
+        logger.info("Found %d connectionPoint objects with netbootserver in %s", len(netbootserver_rows), ctx.domain)   
+    except Exception as ex:
+        logger.warning("netbootserver search failed: %s", ex)
+        netbootserver_rows = []
+
+    # Search for intellimirrorSCP objects
+    try:
+        intellimirror_rows = list(
+            ctx.ad.paged_search(
+                search_filter="(objectClass=intellimirrorSCP)",
+                attributes = ["distinguishedName", "objectClass"]          
+            )
+        )
+        logger.info("Found %d intellimirrorSCP objects in %s", len(intellimirror_rows), ctx.domain)
+    except Exception as ex:
+        logger.warning("intellimirrorSCP search failed: %s", ex)
+        intellimirror_rows = []
+
+    # Uniquify and combine results from both searches because there may be some overlap
+    # They are list[dict[str, Any]] with key distinguishedName
+    network_boot_servers = {entry["distinguishedName"]: entry for entry in (netbootserver_rows + intellimirror_rows)}.values()
+
+    if not network_boot_servers:
+        logger.info("No network boot server objects found in %s", ctx.domain)
+        return
+
+    for server in network_boot_servers: 
+        dn = server.get("distinguishedName")
+        obj_class = server.get("objectClass")
+
+        if not dn:
+            continue
+
+        try:
+            # Extract everything after the first comma to get parent DN (the computer object)
+            parent_dn = dn.split(",", 1)[1] if "," in dn else None
+            if not parent_dn:
+                continue
+
+            parent = ctx.resolve_principal(parent_dn)
+            if not parent:
+                continue
+
+            dns_host_name = parent.get("dNSHostName")
+            if not dns_host_name:
+                logger.warning(f"Network boot server entry {dn} has no dNSHostName for its computer object")
+                logger.debug(f"Parent object: {parent}")
+
+            sid = parent.get("object_sid")
+            if not sid:
+                logger.warning(f"Network boot server entry {dn} has no SID for its computer object")
+                logger.debug(f"Parent object: {parent}")
+
+            if dns_host_name and sid:
+                target = ctx.register_target(
+                    identifier=sid,
+                    site_code=None,
+                    source=f"LDAP-{obj_class}",
+                    ad_object=parent,
+                )
+
+                if target:
+                    logger.info(f"Found network boot server: {dns_host_name} ({sid})")
+
+                if target and target.ad_object:
+                    yield {
+                        "object_sid": sid,
+                        "dns_host_name": dns_host_name,
+                        "name": parent.get("name"),
+                        "sam_account_name": parent.get("sAMAccountName"),
+                        "domain": ctx.domain,
+                    }
+
+        except Exception as ex:
+            logger.error(f"Failed to process network boot server {dn}: {ex}")

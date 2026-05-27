@@ -28,9 +28,9 @@ def safe_resource_wrapper(func: Callable, resource_name: str) -> Callable:
         """
         try:
             gen = func(*args, **kwargs)
-        except Exception as e:
+        except Exception as ex:
             logger.error(
-                f"Error initializing resource '{resource_name}': {e}",
+                f"Error initializing resource '{resource_name}': {ex}",
                 extra={"resource": resource_name, "phase": "resource_initialization"},
             )
             return
@@ -44,9 +44,9 @@ def safe_resource_wrapper(func: Callable, resource_name: str) -> Callable:
                     yield item
                 except StopIteration:
                     break
-                except Exception as e:
+                except Exception as ex:
                     logger.error(
-                        f"Error in resource '{resource_name}' during iteration: {e}",
+                        f"Error in resource '{resource_name}' during iteration: {ex}",
                         extra={
                             "resource": resource_name,
                             "phase": "resource_iteration",
@@ -66,9 +66,9 @@ def safe_resource_wrapper(func: Callable, resource_name: str) -> Callable:
         """
         try:
             gen = func(*args, **kwargs)
-        except Exception as e:
+        except Exception as ex:
             logger.error(
-                f"Error initializing async resource '{resource_name}': {e}",
+                f"Error initializing async resource '{resource_name}': {ex}",
                 extra={"resource": resource_name, "phase": "resource_initialization"},
             )
             return
@@ -82,9 +82,9 @@ def safe_resource_wrapper(func: Callable, resource_name: str) -> Callable:
                     yield item
                 except StopAsyncIteration:
                     break
-                except Exception as e:
+                except Exception as ex:
                     logger.error(
-                        f"Error in async resource '{resource_name}' during iteration: {e}",
+                        f"Error in async resource '{resource_name}' during iteration: {ex}",
                         extra={
                             "resource": resource_name,
                             "phase": "resource_iteration",
@@ -96,7 +96,7 @@ def safe_resource_wrapper(func: Callable, resource_name: str) -> Callable:
             try:
                 result = await gen
                 yield result
-            except Exception as e:
+            except Exception as ex:
                 logger.error(
                     f"Error awaiting async resource '{resource_name}': {e}",
                     extra={"resource": resource_name, "phase": "resource_awaiting"},

@@ -211,6 +211,7 @@ def with_log_context(
     def _resolve_target(args: tuple, kwargs: dict) -> Optional[str]:
         if target is not None:
             return target
+        # Populate the logged target from the context's domain if requested (e.g., [MAYYHEM.COM])
         if target_from_ctx_domain:
             ctx = args[0] if args else kwargs.get("ctx")
             if ctx is not None:
