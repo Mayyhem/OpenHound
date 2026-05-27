@@ -382,6 +382,9 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     logger.info(f"Found network boot server: {dns_host_name} ({sid})")
 
                 if target and target.ad_object:
+
+                    raise Exception("Debugging target with AD object: %s", target.ad_object)
+                
                     yield {
                         "object_sid": sid,
                         "dns_host_name": dns_host_name,
@@ -391,4 +394,4 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     }
 
         except Exception as ex:
-            logger.error(f"Failed to process network boot server {dn}: {ex}")
+            logger.warning(f"Failed to process network boot server {dn}: {ex}")

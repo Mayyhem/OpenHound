@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import pathlib
@@ -357,8 +358,8 @@ def _resolve_dc_via_dns(domain: str) -> Optional[str]:
         srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
         if srvs:
             return str(srvs[0].target).rstrip(".")
-    except Exception as ex:  # dnspython errors, timeouts, no SRV records
-        logger.warning("DNS SRV lookup for domain controller failed: %s", ex)
+    except Exception as exc:  # dnspython errors, timeouts, no SRV records
+        logger.warning("DNS SRV lookup for domain controller failed: %s", exc)
     return None
 
 
@@ -428,6 +429,49 @@ def _require_domain_or_explain(flag_kwargs: dict) -> None:
     raise typer.BadParameter(msg, param_hint="--domain")
 
 
+class _DiagnosticFileHandler(logging.FileHandler):
+    """Writes WARNING+ records with full traceback to a per-run diagnostics file.
+
+    Attached to the root logger for the lifetime of ``collect_sccm``. Uses
+    ``delay=True`` so the file is only created when at least one record is
+    emitted. Injects ``sys.exc_info()`` for its own formatting when the record
+    has no traceback attached, then restores both ``record.exc_info`` and
+    ``record.exc_text`` (the formatter's cached string) so the console handler
+    is never affected.
+    """
+
+    def __init__(self, path: pathlib.Path) -> None:
+        super().__init__(str(path), mode="w", encoding="utf-8", delay=True)
+        self.setLevel(logging.WARNING)
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        self.warning_count = 0
+        self.error_count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.WARNING:
+            return
+        if record.levelno >= logging.ERROR:
+            self.error_count += 1
+        else:
+            self.warning_count += 1
+
+        injected = False
+        if not record.exc_info:
+            exc = sys.exc_info()
+            if exc[0] is not None:
+                record.exc_info = exc
+                injected = True
+
+        super().emit(record)
+
+        if injected:
+            record.exc_info = False
+            record.exc_text = None  # clear cached formatted traceback so console sees nothing
+
+
 # ---------------------------------------------------------------------------
 # `openhound collect sccm ...` — full CMBP-style flag surface
 # ---------------------------------------------------------------------------
@@ -477,70 +521,96 @@ def collect_sccm(
     debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug)
-    _warn_for_suspicious_cli_arguments()
-    flag_kwargs = locals()
-    _apply_env_overrides(flag_kwargs)
-    _drop_empty_dlt_env_values()
-    _apply_connection_context(flag_kwargs)
-    _require_domain_or_explain(flag_kwargs)
 
-    from openhound_collector_utils import TargetQueue
-    from .source import PER_HOST_RESOURCE_NAMES, set_shared_queue, set_shared_ad_cache, set_shared_discovered_domains
-    from .source import source as sccm_source
+    _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = output_path / f"collect_diagnostics_{_ts}.log"
+    _diag = _DiagnosticFileHandler(log_path)
+    logging.root.addHandler(_diag)
+    try:
+        _warn_for_suspicious_cli_arguments()
+        flag_kwargs = locals()
+        _apply_env_overrides(flag_kwargs)
+        _drop_empty_dlt_env_values()
+        _apply_connection_context(flag_kwargs)
+        _require_domain_or_explain(flag_kwargs)
 
-    queue = TargetQueue(list(PER_HOST_RESOURCE_NAMES))
-    ad_cache: dict = {}
-    discovered_domains: set = set()
-    set_shared_queue(queue)
-    set_shared_ad_cache(ad_cache)
-    set_shared_discovered_domains(discovered_domains)
+        from openhound_collector_utils import TargetQueue
+        from .source import PER_HOST_RESOURCE_NAMES, set_shared_queue, set_shared_ad_cache, set_shared_discovered_domains
+        from .source import source as sccm_source
 
-    collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
-    ctx = CollectContext(pipeline=collector)
+        queue = TargetQueue(list(PER_HOST_RESOURCE_NAMES))
+        ad_cache: dict = {}
+        discovered_domains: set = set()
+        set_shared_queue(queue)
+        set_shared_ad_cache(ad_cache)
+        set_shared_discovered_domains(discovered_domains)
 
-    src = sccm_source()
-    if not src:
+        collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
+        ctx = CollectContext(pipeline=collector)
+
+        src = sccm_source()
+        if not src:
+            set_shared_queue(None)
+            set_shared_ad_cache(None)
+            set_shared_discovered_domains(None)
+            return None
+
+        # Pass 0 — full initial run (replace disposition, all resources).
+        load_info = collector.run(src)
+
+        # Queue loop — run subsequent passes for any targets discovered mid-run
+        # (e.g. hosts found via HTTP MPKEYINFORMATION that weren't in LDAP).
+        pass_num = 1
+        while queue.has_pending():
+            new_hosts = sorted(queue.pending_hosts())
+            logger.info(
+                "Queue pass %d: %d new host(s) with pending phases: %s\n",
+                pass_num, len(new_hosts), "\n".join(new_hosts),
+            )
+            os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
+            try:
+                sub_src = sccm_source()
+                if sub_src:
+                    sub_src = sub_src.with_resources(*PER_HOST_RESOURCE_NAMES)
+                    collector.pipeline.run(
+                        sub_src,
+                        write_disposition="append",
+                        loader_file_format="jsonl",
+                    )
+            finally:
+                os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
+            pass_num += 1
+
         set_shared_queue(None)
         set_shared_ad_cache(None)
         set_shared_discovered_domains(None)
-        return None
-    
-    # Pass 0 — full initial run (replace disposition, all resources).
-    load_info = collector.run(src)
 
-    # Queue loop — run subsequent passes for any targets discovered mid-run
-    # (e.g. hosts found via HTTP MPKEYINFORMATION that weren't in LDAP).
-    pass_num = 1
-    while queue.has_pending():
-        new_hosts = sorted(queue.pending_hosts())
-        logger.info(
-            "Queue pass %d: %d new host(s) with pending phases: %s\n",
-            pass_num, len(new_hosts), "\n".join(new_hosts),
-        )
-        os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
-        try:
-            sub_src = sccm_source()
-            if sub_src:
-                sub_src = sub_src.with_resources(*PER_HOST_RESOURCE_NAMES)
-                collector.pipeline.run(
-                    sub_src,
-                    write_disposition="append",
-                    loader_file_format="jsonl",
+        # Clear the [target][phase] log context so the summary block reads as a
+        # global section rather than inheriting whatever phase ran last.
+        from .log_context import phase_context, target_context
+        with target_context(None), phase_context(None):
+            _log_collect_summary(load_info, output_path)
+        return load_info
+    finally:
+        logging.root.removeHandler(_diag)
+        if _diag.warning_count or _diag.error_count:
+            w, e = _diag.warning_count, _diag.error_count
+            parts = []
+            if w:
+                parts.append(f"{w} WARNING{'s' if w != 1 else ''}")
+            if e:
+                parts.append(f"{e} ERROR{'s' if e != 1 else ''}")
+            detail = ", ".join(parts)
+            if log_path.exists():
+                logger.warning(
+                    "%s detected. Traceback details available in: %s",
+                    detail, log_path,
                 )
-        finally:
-            os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
-        pass_num += 1
-
-    set_shared_queue(None)
-    set_shared_ad_cache(None)
-    set_shared_discovered_domains(None)
-
-    # Clear the [target][phase] log context so the summary block reads as a
-    # global section rather than inheriting whatever phase ran last.
-    from .log_context import phase_context, target_context
-    with target_context(None), phase_context(None):
-        _log_collect_summary(load_info, output_path)
-    return load_info
+            else:
+                logger.warning(
+                    "%s detected. Run with --debug to display traceback details after WARNING/ERROR logs.",
+                    detail,
+                )
 
 def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.Path) -> None:
     """Emit an end-of-collection summary at INFO level.

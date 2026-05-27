@@ -33,6 +33,7 @@ import contextvars
 import functools
 import inspect
 import logging
+import sys
 from typing import Any, Callable, Iterator, Optional, TypeVar
 
 
@@ -142,6 +143,33 @@ class LogContextFilter(logging.Filter):
 _FILTER_SINGLETON = LogContextFilter()
 
 
+class _DebugExcInfoFilter(logging.Filter):
+    """Inject ``exc_info`` into WARNING+ records emitted inside an active
+    exception handler when the root logger is at DEBUG level.
+
+    Bridges the common pattern of a warning without exc_info + a companion
+    debug line, making the warning automatically carry the traceback in
+    debug mode. A sentinel attribute prevents double-injection when the
+    same record passes through multiple handlers.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.levelno >= logging.WARNING
+            and not record.exc_info
+            and not getattr(record, "_oh_sccm_exc_injected", False)
+            and logging.root.isEnabledFor(logging.DEBUG)
+        ):
+            exc = sys.exc_info()
+            if exc[0] is not None:
+                record.exc_info = exc
+                record._oh_sccm_exc_injected = True  # type: ignore[attr-defined]
+        return True
+
+
+_EXC_INFO_FILTER_SINGLETON = _DebugExcInfoFilter()
+
+
 def install_filter() -> None:
     """Install the ``[target][phase]`` prefix filter on the root logger
     and disable Rich markup parsing on any ``RichHandler`` it finds.
@@ -162,6 +190,8 @@ def install_filter() -> None:
     root = logging.getLogger()
     if _FILTER_SINGLETON not in root.filters:
         root.addFilter(_FILTER_SINGLETON)
+    if _EXC_INFO_FILTER_SINGLETON not in root.filters:
+        root.addFilter(_EXC_INFO_FILTER_SINGLETON)
     # Each existing handler gets the filter too, in case the handler ignores
     # logger-level filters (RichHandler historically has).
     for logger_name in ("", "dlt"):
@@ -169,6 +199,8 @@ def install_filter() -> None:
         for handler in target_logger.handlers:
             if _FILTER_SINGLETON not in handler.filters:
                 handler.addFilter(_FILTER_SINGLETON)
+            if _EXC_INFO_FILTER_SINGLETON not in handler.filters:
+                handler.addFilter(_EXC_INFO_FILTER_SINGLETON)
             # Tidy up RichHandler instances — duck-typed checks so we don't
             # depend on importing rich here. RichHandler stores show_path on
             # its internal LogRender, not as a direct instance attr, so we
