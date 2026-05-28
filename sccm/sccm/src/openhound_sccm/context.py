@@ -198,7 +198,7 @@ class SourceContext:
         safe = escape_filter_chars(name.rstrip("$"))
         ldap_filter = (
             f"(|(cn={safe})(sAMAccountName={safe})(sAMAccountName={safe}$)"
-            f"(dNSHostName={safe})(dNSHostName={safe}.*)(userPrincipalName={safe}))"
+            f"(dNSHostName={safe})(dNSHostName={safe}.*)(userPrincipalName={safe})(objectSid={safe}))"
         )
         attrs = [
             "sAMAccountName", "objectSid", "dNSHostName", "cn",

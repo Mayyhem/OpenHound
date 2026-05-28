@@ -795,6 +795,7 @@ class ADClient:
         attributes: list[str],
         base: str | None = None,
         scope: str = SUBTREE,
+        controls: list[str] | None = None,
         size_limit: int = 0,
     ) -> Iterable[dict[str, Any]]:
         """Yield each matching entry as a dict of {attr_name: value}.
@@ -824,6 +825,7 @@ class ADClient:
                     attributes=attributes,
                     paged_size=500,
                     paged_cookie=cookie,
+                    controls=controls
                 )
                 # LDAP server-side error surfaces in `conn.result['description']`
                 # without raising — e.g. ``noSuchObject`` for a missing
@@ -865,6 +867,10 @@ class ADClient:
                 page,
             )
 
+    # Attributes whose values are always opaque binary blobs and must not be
+    # UTF-8-decoded (doing so corrupts them via errors="replace" substitution).
+    _BINARY_ATTRS = frozenset({"ntsecuritydescriptor"})
+
     @staticmethod
     def _entry_to_dict(entry) -> dict[str, Any]:
         """Convert an ldap3 Entry into a plain dict, decoding binary SIDs/GUIDs."""
@@ -879,6 +885,12 @@ class ADClient:
                 continue
             if attr_name.lower() == "objectguid":
                 out["object_guid"] = bytes_to_guid(raw[0])
+                continue
+            if attr_name.lower() in ADClient._BINARY_ATTRS:
+                v = raw[0]
+                if isinstance(v, str):
+                    v = v.encode("latin-1")
+                out[attr_name] = v
                 continue
             values = []
             for v in raw:

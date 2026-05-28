@@ -7,9 +7,11 @@ passed into each resource. All decorators register onto the same
 """
 import logging
 import re
+import struct
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable
 
+from ..clients.ad import bytes_to_sid
 from ..context import SourceContext
 from ..log_context import with_log_context
 from ..main import app
@@ -141,11 +143,9 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
         logger.warning("The System Management container may not exist or access is denied")
         results = []
 
-    logger.info("Found %d mSSMSSite objects", site_count)
-
     for entry in results:
         try:
-            site_code = (entry.get("mSSMSSiteCode") or "").strip()
+            site_code = entry.get("mSSMSSiteCode").strip()
             if not site_code:
                 continue
 
@@ -173,6 +173,8 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
         except Exception as ex:
             logger.error("Failed to process mSSMSSite entry %s: %s", entry.get("mSSMSSiteCode"), ex)
             logger.debug(f"Search result: {entry}")
+
+    logger.info("Found %d mSSMSSite objects", site_count)
 
 
 @app.resource(name="ldap_management_points_raw", parallelized=False, columns=raw_table_asset("ldap_management_points_raw"))
@@ -224,7 +226,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     site_code=mp_code_upper,
                     source="LDAP-mSSMSManagementPoint",
                 )
-                if mp_target and mp_target.is_new:
+                if mp_target:
                     mp_sid = mp_target.ad_object.get("object_sid")
                     sid_suffix = f" ({mp_sid})" if mp_sid else ""
                     logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
@@ -242,7 +244,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     site_code=mp_code_upper,
                     source="LDAP-mSSMSManagementPoint",
                 )
-                if fsp_target and fsp_target.is_new:
+                if fsp_target:
                     fsp_sid = fsp_target.ad_object.get("object_sid")
                     sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
                     logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
@@ -302,18 +304,16 @@ def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
         try:
             sid = entry.get("object_sid")
-            dns_host_name = (entry.get("dNSHostName") or "").lower() or None
-            sam_account_name = (entry.get("sAMAccountName") or "").strip() or None
-            name = entry.get("name") or None
+            dns_host_name = entry.get("dNSHostName")
 
-            logger.verbose("Found computer with Remote Control SPN: %s (%s)", entry.get("dNSHostName"), sid)
+            logger.verbose("Found computer with Remote Control SPN: %s (%s)", dns_host_name, sid)
 
             # Do NOT register the computer as a target. This could be any domain computer.
 
             yield {
                 "object_sid": sid,
-                "sam_account_name": sam_account_name,
-                "name": name,
+                "sam_account_name": entry.get("sAMAccountName"),
+                "name": entry.get("name"),
                 "dns_host_name": dns_host_name,
                 "domain": ctx.domain,
                 "site_code": site_code,
@@ -371,7 +371,9 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
     for entry in all_results: 
         dn = entry.get("distinguishedName")
-        obj_class = entry.get("objectClass")
+        obj_class = entry.get("objectClass", [])
+        if isinstance(obj_class, str):
+            obj_class = [obj_class]
 
         if not dn:
             logger.warning(f"Network boot server entry missing distinguishedName: {entry}")
@@ -430,7 +432,8 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 @with_log_context(phase="LDAP", target_from_ctx_domain=True)
 def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     """
-
+    Searches the domain for computers whose names match
+    SCCM-related patterns (sccm, mecm, mcm, memcm, configm, cfgm, sms).
     """
     if not ctx.method_enabled("LDAP"):
         return
@@ -439,7 +442,7 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
     search_patterns = ["sccm", "mecm", "mcm", "memcm", "configm", "cfgm", "sms"]
 
-    # Build dynamic LDAP filter matching PowerShell behavior
+    # Build dynamic LDAP filter to search for any of the patterns in multiple attributes
     filter_parts = []
     for pattern in search_patterns:
         filter_parts.append(f"(samaccountname=*{pattern}*)")
@@ -510,3 +513,188 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
         except Exception as ex:
             logger.error(f"Failed to process search result {computer.get('name')}: {ex}")
             logger.debug(f"Search result: {computer}")
+
+
+@app.resource(name="ldap_system_management_dacl", parallelized=False, columns=raw_table_asset("ldap_system_management_dacl"))
+@with_log_context(phase="LDAP", target_from_ctx_domain=True)
+def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+    """
+    Check ACLs on the System Management container.
+    Looks for GenericAll (Full Control) permissions, which indicate site servers.
+    """
+    if not ctx.method_enabled("LDAP"):
+        return
+
+    logger.info("Checking permissions on System Management container...")
+
+    # Query the container's nTSecurityDescriptor
+    # Need to use SD_FLAGS control to request DACL (0x04)
+    # SD_FLAGS OID: 1.2.840.113556.1.4.801
+    # BER value: SEQUENCE { INTEGER 4 } = 30 03 02 01 04
+    system_mgmt_dn = f"CN=System Management,CN=System,{ctx.ad.base_dn}"
+
+    try:
+        sd_control = ("1.2.840.113556.1.4.801", True, bytes([0x30, 0x03, 0x02, 0x01, 0x04]))
+        results = list(
+            ctx.ad.paged_search(
+            search_filter="(objectClass=container)",
+            base=system_mgmt_dn,
+            attributes=["nTSecurityDescriptor"],
+            controls=[sd_control],
+            )
+        )
+    except Exception as e:
+        logger.error(f"Failed to read System Management container ACLs: {e}")
+        return
+
+    if not results:
+        logger.warning("Could not read System Management container ACLs")
+        return
+
+    sd_bytes = results[0].get("nTSecurityDescriptor")
+    if not sd_bytes or not isinstance(sd_bytes, bytes):
+        logger.warning("nTSecurityDescriptor not returned as bytes")
+        logger.debug(f"nTSecurityDescriptor: {sd_bytes}")
+        return
+
+    # Parse security descriptor and extract GenericAll ACEs
+    try:
+        generic_all_sids = _parse_sd_generic_all(sd_bytes)
+    except Exception as ex:
+        logger.error(f"Failed to parse System Management container ACLs: {ex}")
+        return
+    
+    if not generic_all_sids:
+        logger.warning("No GenericAll permissions found on System Management container")
+        return
+
+    for sid_str in generic_all_sids:
+        ad_obj = None
+
+        try:
+            # Resolve SID to AD object
+            ad_obj = ctx.resolve_principal(sid_str)
+            if not ad_obj:
+                logger.warning(f"Could not resolve GenericAll principal '{sid_str}' to domain object")
+                continue
+
+            sam = ad_obj.get("sAMAccountName")
+
+            obj_class = ad_obj.get("objectClass", [])
+            if isinstance(obj_class, str):
+                obj_class = [obj_class]
+
+            # Determine object type
+            obj_type = "unknown"
+            if "computer" in [c.lower() for c in obj_class]:
+                obj_type = "computer"
+
+                # Add as collection target
+                dns_hostname = ad_obj.get("dNSHostName", sam.rstrip("$"))
+                if dns_hostname:
+                    ctx.register_target(
+                        identifier=dns_hostname,
+                        source="LDAP-GenericAllSystemManagement",
+                        ad_object=ad_obj,
+                    )
+                else:
+                    logger.warning(f"Computer object with GenericAll on System Management container has no dNSHostName: {sam}")
+            elif "user" in [c.lower() for c in obj_class]:
+                obj_type = "user"
+            elif "group" in [c.lower() for c in obj_class]:
+                obj_type = "group"
+            logger.info(f"Found {obj_type} with GenericAll on System Management container: {sam} ({sid_str})")
+
+            yield ad_obj
+
+        except Exception as ex:
+            logger.error(f"Failed to process GenericAll principal {sid_str}: {ex}")
+
+
+def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
+    """
+    Parse a Windows SECURITY_DESCRIPTOR binary blob and return SIDs with GenericAll.
+
+    In Active Directory, GenericAll maps to 0x000F01FF (Full Control) rather than
+    the raw Windows GENERIC_ALL bit (0x10000000). The .NET ActiveDirectoryRights
+    enum GenericAll = 0x000F01FF. We check for both, plus any mask that includes
+    all the AD-specific rights.
+
+    Structure reference:
+    - SECURITY_DESCRIPTOR header (20 bytes for self-relative)
+    - DACL at OffsetDacl
+    - ACL header (8 bytes): revision, padding, size, ace_count, padding
+    - Each ACE: AceType(1), AceFlags(1), AceSize(2), ACCESS_MASK(4), SID(variable)
+    - ACCESS_ALLOWED_OBJECT_ACE (type 0x05) has extra: Flags(4), optional ObjectType(16),
+      optional InheritedObjectType(16) before the SID
+    """
+    if len(sd_bytes) < 20:
+        return []
+
+    # Parse SECURITY_DESCRIPTOR header
+    revision = sd_bytes[0]
+    control = struct.unpack_from("<H", sd_bytes, 2)[0]
+    offset_dacl = struct.unpack_from("<I", sd_bytes, 16)[0]
+
+    if offset_dacl == 0 or offset_dacl >= len(sd_bytes):
+        return []
+
+    # Parse ACL header at offset_dacl
+    acl_size = struct.unpack_from("<H", sd_bytes, offset_dacl + 2)[0]
+    ace_count = struct.unpack_from("<H", sd_bytes, offset_dacl + 4)[0]
+
+    results = []
+    pos = offset_dacl + 8  # Skip ACL header
+
+    # AD GenericAll = 0x000F01FF (DS Full Control)
+    # Also check raw GENERIC_ALL = 0x10000000 in case it wasn't mapped
+    AD_GENERIC_ALL = 0x000F01FF
+    GENERIC_ALL = 0x10000000
+    ACCESS_ALLOWED_ACE_TYPE = 0x00
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE = 0x05
+
+    for _ in range(ace_count):
+        if pos + 4 > len(sd_bytes):
+            break
+
+        ace_type = sd_bytes[pos]
+        ace_flags = sd_bytes[pos + 1]
+        ace_size = struct.unpack_from("<H", sd_bytes, pos + 2)[0]
+
+        if ace_size < 4 or pos + ace_size > len(sd_bytes):
+            break
+
+        if pos + 8 > len(sd_bytes):
+            pos += ace_size
+            continue
+
+        access_mask = struct.unpack_from("<I", sd_bytes, pos + 4)[0]
+        is_generic_all = (access_mask & GENERIC_ALL) or (access_mask & AD_GENERIC_ALL) == AD_GENERIC_ALL
+
+        if is_generic_all:
+            sid_data = None
+
+            if ace_type == ACCESS_ALLOWED_ACE_TYPE:
+                # ACCESS_ALLOWED_ACE: header(4) + mask(4) + SID
+                sid_data = sd_bytes[pos + 8:pos + ace_size]
+
+            elif ace_type == ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+                # ACCESS_ALLOWED_OBJECT_ACE: header(4) + mask(4) + flags(4) +
+                #   [ObjectType(16)] + [InheritedObjectType(16)] + SID
+                if pos + 12 <= len(sd_bytes):
+                    obj_flags = struct.unpack_from("<I", sd_bytes, pos + 8)[0]
+                    sid_start = pos + 12
+                    if obj_flags & 0x01:  # ACE_OBJECT_TYPE_PRESENT
+                        sid_start += 16
+                    if obj_flags & 0x02:  # ACE_INHERITED_OBJECT_TYPE_PRESENT
+                        sid_start += 16
+                    sid_data = sd_bytes[sid_start:pos + ace_size]
+
+            if sid_data:
+                sid_str = bytes_to_sid(sid_data)
+                if sid_str:
+                    results.append(sid_str)
+
+        pos += ace_size
+
+    return results

@@ -11,6 +11,8 @@ from .collectors.ldap import (
     ldap_sites,
     ldap_cmrc_devices,
     ldap_network_boot_servers,
+    ldap_pattern_matches,
+    ldap_system_management_dacl,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,4 +129,6 @@ def source(
         ldap_management_points_raw(ctx),
         ldap_cmrc_devices(ctx),
         ldap_network_boot_servers(ctx),
+        ldap_pattern_matches(ctx),
+        ldap_system_management_dacl(ctx),
     )

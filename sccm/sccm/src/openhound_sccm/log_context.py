@@ -34,7 +34,8 @@ import functools
 import inspect
 import logging
 import sys
-from typing import Any, Callable, Iterator, Optional, TypeVar
+import threading
+from typing import Any, Callable, Iterator, List, Optional, TypeVar
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,40 @@ _current_target: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 _current_phase: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "openhound_sccm_phase", default=None,
 )
+_current_resource: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "openhound_sccm_resource", default=None,
+)
+
+# ---------------------------------------------------------------------------
+# Resource-completion callback registry
+# ---------------------------------------------------------------------------
+# Callables registered here are invoked with (resource_name: str) when a
+# resource generator exhausts naturally.  Used by _OrderedLogFileHandler in
+# main.py to flush each resource's buffered records to disk as a labelled
+# block the moment that resource finishes.
+_resource_complete_callbacks: List[Callable[[str], None]] = []
+_resource_complete_callbacks_lock = threading.Lock()
+
+
+def get_current_resource() -> Optional[str]:
+    """Return the name of the resource generator currently executing, or None."""
+    return _current_resource.get(None)
+
+
+def register_resource_complete_callback(cb: Callable[[str], None]) -> None:
+    """Register *cb* to be called with the resource name when a generator exhausts."""
+    with _resource_complete_callbacks_lock:
+        if cb not in _resource_complete_callbacks:
+            _resource_complete_callbacks.append(cb)
+
+
+def unregister_resource_complete_callback(cb: Callable[[str], None]) -> None:
+    """Remove a previously registered completion callback."""
+    with _resource_complete_callbacks_lock:
+        try:
+            _resource_complete_callbacks.remove(cb)
+        except ValueError:
+            pass
 
 
 @contextlib.contextmanager
@@ -161,7 +196,7 @@ class _DebugExcInfoFilter(logging.Filter):
             and logging.root.isEnabledFor(logging.DEBUG)
         ):
             exc = sys.exc_info()
-            if exc[0] is not None:
+            if exc[0] is not None and exc[0] is not StopIteration:
                 record.exc_info = exc
                 record._oh_sccm_exc_injected = True  # type: ignore[attr-defined]
         return True
@@ -262,21 +297,34 @@ def with_log_context(
                 # generator-to-enter leaks into other generators' yields
                 # because contextvars are process/thread-wide.
                 #
-                # Solution: push the phase / target context **per next()
-                # call** so each iteration of the inner generator sees the
-                # right values exclusively. The yield itself happens
-                # outside the context (no logging there) so no interleaved
-                # caller sees our values.
+                # Solution: push the phase / target / resource context
+                # **per next() call** so each iteration of the inner
+                # generator sees the right values exclusively. The yield
+                # itself happens outside the context (no logging there) so
+                # no interleaved caller sees our values.
                 resolved_target = _resolve_target(args, kwargs)
+                resource_name = func.__name__
                 inner = func(*args, **kwargs)
                 while True:
                     phase_token = _current_phase.set(phase) if phase is not None else None
                     target_token = _current_target.set(resolved_target) if resolved_target is not None else None
+                    resource_token = _current_resource.set(resource_name)
                     try:
                         value = next(inner)
                     except StopIteration:
+                        # Fire completion callbacks before finally resets
+                        # the resource contextvar so any log lines emitted
+                        # by a callback still carry the correct resource.
+                        with _resource_complete_callbacks_lock:
+                            cbs = list(_resource_complete_callbacks)
+                        for cb in cbs:
+                            try:
+                                cb(resource_name)
+                            except Exception:
+                                pass
                         return
                     finally:
+                        _current_resource.reset(resource_token)
                         if target_token is not None:
                             _current_target.reset(target_token)
                         if phase_token is not None:
@@ -473,14 +521,17 @@ __all__ = [
     "LogContextFilter",
     "VERBOSE",
     "cached_with_log",
+    "get_current_resource",
     "install_filter",
     "per_host_iter",
     "per_pair_iter",
     "phase_context",
+    "register_resource_complete_callback",
     "target_context",
     "trace_edge",
     "trace_node",
     "trace_node_with_properties",
     "trace_property_added",
+    "unregister_resource_complete_callback",
     "with_log_context",
 ]

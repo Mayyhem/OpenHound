@@ -1,3 +1,4 @@
+import copy
 import datetime
 import logging
 import os
@@ -5,6 +6,8 @@ import pathlib
 import platform
 import socket
 import sys
+import threading
+import traceback as _traceback
 import typer
 from openhound.cli.collect import collect as _collect_typer  # noqa: E402
 
@@ -235,12 +238,13 @@ def _apply_log_level(verbose: int, debug: bool) -> None:
     """Adjust console logging based on verbosity flags + install the
     ``[target][phase]`` prefix filter.
 
-    ``-v``      → INFO   (collection-step summaries: "Starting LDAP collection…")
+    (no flags) → INFO    (collection-step summaries by default)
+    ``-v``      → INFO   (same as default; kept for backwards compatibility)
     ``-vv``     → VERBOSE (PS1 ``[Verbose]`` parity tier: per-AD-resolution, per-
                   node-add, per-edge dedupe traces)
     ``--debug`` → DEBUG  (everything, including dlt and ldap3 internals)
 
-    Highest-set wins. Neither flag → framework default (file-only at INFO).
+    Highest-set wins.
 
     The framework's default config uses a ``RichHandler`` (or stdout
     ``StreamHandler`` in container mode) wired up by
@@ -255,10 +259,8 @@ def _apply_log_level(verbose: int, debug: bool) -> None:
         level_name, level = "DEBUG", logging.DEBUG
     elif verbose >= 2:
         level_name, level = "VERBOSE", VERBOSE
-    elif verbose >= 1:
-        level_name, level = "INFO", logging.INFO
     else:
-        level_name, level = None, None
+        level_name, level = "INFO", logging.INFO
 
     if level_name is not None:
         os.environ["RUNTIME__LOG_LEVEL"] = level_name
@@ -483,6 +485,114 @@ class _DiagnosticFileHandler(logging.FileHandler):
 
 
 # ---------------------------------------------------------------------------
+# Ordered-log file handler
+# ---------------------------------------------------------------------------
+# Buffers every log record in a per-resource dict keyed by the active
+# _current_resource contextvar value.  When a resource generator exhausts
+# (signalled by the completion callback registered in gen_wrapper), the whole
+# batch for that resource is appended to the file as a labelled section —
+# giving human-readable, resource-sequential output regardless of how dlt
+# interleaves the generators at runtime.
+#
+# Records that arrive outside any resource context (CLI setup, summary lines,
+# etc.) are collected under the "__root__" key and flushed by flush_all().
+# ---------------------------------------------------------------------------
+
+_ORDERED_LEVEL_LABEL: dict[int, str] = {
+    logging.DEBUG:    "DEBUG   ",
+    logging.INFO:     "INFO    ",
+    logging.WARNING:  "WARNING ",
+    logging.ERROR:    "ERROR   ",
+    logging.CRITICAL: "CRITICAL",
+}
+_ORDERED_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+class _OrderedLogFileHandler(logging.Handler):
+    """Buffers log records per resource; flushes each resource's batch to a
+    file in completion order when notified via flush_resource().
+
+    Register flush_resource as a resource-complete callback::
+
+        register_resource_complete_callback(_handler.flush_resource)
+
+    Call close() (which calls flush_all()) before removing the handler to
+    drain any in-flight buffers (e.g. resources that errored before exhausting).
+    """
+
+    def __init__(self, path: pathlib.Path, level: int = logging.NOTSET) -> None:
+        super().__init__(level=level)
+        self._path = path.resolve()  # absolute so CWD changes don't affect later writes
+        self._buffers: dict[str, list] = {}
+        self._lock = threading.Lock()
+        # Import once at construction time so the relative import never runs
+        # inside emit() (which fires on every log record).
+        from .log_context import get_current_resource
+        self._get_current_resource = get_current_resource
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            resource = self._get_current_resource() or "__root__"
+            # Freeze the message string now so args (possibly mutable) are no
+            # longer needed when we format at flush time.
+            rec = copy.copy(record)
+            try:
+                rec.msg = record.getMessage()
+            except Exception:
+                rec.msg = str(record.msg)
+            rec.args = None
+            with self._lock:
+                self._buffers.setdefault(resource, []).append(rec)
+        except Exception:
+            self.handleError(record)  # writes traceback to sys.stderr
+
+    def flush_resource(self, resource_name: str) -> None:
+        """Write *resource_name*'s buffered records to the file and clear the buffer.
+
+        Records are only removed from the buffer on a successful write so that
+        flush_all() can retry them if the output directory didn't exist yet
+        (dlt creates it lazily during the load phase, after extraction).
+        """
+        with self._lock:
+            records = list(self._buffers.get(resource_name, []))
+        if records and self._write_section(resource_name, records):
+            with self._lock:
+                self._buffers.pop(resource_name, None)
+
+    def flush_all(self) -> None:
+        """Flush every remaining buffer — called at handler close time."""
+        with self._lock:
+            remaining = list(self._buffers.items())
+            self._buffers.clear()
+        for resource_name, records in remaining:
+            if records:
+                self._write_section(resource_name, records)
+
+    def _write_section(self, resource_name: str, records: list) -> bool:
+        """Write records to file. Returns True on success, False on failure."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            lines: list[str] = [f"\n{'=' * 72}\n# {resource_name}\n{'=' * 72}\n"]
+            for rec in records:
+                label = _ORDERED_LEVEL_LABEL.get(rec.levelno) or f"L{rec.levelno:<6}"
+                ts = datetime.datetime.fromtimestamp(rec.created).strftime(_ORDERED_TS_FMT)
+                lines.append(f"{label} time={ts}, msg={rec.msg}\n")
+                if rec.exc_info and rec.exc_info[0] is not None:
+                    lines.append(
+                        "".join(_traceback.format_exception(*rec.exc_info))
+                    )
+            with open(self._path, "a", encoding="utf-8") as fh:
+                fh.writelines(lines)
+            return True
+        except Exception:
+            return False
+
+    def close(self) -> None:
+        self.flush_all()
+        super().close()
+
+
+# ---------------------------------------------------------------------------
 # `openhound collect sccm ...` — full CMBP-style flag surface
 # ---------------------------------------------------------------------------
 @_collect_typer.command(
@@ -533,9 +643,21 @@ def collect_sccm(
     _apply_log_level(verbose, debug)
 
     _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     log_path = output_path / f"collect_diagnostics_{_ts}.log"
     _diag = _DiagnosticFileHandler(log_path)
+
+    # Ordered log — same records as the console, written resource-by-resource
+    # in completion order rather than dlt's interleaved round-robin order.
+    _ordered_log_path = output_path / f"collect_log_{_ts}.log"
+    _root_level = logging.root.level or logging.WARNING
+    _ordered_level = min(_root_level, logging.INFO)  # floor at INFO; lower if -v/-vv/--debug
+    _ordered = _OrderedLogFileHandler(_ordered_log_path, level=_ordered_level)
+
+    from .log_context import register_resource_complete_callback, unregister_resource_complete_callback
     logging.root.addHandler(_diag)
+    logging.root.addHandler(_ordered)
+    register_resource_complete_callback(_ordered.flush_resource)
     # Lower the openhound_sccm namespace to DEBUG so companion debug lines emitted
     # inside except blocks reach the file handler. Console handlers (pinned to WARNING
     # by _apply_log_level) are unaffected — the file handler's own emit() guard drops
@@ -610,7 +732,12 @@ def collect_sccm(
         return load_info
     finally:
         _oh_logger.setLevel(_oh_original_level)
+        unregister_resource_complete_callback(_ordered.flush_resource)
+        _ordered.close()  # flushes any in-flight buffers before removal
+        logging.root.removeHandler(_ordered)
         logging.root.removeHandler(_diag)
+        if _ordered_log_path.exists():
+            logger.info("Collection log: %s", _ordered_log_path)
         if _diag.warning_count or _diag.error_count:
             w, e = _diag.warning_count, _diag.error_count
             parts = []
