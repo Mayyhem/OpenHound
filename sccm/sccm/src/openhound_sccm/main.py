@@ -442,7 +442,7 @@ class _DiagnosticFileHandler(logging.FileHandler):
 
     def __init__(self, path: pathlib.Path) -> None:
         super().__init__(str(path), mode="w", encoding="utf-8", delay=True)
-        self.setLevel(logging.WARNING)
+        self.setLevel(logging.DEBUG)
         self.setFormatter(logging.Formatter(
             "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -451,8 +451,18 @@ class _DiagnosticFileHandler(logging.FileHandler):
         self.error_count = 0
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.levelno < logging.WARNING:
+        if record.levelno == logging.DEBUG:
+            # Only capture companion debug lines emitted from inside an except block.
+            # The purpose is to preserve contextual data (e.g. the raw entry that failed)
+            # alongside the WARNING/ERROR that precedes it in the file.
+            if sys.exc_info()[0] is None:
+                return
+            super().emit(record)
             return
+
+        if record.levelno < logging.WARNING:
+            return  # drop INFO / VERBOSE / etc.
+
         if record.levelno >= logging.ERROR:
             self.error_count += 1
         else:
@@ -526,6 +536,13 @@ def collect_sccm(
     log_path = output_path / f"collect_diagnostics_{_ts}.log"
     _diag = _DiagnosticFileHandler(log_path)
     logging.root.addHandler(_diag)
+    # Lower the openhound_sccm namespace to DEBUG so companion debug lines emitted
+    # inside except blocks reach the file handler. Console handlers (pinned to WARNING
+    # by _apply_log_level) are unaffected — the file handler's own emit() guard drops
+    # any debug record that is NOT inside an active exception context.
+    _oh_logger = logging.getLogger("openhound_sccm")
+    _oh_original_level = _oh_logger.level
+    _oh_logger.setLevel(logging.DEBUG)
     try:
         _warn_for_suspicious_cli_arguments()
         flag_kwargs = locals()
@@ -592,6 +609,7 @@ def collect_sccm(
             _log_collect_summary(load_info, output_path)
         return load_info
     finally:
+        _oh_logger.setLevel(_oh_original_level)
         logging.root.removeHandler(_diag)
         if _diag.warning_count or _diag.error_count:
             w, e = _diag.warning_count, _diag.error_count
@@ -651,7 +669,7 @@ def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.P
         logger.info("Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then 'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'")
     except Exception as ex:
         # Summary is best-effort — never fail the collect because of a log line.
-        logger.debug("Collection-summary emit failed: %s", ex)
+        logger.error("Collection-summary emit failed: %s", ex)
 
 
 # Set at module scope so `CollectorManager.validate_extension` (which runs at

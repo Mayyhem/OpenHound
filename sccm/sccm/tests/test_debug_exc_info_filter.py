@@ -249,3 +249,39 @@ def test_diag_no_file_created_without_records(tmp_path):
     h = _DiagnosticFileHandler(log_path)
     h.close()
     assert not log_path.exists()
+
+
+def test_diag_captures_debug_inside_except_block(tmp_path):
+    """DEBUG records emitted from within an active exception handler go to the file."""
+    log_path = tmp_path / "diag.log"
+    h = _DiagnosticFileHandler(log_path)
+    try:
+        try:
+            raise ValueError("original error")
+        except ValueError:
+            h.emit(_record(logging.DEBUG))
+    finally:
+        h.close()
+    assert log_path.exists()
+    assert "test message" in log_path.read_text(encoding="utf-8")
+
+
+def test_diag_drops_debug_outside_except_block(tmp_path):
+    """DEBUG records outside an active exception handler are silently dropped."""
+    log_path = tmp_path / "diag.log"
+    h = _DiagnosticFileHandler(log_path)
+    try:
+        h.emit(_record(logging.DEBUG))
+    finally:
+        h.close()
+    assert not log_path.exists()
+
+
+def test_diag_debug_not_counted_as_warning_or_error(diag):
+    """Companion debug lines must not inflate warning/error counts."""
+    try:
+        raise ValueError("context")
+    except ValueError:
+        diag.emit(_record(logging.DEBUG))
+    assert diag.warning_count == 0
+    assert diag.error_count == 0
