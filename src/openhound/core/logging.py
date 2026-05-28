@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import time
 from enum import Enum
@@ -167,6 +168,19 @@ class RotatingFileHandler(TimedRotatingFileHandler):
         return self._unique_rollover_path(
             self.rotation_filename(f"{self.baseFilename}.{suffix}")
         )
+
+    def rotate(self, source: str, dest: str) -> None:
+        if not os.path.exists(source):
+            return
+        try:
+            os.rename(source, dest)
+        except PermissionError:
+            # Windows blocks os.rename() while any process holds the file open
+            # without FILE_SHARE_DELETE. Copy content to dest, then truncate the
+            # source so existing open handles in other processes remain valid.
+            shutil.copy2(source, dest)
+            with open(source, "r+b") as f:
+                f.truncate(0)
 
     def doRollover(self) -> None:
         """Override doRollover to handle both time based rollovers and file size based rollovers"""

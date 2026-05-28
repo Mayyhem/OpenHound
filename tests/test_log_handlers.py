@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from openhound.core.logging import RotatingFileHandler, logger_override
 
@@ -164,5 +165,23 @@ def test_time_rollover_uses_unique_destination_when_default_exists(tmp_path):
         assert backups[0].read_text() == "active before rollover\n"
         assert backups[0].name != default_backup.name
         assert handler.rolloverAt >= current_time
+    finally:
+        handler.close()
+
+
+def test_rotate_falls_back_to_copy_truncate_on_permission_error(tmp_path):
+    """On Windows, os.rename() fails if another process holds the file open.
+    rotate() must fall back to copy+truncate so rotation still completes."""
+    log_file = tmp_path / "app.log"
+    log_file.write_text("log content\n")
+    dest_file = tmp_path / "app.log.2026-05-27"
+
+    handler = RotatingFileHandler(log_file, when="midnight", backupCount=3)
+    try:
+        with patch("os.rename", side_effect=PermissionError("locked")):
+            handler.rotate(str(log_file), str(dest_file))
+
+        assert dest_file.read_text() == "log content\n"
+        assert log_file.read_text() == ""
     finally:
         handler.close()
