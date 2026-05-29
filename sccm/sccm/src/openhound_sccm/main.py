@@ -79,6 +79,8 @@ _FLAG_TO_ENV: dict[str, str] = {
     "registration_sleep": "SOURCES__SCCM__REGISTRATION_SLEEP",
     # Network
     "socks_proxy": "SOURCES__SCCM__SOCKS_PROXY",
+    # DNS
+    "dns_resolver": "SOURCES__SCCM__DNS_RESOLVER",
 }
 
 _TYPED_DLT_ENV = {
@@ -137,6 +139,8 @@ _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--create-machine-account",
     "--registration-sleep",
     "--socks-proxy",
+    "--dns",
+    "--dns-resolver",
 }
 _SENSITIVE_OPTIONS: set[str] = {
     "-p",
@@ -406,7 +410,7 @@ def _apply_connection_context(flag_kwargs: dict) -> None:
         ).strip().rstrip(".").lower()
         if domain:
             logger.verbose("No domain controller (--dc) provided, trying to find one via DNS")
-            dc = _resolve_dc_via_dns(domain)
+            dc = _resolve_dc_via_dns(domain, dns_resolver=flag_kwargs.get("dns_resolver"))
             if dc:
                 os.environ["SOURCES__SCCM__DOMAIN_CONTROLLER"] = dc
                 logger.info("Resolved domain controller via DNS SRV: %s", dc)
@@ -646,6 +650,7 @@ def collect_sccm(
     registration_sleep: int = typer.Option(10, "--registration-sleep", help="Seconds to wait post-registration before policy request. Not yet implemented."),
     # ---- Network ----
     socks_proxy: Optional[str] = typer.Option(None, "--socks-proxy", help="SOCKS5 proxy HOST:PORT for DHCP/TFTP collection."),
+    dns_resolver: Optional[str] = typer.Option(None, "--dns", "--dns-resolver", help="DNS nameserver IP for all lookups (DC discovery, SRV probes). Omit to use system default."),
     # ---- General ----
     verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
     debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),

@@ -38,3 +38,27 @@ def test_resolve_dc_via_dns_uses_module_resolver_when_not_provided():
             mock_resolve.assert_called_once()
             mock_cls.assert_not_called()
             assert result == "dc1.corp.local"
+
+
+# ---------------------------------------------------------------------------
+# _apply_env_overrides — dns_resolver → SOURCES__SCCM__DNS_RESOLVER
+# ---------------------------------------------------------------------------
+
+def test_apply_env_overrides_sets_dns_resolver(monkeypatch):
+    """dns_resolver flag value propagates to the expected env var."""
+    import os
+    from openhound_sccm.main import _apply_env_overrides
+
+    monkeypatch.delenv("SOURCES__SCCM__DNS_RESOLVER", raising=False)
+    _apply_env_overrides({"dns_resolver": "10.0.0.53"})
+    assert os.environ["SOURCES__SCCM__DNS_RESOLVER"] == "10.0.0.53"
+
+
+def test_apply_env_overrides_does_not_set_dns_resolver_when_none(monkeypatch):
+    """When dns_resolver is None, the env var is left untouched."""
+    import os
+    from openhound_sccm.main import _apply_env_overrides
+
+    monkeypatch.delenv("SOURCES__SCCM__DNS_RESOLVER", raising=False)
+    _apply_env_overrides({"dns_resolver": None})
+    assert "SOURCES__SCCM__DNS_RESOLVER" not in os.environ
