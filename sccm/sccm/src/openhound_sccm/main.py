@@ -345,18 +345,28 @@ def _detect_windows_domain() -> Optional[str]:
     return domain.strip().rstrip(".").lower()
 
 
-def _resolve_dc_via_dns(domain: str) -> Optional[str]:
+def _resolve_dc_via_dns(domain: str, dns_resolver: Optional[str] = None) -> Optional[str]:
     """Resolve a domain controller FQDN from the domain via DNS SRV.
 
     Looks up ``_ldap._tcp.dc._msdcs.<domain>`` — the path .NET's
     ``Domain.FindDomainController()`` ultimately takes via DC Locator.
     Cross-platform: works wherever the host has DNS reachability to the AD
     DNS zone, not just Windows.
+
+    When ``dns_resolver`` is provided, a ``Resolver(configure=False)`` is
+    created with that IP as the sole nameserver. When omitted the module-level
+    ``dns.resolver.resolve()`` call is used (system default).
     """
     try:
         import dns.resolver  # type: ignore[import-not-found]
 
-        answers = dns.resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV", lifetime=5)
+        if dns_resolver:
+            resolver = dns.resolver.Resolver(configure=False)
+            resolver.nameservers = [dns_resolver]
+            resolver.lifetime = 5
+            answers = resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV")
+        else:
+            answers = dns.resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV", lifetime=5)
         srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
         if srvs:
             return str(srvs[0].target).rstrip(".")
