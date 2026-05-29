@@ -83,6 +83,8 @@ def source(
     registration_sleep: int | None = dlt.config.value,
     # Network
     socks_proxy: str | None = dlt.config.value,
+    # DNS
+    dns_resolver: str | None = dlt.config.value,
 ):
     # Normalize to handle None values and set defaults
     collection_methods = collection_methods or "All"
@@ -128,6 +130,7 @@ def source(
         ad_resolution_cache=_shared_ad_cache if _shared_ad_cache is not None else {},
         discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
         site_codes=_parse_csv_option(site_codes) or None,
+        dns_resolver=dns_resolver,
     )
 
     return (
