@@ -124,9 +124,9 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     if not ctx.method_enabled("LDAP"):
         return
 
-    if ctx._emitted_site_codes is None:
-        ctx._emitted_site_codes = set()
-    seen_codes = ctx._emitted_site_codes
+    if ctx.site_codes is None:
+        ctx.site_codes = set()
+    seen_codes = ctx.site_codes
     site_count = 0
 
     logger.info("Searching for mSSMSSite objects in System Management container...")
@@ -298,7 +298,7 @@ def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     # very well be wrong in multi-site environments, but it should be in the same hierarchy, 
     # so it's better than nothing for offensive use case and will be replaced if privileged
     # collection is conducted later
-    site_code = sorted(ctx._emitted_site_codes)[0] if ctx._emitted_site_codes else None
+    site_code = sorted(ctx.site_codes)[0] if ctx.site_codes else None
 
     for entry in results:
 

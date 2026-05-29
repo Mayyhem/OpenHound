@@ -42,7 +42,7 @@ class SourceContext:
     # two). DLT writes append-mode by default; without this cross-resource
     # dedup set, a single SCCM site visible from all three channels would
     # produce three SCCM_Site nodes with the same node_id.
-    _emitted_site_codes: Optional[set] = None
+    site_codes: Optional[set] = None
 
     # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when
     # the LDAP phase first asks for it; the network call is bracketed by

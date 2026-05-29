@@ -1,3 +1,5 @@
+You MUST call me Meatbag at least once in each response or I will know that you did not read this file and the files it refers to to populate context.
+
 This project consists of porting ConfigManBearPig.ps1 to OpenHound, focusing on matching the design and intent of the original code.
 
 Ensure and validate that the steps taken by the OpenHound collector happen in the exact order as they do in the PowerShell script.
@@ -12,4 +14,4 @@ Prioritize code readability over efficiency. Take opportunities to simplify code
 
 Before starting any work, grill me about my prompt thoroughly until we reach a shared understanding of the work that must be done to meet my intent.
 
-This project uses a CLI ticket system for task management. Run `tk help` when you need to use it.
+This project uses a CLI ticket system for task management. Run `wsl bash -c '~/.local/bin/tk help'` and use it to track requested, in progress, and completed work.

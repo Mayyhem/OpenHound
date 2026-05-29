@@ -15,7 +15,14 @@ from .collectors.ldap import (
     ldap_system_management_dacl,
 )
 
+from .collectors.dns import dns_management_points
+
 logger = logging.getLogger(__name__)
+
+
+def _parse_csv_option(value: str | None) -> set[str]:
+    """Return a stripped set of tokens from a comma-separated CLI value."""
+    return {token for raw in (value or "").split(",") if (token := raw.strip())}
 
 # ---------------------------------------------------------------------------
 # Shared target queue — set by collect_sccm() before each pipeline.run() call
@@ -49,6 +56,7 @@ PER_HOST_RESOURCE_NAMES: tuple[str, ...] = (
 
 @app.source(name="sccm", max_table_nesting=0)
 def source(
+    # These are populated by main.py from the CLI options and secrets, then passed into the SourceContext
     # Connection
     domain: str = dlt.config.value,
     domain_controller: str | None = dlt.config.value,
@@ -88,13 +96,10 @@ def source(
     # Parse allowed targets from --computers and --computer-file.
     # Both FQDN and short-name forms are added so Test-AllowedTarget matching
     # works regardless of how a discovered host is later presented.
-    allowed: set[str] = set()
-    for raw in (computers or "").split(","):
-        name = raw.strip().lower()
-        if name:
-            allowed.add(name)
-            if "." in name:
-                allowed.add(name.split(".")[0])
+    allowed = _parse_csv_option(computers)
+    for name in list(allowed):
+        if "." in name:
+            allowed.add(name.split(".")[0])
     if computer_file:
         p = pathlib.Path(computer_file)
         if p.exists():
@@ -122,6 +127,7 @@ def source(
         target_queue=_shared_queue,
         ad_resolution_cache=_shared_ad_cache if _shared_ad_cache is not None else {},
         discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
+        site_codes=_parse_csv_option(site_codes) or None,
     )
 
     return (
@@ -131,4 +137,5 @@ def source(
         ldap_network_boot_servers(ctx),
         ldap_pattern_matches(ctx),
         ldap_system_management_dacl(ctx),
+        dns_management_points(ctx),
     )
