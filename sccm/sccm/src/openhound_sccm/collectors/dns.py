@@ -9,8 +9,8 @@ passed into each resource. All decorators register onto the same
 from __future__ import annotations
 
 import logging
-import re
 import socket
+import struct
 from typing import Any, Iterable, Optional
 
 
@@ -74,35 +74,44 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
             logger.info("Querying SRV record: %s", srv_name)
             try:
                 answers = resolver.resolve(srv_name, "SRV")
-            except (
-                dns.resolver.NXDOMAIN,
-                dns.resolver.NoAnswer,
-                dns.exception.Timeout,
-            ) as e:
-                logger.debug("dns_management_points: %s -> %s", srv_name, e.__class__.__name__)
+            except dns.resolver.NXDOMAIN:
+                logger.verbose(f"No SRV record found for {srv_name} (NXDOMAIN)")
                 continue
-            except Exception as e:  # noqa: BLE001
-                logger.debug("dns_management_points: %s failed: %s", srv_name, e)
+            except dns.resolver.NoAnswer:
+                logger.verbose(f"No SRV record found for {srv_name} (NoAnswer)")
+                continue
+            except dns.exception.Timeout:
+                logger.warning(f"DNS query timed out for {srv_name}")
+                continue
+            except Exception as ex:
+                logger.error(f"DNS query failed for {srv_name}: {ex}")
                 continue
 
             for rdata in answers:
-                target_host = _normalize_host(str(rdata.target).rstrip("."))
+                target_host = str(rdata.target).rstrip(".")
                 if not target_host:
+                    logger.warning(f"Found management point with empty hostname for {srv_name}: {rdata}")
                     continue
+                
                 port = getattr(rdata, "port", None)
-                logger.info("Found management point: %s:%s (site: %s)", target_host, port, site_code)
-                yield {
-                    "hostname": target_host,
-                    "site_code": site_code,
-                    "port": port,
-                    "srv_name": srv_name,
-                    "source": f"DNS-SRV-{site_code}",
-                    "domain": ctx.domain,
-                }
+
+                target = ctx.register_target(
+                    identifier=target_host,
+                    source=f"DNS-SRV-{site_code}",
+                    site_code=site_code
+                )
+
+                if target:
+                    logger.info("Found management point: %s:%s (site: %s)", target_host, port, site_code)
+                    yield target.ad_object
+                else:
+                    logger.warning(f"Failed to register target management point {target_host} from SRV record {srv_name}")
+
     else:
         # ADIDNS fallback via LDAP — searches dnsNode objects under MicrosoftDNS.
         # We just discover names; full record parsing is left for a richer
         # phase. Nothing emitted unless real records exist.
+        target = None
         for site_code in sorted(site_codes):
             search_filter = f"(&(objectClass=dnsNode)(name=_mssms_mp_{site_code.lower()}*))"
             base = f"DC={ctx.domain},CN=MicrosoftDNS,DC=DomainDnsZones,{ctx.ad.base_dn}"
@@ -110,22 +119,89 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 for entry in ctx.ad.paged_search(
                     search_filter=search_filter,
                     base=base,
-                    attributes=["name"],
+                    attributes=["*"],
                 ):
-                    name = entry.get("name")
-                    host = _normalize_host(name)
-                    if host:
-                        yield {
-                            "hostname": host,
-                            "site_code": site_code,
-                            "port": None,
-                            "srv_name": None,
-                            "source": f"DNS-ADIDNS-{site_code}",
-                            "domain": ctx.domain,
-                        }
-            except Exception as e:  # noqa: BLE001
-                logger.debug("dns_management_points: ADIDNS for %s failed: %s", site_code, e)
+                    name = _extract_srv_target(entry.get("dnsRecord"))
+                    if name:
+
+                        target = ctx.register_target(
+                            identifier=name,
+                            source=f"DNS-ADIDNS-{site_code}",
+                            site_code=site_code
+                        )
+
+                        if target:
+                            logger.info("Found management point via ADIDNS: %s (site: %s)", name, site_code)
+                            yield target.ad_object
+                        else:
+                            logger.warning(f"Failed to register target for management point {name} from ADIDNS search in site {site_code}")
+
+            except Exception as ex:
+                logger.error("dns_management_points: ADIDNS for %s failed: %s", site_code, ex)
     logger.info("DNS collection completed")
+
+
+def _extract_srv_target(dns_record: Any) -> Optional[str]:
+    """Return the SRV target hostname from a raw dnsRecord attribute value.
+
+    Accepts bytes, bytearray, or a list of those (ldap3 may return multiple
+    values when a node has more than one record).  Returns the target of the
+    first SRV record found, or None.
+    """
+    if dns_record is None:
+        return None
+    records = dns_record if isinstance(dns_record, list) else [dns_record]
+    for record in records:
+        if isinstance(record, str):
+            record = record.encode("latin-1")
+        if not isinstance(record, (bytes, bytearray)):
+            continue
+        hostname = _parse_dns_rpc_record_srv(record)
+        if hostname:
+            return hostname
+    return None
+
+
+# MS-DNSP 2.2.2.2.5 DNS_RPC_RECORD header layout (little-endian unless noted):
+#   DataLength(2) Type(2) Version(1) Rank(1) Flags(2)
+#   Serial(4) TtlSeconds(4, big-endian) Reserved(4, big-endian) TimeStamp(4)
+_DNS_RPC_RECORD_HEADER = struct.Struct("<HH")  # DataLength, Type
+_DNS_RPC_RECORD_HEADER_SIZE = 24
+_DNS_TYPE_SRV = 33  # 0x0021
+
+
+def _parse_dns_rpc_record_srv(data: bytes) -> Optional[str]:
+    """Parse a DNS_RPC_RECORD blob and return the SRV target FQDN, or None."""
+    if len(data) < _DNS_RPC_RECORD_HEADER_SIZE + 8:
+        return None
+    _, record_type = _DNS_RPC_RECORD_HEADER.unpack_from(data, 0)
+    if record_type != _DNS_TYPE_SRV:
+        return None
+    # SRV rdata: Priority(2 LE) + Weight(2 LE) + Port(2 LE) + DNS_COUNT_NAME
+    offset = _DNS_RPC_RECORD_HEADER_SIZE + 6
+    # DNS_COUNT_NAME: cchNameLength(1) + labelCount(1) + wire-format labels
+    if offset + 2 > len(data):
+        return None
+    name_length = data[offset]
+    label_count = data[offset + 1]
+    name_data = data[offset + 2: offset + 2 + name_length]
+    if len(name_data) < name_length:
+        return None
+    labels: list[str] = []
+    pos = 0
+    for _ in range(label_count):
+        if pos >= len(name_data):
+            break
+        llen = name_data[pos]
+        pos += 1
+        if llen == 0 or pos + llen > len(name_data):
+            break
+        try:
+            labels.append(name_data[pos: pos + llen].decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        pos += llen
+    return ".".join(labels) if labels else None
 
 
 def _resolve_v4(host: str) -> Optional[str]:

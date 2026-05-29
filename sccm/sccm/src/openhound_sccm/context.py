@@ -21,9 +21,9 @@ logger = logging.getLogger(__name__)
 class SourceContext:
     ad: ADClient
     domain: str
-    username: Optional[str] = None
-    password: Optional[str] = None
-    dns_resolver: Optional[str] = None
+    username: str | None = None
+    password: str | None = None
+    dns_resolver: str | None = None
     # Collection (-m / --collection-methods)
     collection_methods: str = "All"
 
@@ -31,7 +31,7 @@ class SourceContext:
     # _shared_* pattern in source.py (same as target_queue).
     allowed_targets: frozenset = field(default_factory=frozenset)
     target_queue: Any = field(default=None)
-    ad_resolution_cache: dict = field(default_factory=dict)
+    ad_resolution_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     discovered_domains: set = field(default_factory=set)
 
     # Site codes (UPPERCASE) emitted into the ``ldap_sites`` DLT table by
@@ -43,7 +43,7 @@ class SourceContext:
     # two). DLT writes append-mode by default; without this cross-resource
     # dedup set, a single SCCM site visible from all three channels would
     # produce three SCCM_Site nodes with the same node_id.
-    site_codes: Optional[set] = None
+    site_codes: Optional[set[str]] = None
 
     # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when
     # the LDAP phase first asks for it; the network call is bracketed by
@@ -109,7 +109,7 @@ class SourceContext:
         future lookups.
         """
         seen: set = set()
-        domains: list = []
+        domains: list[str] = []
 
         def _add(d: str) -> None:
             d = d.upper()
@@ -125,7 +125,7 @@ class SourceContext:
             _add(d)
         return domains
 
-    def resolve_principal(self, identifier: str) -> Optional[dict]:
+    def resolve_principal(self, identifier: str) -> dict[str, Any] | None:
         """Resolve an identifier to an AD object dict, with multi-domain support.
 
         Mirrors PS1's Resolve-PrincipalInDomain (ConfigManBearPig.ps1:459-905):
@@ -232,11 +232,11 @@ class SourceContext:
 
     def register_target(
         self,
-        identifier: Optional[str],
-        source: Optional[str] = None,
+        identifier: Optional[str], # dNSHostName, name, SID, DOMAIN\name, or DN
+        source: Optional[str],
         site_code: Optional[str] = None,
-        ad_object: Optional[dict] = None,
-    ) -> Optional[TargetEntry]:
+        ad_object: dict[str, Any] | None = None,
+    ) -> set[TargetEntry] | None:
         """Register a device as a probe target, mirroring PS1's Add-DeviceToTargets.
 
         Returns the TargetEntry (new or updated) so callers can inspect is_new,
@@ -253,6 +253,11 @@ class SourceContext:
             except Exception:
                 logger.warning("AD resolution failed for %r", identifier)
 
+        if ad_object:
+            identifier = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
+        else:
+            logger.warning("Could not resolve %r to a domain object; using raw identifier", identifier)
+
         # Step 2: Allowed-targets filter
         if not self._is_allowed_target(identifier, ad_object):
             logger.warning("Skipping %r — not in allowed targets filter", identifier)
@@ -264,7 +269,9 @@ class SourceContext:
             canonical = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
         else:
             canonical = identifier
-            logger.warning("Could not resolve %r to a domain object; adding target by name", identifier)
+            logger.warning(
+                "Could not resolve %r to a domain object; adding target by name", identifier
+            )
         canonical_lower = canonical.lower()
 
         with self._ensure_target_lock():

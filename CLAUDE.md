@@ -15,5 +15,3 @@ Prioritize code readability over efficiency. Take opportunities to simplify code
 Before starting any work, grill me about my prompt thoroughly until we reach a shared understanding of the work that must be done to meet my intent.
 
 This project uses a CLI ticket system for task management. Run `wsl bash -c '~/.local/bin/tk help'` and use it to track requested, in progress, and completed work.
-
-This probject uses STRICT type checking.

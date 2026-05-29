@@ -869,7 +869,7 @@ class ADClient:
 
     # Attributes whose values are always opaque binary blobs and must not be
     # UTF-8-decoded (doing so corrupts them via errors="replace" substitution).
-    _BINARY_ATTRS = frozenset({"ntsecuritydescriptor"})
+    _BINARY_ATTRS = frozenset({"ntsecuritydescriptor", "dnsrecord"})
 
     @staticmethod
     def _entry_to_dict(entry) -> dict[str, Any]:

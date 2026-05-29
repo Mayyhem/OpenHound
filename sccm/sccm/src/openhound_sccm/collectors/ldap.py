@@ -231,6 +231,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({mp_sid})" if mp_sid else ""
                     logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
                     mp_count += 1
+                else:
+                    logger.warning(f"Failed to register target for management point {mp_hostname} from mSSMSManagementPoint entry")
 
             # Parse capabilities to determine site relationships and extract
             # FSP hostnames from the capabilities XML
@@ -249,6 +251,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
                     logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
                     fsp_count += 1
+                else:
+                    logger.warning(f"Failed to register target for fallback status point {fsp_hostname} from mSSMSManagementPoint entry")
 
             yield {
                 "mp_hostname": mp_hostname,
@@ -386,42 +390,16 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             if not computer_dn:
                 continue
 
-            computer = ctx.resolve_principal(computer_dn)
-            if not computer:
-                continue
+            target = ctx.register_target(
+                identifier=computer_dn,
+                source=f"LDAP-{obj_class}",
+            )
 
-            dns_host_name = computer.get("dNSHostName")
-            if not dns_host_name:
-                logger.warning(f"Network boot server entry {dn} has no dNSHostName for its computer object")
-                logger.debug(f"Parent object: {computer}")
-
-            sid = computer.get("object_sid")
-            if not sid:
-                logger.warning(f"Network boot server entry {dn} has no SID for its computer object")
-                logger.debug(f"Parent object: {computer}")
-
-            if dns_host_name and sid:
-                target = ctx.register_target(
-                    identifier=sid,
-                    site_code=None,
-                    source=f"LDAP-{obj_class}",
-                    ad_object=computer,
-                )
-
-                if target :
-                    logger.info(f"Found network boot server: {dns_host_name} ({sid})")
-                
-                    yield {
-                        "object_sid": sid,
-                        "dns_host_name": dns_host_name,
-                        "name": computer.get("name"),
-                        "sam_account_name": computer.get("sAMAccountName"),
-                        "domain": ctx.domain,
-                    }
-
+            if target:
+                logger.info(f"Found network boot server: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                yield target.ad_object
             else:
-                logger.warning(f"Missing required properties (SID or hostname) for network boot server entry {dn}")
-                logger.debug(f"Computer object: {computer}")
+                logger.warning(f"Failed to register target for network boot server {computer_dn} from {obj_class} entry")
 
         except Exception as ex:
             logger.error(f"Failed to process network boot server {dn}: {ex}")
@@ -479,36 +457,18 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     for computer in results:
 
         try:
-            dns_host_name = computer.get("dNSHostName")
-            if not dns_host_name:
-                logger.warning(f"Computer {computer.get('name')} has no dNSHostName")
-                logger.debug(f"Computer object: {computer}")
+            # Add to collection targets for subsequent collection phases
+            target = ctx.register_target(
+                identifier=computer.get("object_sid"),
+                source=f"LDAP-NamePattern",
+                ad_object=computer,
+            )
 
-            sid = computer.get("object_sid")
-
-            if dns_host_name and sid:
-
-                # Add to collection targets for subsequent collection phases
-                target = ctx.register_target(
-                    identifier=sid,
-                    source=f"LDAP-NamePattern",
-                    ad_object=computer,
-                )
-
-                if target:
-                    logger.info(f"Found system with SCCM naming pattern: {dns_host_name} ({sid})")
-                    
-                    yield {
-                        "object_sid": sid,
-                        "dns_host_name": dns_host_name,
-                        "name": computer.get("name"),
-                        "sam_account_name": computer.get("sAMAccountName"),
-                        "domain": ctx.domain,
-                    }
-
+            if target:
+                logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                yield target.ad_object
             else:
-                logger.warning(f"Missing required properties (SID or hostname): {computer.get('name')}")
-                logger.debug(f"Computer object: {computer}")
+                logger.warning(f"Failed to register target for computer with SCCM naming pattern {computer.get('name')} ({computer.get('object_sid')})")
 
         except Exception as ex:
             logger.error(f"Failed to process search result {computer.get('name')}: {ex}")
@@ -590,15 +550,15 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 obj_type = "computer"
 
                 # Add as collection target
-                dns_hostname = ad_obj.get("dNSHostName", sam.rstrip("$"))
-                if dns_hostname:
-                    ctx.register_target(
-                        identifier=dns_hostname,
-                        source="LDAP-GenericAllSystemManagement",
-                        ad_object=ad_obj,
-                    )
-                else:
-                    logger.warning(f"Computer object with GenericAll on System Management container has no dNSHostName: {sam}")
+                target = ctx.register_target(
+                    identifier=ad_obj.get("dNSHostName"),
+                    source="LDAP-GenericAllSystemManagement",
+                    ad_object=ad_obj,
+                )
+
+                if not target:
+                    logger.warning(f"Failed to register target for {ad_obj.get('dNSHostName')} with GenericAll on System Management container")
+
             elif "user" in [c.lower() for c in obj_class]:
                 obj_type = "user"
             elif "group" in [c.lower() for c in obj_class]:
