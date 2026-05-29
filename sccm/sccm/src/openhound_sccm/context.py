@@ -23,6 +23,7 @@ class SourceContext:
     domain: str
     username: Optional[str] = None
     password: Optional[str] = None
+    dns_resolver: Optional[str] = None
     # Collection (-m / --collection-methods)
     collection_methods: str = "All"
 
