@@ -141,4 +141,6 @@ def source(
         ldap_pattern_matches(ctx),
         ldap_system_management_dacl(ctx),
         dns_management_points(ctx),
+        local_wmi_sms_authority(ctx),
+        local_wmi_sms_lookupmp(ctx)
     )

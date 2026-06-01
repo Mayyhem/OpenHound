@@ -34,15 +34,8 @@ class SourceContext:
     ad_resolution_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     discovered_domains: set = field(default_factory=set)
 
-    # Site codes (UPPERCASE) emitted into the ``ldap_sites`` DLT table by
-    # any of the three resources that write to it: ``ldap_sites`` (Phase 1,
-    # LDAP-only mSSMSSite + mSSMSManagementPoint), ``ldap_sites_admin_extra``
-    # (Phase 7, AdminService-only SMS_Site / SMS_SCI_SiteDefinition rows
-    # missing from LDAP) and ``ldap_sites_smb_extra`` (Phase 10, SMB-share
-    # discovered site codes on hosts not surfaced by either of the prior
-    # two). DLT writes append-mode by default; without this cross-resource
-    # dedup set, a single SCCM site visible from all three channels would
-    # produce three SCCM_Site nodes with the same node_id.
+    # Site codes emitted into the sited DLT table during the preproc stage
+    # collected from LDAP, local WMI
     site_codes: Optional[set[str]] = None
 
     # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when

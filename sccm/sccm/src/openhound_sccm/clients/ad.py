@@ -378,7 +378,7 @@ class ADClient:
                 continue
             except Exception as ex:
                 if attempt.auth_mode == "kerberos":
-                    last_exc = exc
+                    last_exc = ex
                     logger.debug(
                         "LDAP bind via %s failed (%s); trying next profile",
                         attempt.label,
