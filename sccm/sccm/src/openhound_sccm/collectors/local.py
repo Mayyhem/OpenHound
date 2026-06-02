@@ -21,6 +21,9 @@ from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
+global current_mp_ad_obj
+global site_code
+global this_computer_ad_obj
 
 @functools.lru_cache(maxsize=1)
 def _wmi_ccm():
@@ -57,27 +60,27 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     try:
         for item in svc.ExecQuery("SELECT * FROM SMS_Authority"):
-            mp = getattr(item, "CurrentManagementPoint", None)
+            current_mp = getattr(item, "CurrentManagementPoint", None)
             # Extract site code from Name property (format: "SMS:PS1")
-            global site_code
             site_code = getattr(item, "Name", "").split(":")[-1] if ":" in getattr(item, "Name", "") else None
 
             if site_code and site_code not in ctx.site_codes:
                 logger.info(f"Found new site code '{site_code}' in local WMI repository")
                 ctx.site_codes.add(site_code)
 
-            if mp:
+            if current_mp:
                 target = ctx.register_target(
-                    identifier=mp,
+                    identifier=current_mp,
                     source="Local-SMS_Authority",
                     site_code=site_code | None
                 )
 
                 if target:
                     logger.info(f"Found current management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                    current_mp_ad_obj = target.ad_object
                     yield target.ad_object
                 else:
-                    logger.warning(f"Failed to register target for current management point {mp} from SMS_Authority")
+                    logger.warning(f"Failed to register target for current management point {current_mp} from SMS_Authority")
 
     except Exception as ex:
         logger.error("Error querying SMS_Authority: %s", ex)
@@ -130,40 +133,59 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     if svc is None:
         return
 
-    logger.info("Qeurying SMS_LookupMP for additional management points...")
+    logger.info("Querying CCM_Client for client information...")
 
     try:
-        for item in svc.ExecQuery("SELECT * FROM SMS_LookupMP"):
-            mp = getattr(item, "Name", None)
+        for item in svc.ExecQuery("SELECT * FROM CCM_Client"):
+            client_id = getattr(item, "ClientId", None)
+            client_id_change_date = getattr(item, "ClientIdChangeDate", None)
+            previous_client_id = getattr(item, "PreviousClientId", None)
 
-            if mp:
-                target = ctx.register_target(
-                    identifier=mp,
-                    source="Local-SMS_LookupMP",
-                    site_code=site_code
-                )
+            # Get COMPUTERNAME and USERDNSDOMAIN to resolve in AD
+            computer_name = os.environ.get("COMPUTERNAME", None)
+            user_dns_domain = os.environ.get("USERDNSDOMAIN", None)
+            name_to_resolve = f"{computer_name}.{user_dns_domain}" if user_dns_domain else computer_name
 
-                if target:
-                    logger.info(f"Found management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-                    yield target.ad_object
-                else:
-                    logger.warning(f"Failed to register target for management point {mp} from SMS_LookupMP")
+            if name_to_resolve:
+                try:
+                    this_computer_ad_obj = ctx.resolve_principal(name_to_resolve)
+                except Exception as ex:
+                    logger.error("Error resolving principal for %s: %s", name_to_resolve, ex)
 
+            if client_id:
+                log_suffix = ""
+                if previous_client_id and previous_client_id != client_id:
+                    log_suffix = f" (previous ID: {previous_client_id}"
+                    if client_id_change_date:
+                        log_suffix += f", changed on {client_id_change_date}"
+                    log_suffix += ")"
+                logger.info(f"Found client ID (SMSID) for {name_to_resolve}: {client_id} {log_suffix}")
+
+                yield {
+                    "ad_domain_sid": this_computer_ad_obj.get("object_sid") if this_computer_ad_obj else None,
+                    "current_management_point": current_mp_ad_obj.get("dNSHostName") if current_mp_ad_obj else None,
+                    "current_management_point_sid": current_mp_ad_obj.get("object_sid") if current_mp_ad_obj else None,
+                    "distinguished_name": this_computer_ad_obj.get("distinguishedName") if this_computer_ad_obj else None,
+                    "dns_host_name": this_computer_ad_obj.get("dNSHostName") if this_computer_ad_obj else None,
+                    "name": this_computer_ad_obj.get("sAMAccountName") if this_computer_ad_obj else None,
+                    "previous_smsid_change_date": client_id_change_date,
+                    "previous_smsid": previous_client_id,
+                    "site_code": site_code,
+                    "smsid": client_id,
+                    "source": "Local-CCM_Client",
+                }
     except Exception as ex:
-        logger.error("Error querying SMS_LookupMP: %s", ex)
+        logger.error("Error querying CCM_Client: %s", ex)
 
 
-@app.resource(name="local_distribution_points", parallelized=False, columns=raw_table_asset("local_distribution_points"))
+@app.resource(name="local_client_logs_targets", parallelized=False, columns=raw_table_asset("local_client_logs_targets"))
 @with_log_context(phase="Local", target_from_ctx_domain=True)
-def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
-    """Yield rows for distribution points discovered via local SCCM client log scrape.
+def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
+    """Yield rows for management points and distribution points discovered via 
+    local SCCM client log scrape.
 
     SCCM client logs (``CCM\\Logs\\*.log``, ``CCMSetup\\Logs\\*.log``) frequently
-    reference DP UNC and HTTP endpoints. Phase 1 already feeds Computer nodes from
-    LDAP for any DP that's an AD computer; this resource just contributes provenance
-    rows so ``sccm.targets`` records the discovery as ``Local-DP``.
-
-    CMBP reference: ``lib/collectors/local_collector.py::_parse_sccm_logs``.
+    reference MP and DP UNC and HTTP endpoints.
     """
     if not ctx.method_enabled("Local"):
         return
@@ -175,13 +197,11 @@ def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
         os.path.join(system_root, "CCM", "Logs"),
         os.path.join(system_root, "CCMSetup", "Logs"),
     ]
-    smscfg = os.path.join(system_root, "SMSCFG.ini")
 
-    url_pattern = re.compile(r"https?://([a-zA-Z0-9\-\.]+(?:\.\w+)+)", re.IGNORECASE)
-    unc_pattern = re.compile(r"\\\\([a-zA-Z0-9\-\.]+(?:\.\w+)+)\\", re.IGNORECASE)
+    unc_pattern = re.compile(r"\\\\([a-zA-Z0-9\-_\s]{2,15}(?:\.[a-zA-Z0-9\-_\s]{1,64}){0,3})(\\[^\\\/:\*\?`\"<>\|;]{1,64})+(\\)?", re.IGNORECASE)
+    url_pattern = re.compile(r"(?<Protocol>\w+):\/\/(?<Domain>[\w@][\w.:@]+)\/?[\w\.?=%&=\-@/$,]*", re.IGNORECASE)
 
     discovered: set[str] = set()
-    domain_lower = ctx.domain.lower() if ctx.domain else ""
 
     def _parse(path: str) -> None:
         try:
@@ -191,7 +211,8 @@ def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                         discovered.add(m.group(1).lower())
                     for m in unc_pattern.finditer(line):
                         discovered.add(m.group(1).lower())
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as ex:
+            logger.warning(f"Failed to read log file {path} due to permissions or I/O error: {ex}")
             pass
 
     for log_dir in log_dirs:
@@ -200,18 +221,37 @@ def local_distribution_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 for filename in os.listdir(log_dir):
                     if filename.endswith(".log"):
                         _parse(os.path.join(log_dir, filename))
-            except PermissionError:
+            except (Exception) as ex:
+                logger.warning(f"Failed to process log directory {log_dir}: {ex}")
                 continue
-    if os.path.isfile(smscfg):
-        _parse(smscfg)
 
     for host in sorted(discovered):
-        # Only emit hosts that look like they belong to our domain — others are
-        # internet endpoints and noise.
-        if domain_lower and not host.endswith(f".{domain_lower}"):
+        # Skip localhost references and current machine
+        if host in ("localhost", "127.0.0.1", this_computer_ad_obj.get("dNSHostName").lower() if this_computer_ad_obj else None, this_computer_ad_obj.get("sAMAccountName").lower() if this_computer_ad_obj else None):
+            logger.debug(f"Skipping localhost reference found in client logs: {host}")
             continue
-        yield {
-            "hostname": host,
-            "source": "Local-LogParsing",
-            "domain": ctx.domain,
-        }
+
+        resolved_ip = ctx.resolve_ip(host)
+
+        if resolved_ip:
+            # Check RFC1918 ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            if (resolved_ip.startswith("10.") or
+                (resolved_ip.startswith("172.") and 16 <= int(resolved_ip.split(".")[1]) <= 31) or
+                resolved_ip.startswith("192.168.")):
+                logger.info(f"Host resolved to non-RFC1918 IP address: {host} ({resolved_ip})")
+
+                target = ctx.register_target(
+                    identifier=host,
+                    source="Local-ClientLogs",
+                    site_code=site_code
+                )
+
+                if target:
+                    logger.info(f"Found host in client logs: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                    yield target.ad_object
+                else:
+                    logger.warning(f"Failed to register target for host {host} found in client logs")
+            else:
+                logger.debug(f"Host found in client logs resolved to RFC1918 IP address, skipping: {host} ({resolved_ip})")
+        else:
+            logger.debug(f"Failed to resolve hostname {host} found in client logs, skipping")

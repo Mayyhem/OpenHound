@@ -118,6 +118,24 @@ class SourceContext:
             _add(d)
         return domains
 
+    def resolve_ip(self, ip: str) -> Optional[str]:
+        """Resolve a host name to an IP address using the configured DNS resolver."""
+        import socket
+        try:
+            if self.dns_resolver:
+                # Use a custom DNS resolver if specified
+                import dns.resolver
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [self.dns_resolver]
+                answer = resolver.resolve(ip)
+                return answer[0].to_text()
+            else:
+                # Use the system's default DNS resolver
+                return socket.gethostbyname(ip)
+        except Exception as ex:
+            logger.warning(f"DNS resolution failed for {ip}: {ex}")
+            return None
+        
     def resolve_principal(self, identifier: str) -> dict[str, Any] | None:
         """Resolve an identifier to an AD object dict, with multi-domain support.
 

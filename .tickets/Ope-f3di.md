@@ -1,14 +1,15 @@
 ---
 id: Ope-f3di
-status: open
+status: closed
 deps: []
-links: []
+links: [ope-1f0f]
 created: 2026-05-29T00:00:00Z
 type: chore
 priority: 3
 assignee: Mayyhem
 tags: [sccm, logging, observability]
 ---
+
 # Logging Audit: Ensure All Conditional Branches Have Appropriate Log Messages
 
 Systematically audit every `if` statement in the collector files for branches that silently skip, return, or continue without a log entry. Each non-trivial conditional path that exits or falls through should emit at least a `debug` or `warning` message so operators can tell at runtime *why* data was skipped — not just that the happy-path count was low.
@@ -50,3 +51,9 @@ Walk every `if` block in each file below. For each one, check whether the `else`
 - No new `info`-level log spam in tight per-entry loops; use `debug` or `verbose` there.
 - `logger.debug(f"...")` f-strings are used for per-entry context, `logger.warning("...", arg)` percent-style for operator-visible messages (matches existing style).
 - Running with `--log-level DEBUG` allows an operator to trace exactly which entries were skipped and why.
+
+## Notes
+
+**2026-06-02T15:05:34Z**
+
+Superseded by Ope-1f0f (all-encompassing code-quality pass). Logging-branch audit folded into that ticket.

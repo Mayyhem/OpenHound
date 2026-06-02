@@ -17,6 +17,11 @@ from .collectors.ldap import (
 
 from .collectors.dns import dns_management_points
 
+from .collectors.local import (
+    local_wmi_sms_authority, 
+    local_wmi_sms_lookupmp
+)
+
 logger = logging.getLogger(__name__)
 
 

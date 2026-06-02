@@ -1,14 +1,15 @@
 ---
 id: Ope-scp1
-status: open
+status: closed
 deps: []
-links: []
+links: [ope-1f0f]
 created: 2026-05-29T20:24:31Z
 type: task
 priority: 2
 assignee: Mayyhem
 tags: [sccm, audit, python, scope]
 ---
+
 # Audit Variables Leaking Across Python Scopes
 
 Audit the SCCM collector code for variables that are assigned inside branches, loops, or `try` blocks and then read later where Python's function-level scoping could preserve a stale value from a previous iteration or code path. This is especially important in collection logic that builds graph records from many entries, where one entry's value can silently bleed into the next.
@@ -30,3 +31,9 @@ Prefer restructuring code so the variable's lifetime is obvious. When restructur
 - Any variable read after branch-local assignment is guaranteed to be initialized on every path.
 - Per-record temporary values are initialized inside the per-record loop.
 - Tests or focused review notes cover at least one representative collector path where stale values could affect emitted graph data.
+
+## Notes
+
+**2026-06-02T15:05:34Z**
+
+Superseded by Ope-1f0f (all-encompassing code-quality pass). Variable-scope audit folded into that ticket.
