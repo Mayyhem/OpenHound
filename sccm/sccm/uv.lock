@@ -941,6 +941,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "openhound-collector-utils"
+version = "0.0.1"
+source = { editable = "../../collector-utils" }
+
+[[package]]
 name = "orjson"
 version = "3.11.8"
 source = { registry = "https://pypi.org/simple" }
@@ -1559,6 +1564,7 @@ dependencies = [
     { name = "dnspython" },
     { name = "impacket" },
     { name = "ldap3" },
+    { name = "openhound-collector-utils" },
     { name = "pycryptodome" },
     { name = "requests" },
     { name = "requests-ntlm" },
@@ -1581,6 +1587,7 @@ requires-dist = [
     { name = "dnspython", specifier = ">=2.4.0" },
     { name = "impacket", specifier = ">=0.11.0" },
     { name = "ldap3", specifier = ">=2.10.2rc4" },
+    { name = "openhound-collector-utils", editable = "../../collector-utils" },
     { name = "pycryptodome", specifier = ">=3.19.0" },
     { name = "requests", specifier = ">=2.28.0" },
     { name = "requests-ntlm", specifier = ">=1.2.0" },

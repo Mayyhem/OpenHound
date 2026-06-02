@@ -114,6 +114,9 @@ class SourceContext:
     # contributing the same host don't lose attribution.
     _target_hosts: dict[str, dict[str, Any]] = field(default_factory=dict)
     _target_hosts_lock: Any = field(default=None)
+    # Injected by collect_sccm() via source.set_shared_queue() before each
+    # pipeline run. None outside the queue loop (unit tests, manual calls).
+    target_queue: Any = field(default=None)
     # Site codes (UPPERCASE) emitted into the ``ldap_sites`` DLT table by
     # any of the three resources that write to it: ``ldap_sites`` (Phase 1,
     # LDAP-only mSSMSSite + mSSMSManagementPoint), ``ldap_sites_admin_extra``
@@ -313,6 +316,10 @@ class SourceContext:
                     "sources": [],
                 }
                 self._target_hosts[key] = existing
+                # New host: enqueue in the phase queue so the collect_sccm()
+                # outer loop schedules a subsequent pass against it.
+                if self.target_queue is not None:
+                    self.target_queue.enqueue(key)
             # Don't overwrite an already-known identifier with None.
             if sid and not existing.get("sid"):
                 existing["sid"] = sid

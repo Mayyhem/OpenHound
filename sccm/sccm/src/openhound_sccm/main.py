@@ -458,14 +458,49 @@ def collect_sccm(
     _apply_connection_context(flag_kwargs)
     _require_domain_or_explain(flag_kwargs)
 
+    from openhound_collector_utils import TargetQueue
+    from .source import PHASE3_RESOURCE_NAMES, set_shared_queue
+    from .source import source as sccm_source
+
+    queue = TargetQueue(list(PHASE3_RESOURCE_NAMES))
+    set_shared_queue(queue)
+
     collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
     ctx = CollectContext(pipeline=collector)
-    from .source import source as sccm_source
 
     src = sccm_source()
     if not src:
+        set_shared_queue(None)
         return None
+
+    # Pass 0 — full initial run (replace disposition, all resources).
     load_info = collector.run(src)
+
+    # Queue loop — run subsequent passes for any targets discovered mid-run
+    # (e.g. hosts found via HTTP MPKEYINFORMATION that weren't in LDAP).
+    pass_num = 1
+    while queue.has_pending():
+        new_hosts = sorted(queue.pending_hosts())
+        logger.info(
+            "Queue pass %d: %d new host(s) with pending phases — %s",
+            pass_num, len(new_hosts), ", ".join(new_hosts),
+        )
+        os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
+        try:
+            sub_src = sccm_source()
+            if sub_src:
+                sub_src = sub_src.with_resources(*PHASE3_RESOURCE_NAMES)
+                collector.pipeline.run(
+                    sub_src,
+                    write_disposition="append",
+                    loader_file_format="jsonl",
+                )
+        finally:
+            os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
+        pass_num += 1
+
+    set_shared_queue(None)
+
     # Clear the [target][phase] log context so the summary block reads as a
     # global section rather than inheriting whatever phase ran last.
     from .log_context import phase_context, target_context

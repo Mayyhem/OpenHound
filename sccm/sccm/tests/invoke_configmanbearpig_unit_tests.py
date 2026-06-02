@@ -1211,9 +1211,10 @@ def run_collector(
     if collector_name == "openhound":
         if not (OPENHOUND_SCCM / "src" / "main.py").exists():
             raise RuntimeError(f"OpenHound SCCM project not found: {OPENHOUND_SCCM}")
-        if not args.username or args.password is None:
-            raise ValueError("--username and --password are required for OpenHound SCCM collection")
-        role = args.username.split("\\")[-1].split("@")[0]
+        if args.username:
+            role = args.username.split("\\")[-1].split("@")[0]
+        else:
+            role = os.environ.get("USERNAME", "current")
         raw = output_dir / role / "raw"
         raw_dataset = raw / "sccm"
         graph = output_dir / role / "graph"

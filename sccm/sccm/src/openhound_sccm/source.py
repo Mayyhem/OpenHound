@@ -69,7 +69,57 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Shared target queue — set by collect_sccm() before each pipeline.run() call
+# so that the SourceContext created inside source() carries the same queue
+# instance across multiple passes.
+# ---------------------------------------------------------------------------
+_shared_queue = None
 
+
+def set_shared_queue(queue) -> None:
+    """Plant (or clear) the shared TargetQueue for the next source() call."""
+    global _shared_queue
+    _shared_queue = queue
+
+
+# Names of every per-host Phase 3 resource. collect_sccm() passes this to
+# source().with_resources() for subsequent queue-loop passes so that Phase 1,
+# Phase 2, and Phase 4 resources are not re-run against newly discovered hosts.
+PHASE3_RESOURCE_NAMES: tuple[str, ...] = (
+    "registry_sccm_components",
+    "registry_sccm_databases",
+    "registry_current_users",
+    "registry_mssql_settings",
+    "mssql_epa_flags",
+    "adminservice_admins",
+    "adminservice_collections",
+    "adminservice_collection_members",
+    "adminservice_security_roles",
+    "adminservice_role_members",
+    "adminservice_client_devices",
+    "adminservice_task_sequences",
+    "adminservice_collection_variables",
+    "adminservice_site_systems",
+    "adminservice_sites",
+    "adminservice_site_definitions",
+    "adminservice_r_system_security_groups",
+    "adminservice_r_user_security_groups",
+    "adminservice_reserved_accounts",
+    "ldap_sites_admin_extra",
+    "wmi_clients",
+    "wmi_users_seen",
+    "wmi_sql_service_accounts",
+    "http_management_points",
+    "http_smsproviders",
+    "http_distribution_points",
+    "http_naa_secrets",
+    "http_collection_secrets",
+    "smb_site_servers",
+    "smb_distribution_points",
+    "smb_signing_status",
+    "ldap_sites_smb_extra",
+)
 
 
 
@@ -244,6 +294,7 @@ def source(
         port=ldap_port,
     )
     ctx = SourceContext(
+        target_queue=_shared_queue,
         ad=ADClient(creds),
         domain=domain,
         username=username,
