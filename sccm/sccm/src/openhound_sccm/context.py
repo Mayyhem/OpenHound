@@ -245,7 +245,7 @@ class SourceContext:
         self,
         identifier: Optional[str], # dNSHostName, name, SID, DOMAIN\name, or DN
         source: Optional[str],
-        site_code: Optional[str] = None,
+        site_code: Optional[str] | None = None,
         ad_object: dict[str, Any] | None = None,
     ) -> set[TargetEntry] | None:
         """Register a device as a probe target, mirroring PS1's Add-DeviceToTargets.
@@ -323,7 +323,7 @@ class SourceContext:
                 hostname=canonical,
                 ad_object=ad_object,
                 sources=[source] if source else [],
-                site_code=site_code,
+                site_code=site_code if site_code else None,
                 is_new=True,
             )
             self._target_hosts_by_hostname[canonical_lower] = entry

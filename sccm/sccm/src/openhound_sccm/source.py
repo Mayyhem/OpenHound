@@ -19,7 +19,9 @@ from .collectors.dns import dns_management_points
 
 from .collectors.local import (
     local_wmi_sms_authority, 
-    local_wmi_sms_lookupmp
+    local_wmi_sms_lookupmp,
+    local_wmi_ccm_client,
+    local_client_logs_targets,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,5 +149,7 @@ def source(
         ldap_system_management_dacl(ctx),
         dns_management_points(ctx),
         local_wmi_sms_authority(ctx),
-        local_wmi_sms_lookupmp(ctx)
+        local_wmi_sms_lookupmp(ctx),
+        local_wmi_ccm_client(ctx),
+        local_client_logs_targets(ctx)
     )

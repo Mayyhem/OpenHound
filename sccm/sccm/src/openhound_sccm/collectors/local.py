@@ -21,9 +21,6 @@ from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
-global current_mp_ad_obj
-global site_code
-global this_computer_ad_obj
 
 @functools.lru_cache(maxsize=1)
 def _wmi_ccm():
@@ -55,6 +52,8 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     if svc is None:
         return
 
+    global current_mp_ad_obj, site_code
+
     logger.info("Starting local collection...")
     logger.info("Querying SMS_Authority for current management point and site code...")
 
@@ -72,13 +71,18 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 target = ctx.register_target(
                     identifier=current_mp,
                     source="Local-SMS_Authority",
-                    site_code=site_code | None
+                    site_code=site_code if site_code else None
                 )
 
                 if target:
                     logger.info(f"Found current management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                     current_mp_ad_obj = target.ad_object
-                    yield target.ad_object
+
+                    if target.is_new:
+                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                        yield target.ad_object
+                    else:
+                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
                 else:
                     logger.warning(f"Failed to register target for current management point {current_mp} from SMS_Authority")
 
@@ -108,12 +112,17 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 target = ctx.register_target(
                     identifier=mp,
                     source="Local-SMS_LookupMP",
-                    site_code=site_code
+                    site_code=site_code if site_code else None
                 )
 
                 if target:
                     logger.info(f"Found management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-                    yield target.ad_object
+
+                    if target.is_new:
+                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                        yield target.ad_object
+                    else:
+                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
                 else:
                     logger.warning(f"Failed to register target for management point {mp} from SMS_LookupMP")
 
@@ -133,6 +142,8 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     if svc is None:
         return
 
+    global this_computer_ad_obj
+
     logger.info("Querying CCM_Client for client information...")
 
     try:
@@ -148,6 +159,7 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
             if name_to_resolve:
                 try:
+                    # Just resolve, don't add local host to targets
                     this_computer_ad_obj = ctx.resolve_principal(name_to_resolve)
                 except Exception as ex:
                     logger.error("Error resolving principal for %s: %s", name_to_resolve, ex)
@@ -170,7 +182,7 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                     "name": this_computer_ad_obj.get("sAMAccountName") if this_computer_ad_obj else None,
                     "previous_smsid_change_date": client_id_change_date,
                     "previous_smsid": previous_client_id,
-                    "site_code": site_code,
+                    "site_code": site_code if site_code else None,
                     "smsid": client_id,
                     "source": "Local-CCM_Client",
                 }
@@ -195,37 +207,43 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     system_root = os.environ.get("SystemRoot", "C:\\Windows")
     log_dirs = [
         os.path.join(system_root, "CCM", "Logs"),
-        os.path.join(system_root, "CCMSetup", "Logs"),
+        os.path.join(system_root, "ccmsetup", "Logs"),
     ]
 
     unc_pattern = re.compile(r"\\\\([a-zA-Z0-9\-_\s]{2,15}(?:\.[a-zA-Z0-9\-_\s]{1,64}){0,3})(\\[^\\\/:\*\?`\"<>\|;]{1,64})+(\\)?", re.IGNORECASE)
-    url_pattern = re.compile(r"(?<Protocol>\w+):\/\/(?<Domain>[\w@][\w.:@]+)\/?[\w\.?=%&=\-@/$,]*", re.IGNORECASE)
+    url_pattern = re.compile(r"\w+://(?:[\w@][\w.:@]+@)?([\w][\w.-]*)", re.IGNORECASE)
 
-    discovered: set[str] = set()
+    # Maps discovered hostname (lowercase) to its source type for targeted log messages.
+    discovered: dict[str, str] = {}
 
     def _parse(path: str) -> None:
+        file_name = os.path.basename(path)
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 for line in f:
-                    for m in url_pattern.finditer(line):
-                        discovered.add(m.group(1).lower())
                     for m in unc_pattern.finditer(line):
-                        discovered.add(m.group(1).lower())
-        except (PermissionError, OSError) as ex:
-            logger.warning(f"Failed to read log file {path} due to permissions or I/O error: {ex}")
-            pass
+                        unc_path = m.group(0).strip()
+                        logger.verbose(f"Found UNC path in {file_name}: {unc_path}")
+                        discovered.setdefault(m.group(1).lower(), "UNC path")
+                    for m in url_pattern.finditer(line):
+                        full_url = m.group(0).strip()
+                        logger.verbose(f"Found URL in {file_name}: {full_url}")
+                        discovered.setdefault(m.group(1).lower(), "URL")
+        except Exception as ex:
+            logger.error(f"Failed to search log file {path}: {ex}")
 
     for log_dir in log_dirs:
         if os.path.isdir(log_dir):
             try:
                 for filename in os.listdir(log_dir):
                     if filename.endswith(".log"):
+                        logger.verbose(f"Processing log file: {os.path.join(log_dir, filename)}")
                         _parse(os.path.join(log_dir, filename))
             except (Exception) as ex:
-                logger.warning(f"Failed to process log directory {log_dir}: {ex}")
+                logger.error(f"Failed to process log directory {log_dir}: {ex}")
                 continue
 
-    for host in sorted(discovered):
+    for host in sorted(discovered.keys()):
         # Skip localhost references and current machine
         if host in ("localhost", "127.0.0.1", this_computer_ad_obj.get("dNSHostName").lower() if this_computer_ad_obj else None, this_computer_ad_obj.get("sAMAccountName").lower() if this_computer_ad_obj else None):
             logger.debug(f"Skipping localhost reference found in client logs: {host}")
@@ -238,7 +256,7 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
             if (resolved_ip.startswith("10.") or
                 (resolved_ip.startswith("172.") and 16 <= int(resolved_ip.split(".")[1]) <= 31) or
                 resolved_ip.startswith("192.168.")):
-                logger.info(f"Host resolved to non-RFC1918 IP address: {host} ({resolved_ip})")
+                logger.info(f"Host resolved to RFC1918 IP address: {host} ({resolved_ip})")
 
                 target = ctx.register_target(
                     identifier=host,
@@ -248,10 +266,15 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
                 if target:
                     logger.info(f"Found host in client logs: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-                    yield target.ad_object
+
+                    if target.is_new:
+                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                        yield target.ad_object
+                    else:
+                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
                 else:
                     logger.warning(f"Failed to register target for host {host} found in client logs")
             else:
-                logger.debug(f"Host found in client logs resolved to RFC1918 IP address, skipping: {host} ({resolved_ip})")
+                logger.debug(f"Host found in client logs resolved to non-RFC1918 IP address, skipping: {host} ({resolved_ip})")
         else:
-            logger.debug(f"Failed to resolve hostname {host} found in client logs, skipping")
+            logger.verbose(f"Failed to resolve hostname {host} from {discovered[host]}")

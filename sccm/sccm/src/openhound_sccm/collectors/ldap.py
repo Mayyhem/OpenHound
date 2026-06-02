@@ -231,6 +231,11 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({mp_sid})" if mp_sid else ""
                     logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
                     mp_count += 1
+
+                    if mp_target.is_new:
+                        logger.info(f"Registered new target: {mp_target.ad_object.get('dNSHostName')}")
+                    else:
+                        logger.verbose(f"Already registered target: {mp_target.ad_object.get('dNSHostName')}")
                 else:
                     logger.warning(f"Failed to register target for management point {mp_hostname} from mSSMSManagementPoint entry")
 
@@ -251,6 +256,12 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
                     logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
                     fsp_count += 1
+
+                    if fsp_target.is_new:
+                        logger.info(f"Registered new target: {fsp_target.ad_object.get('dNSHostName')}")
+                    else:
+                        logger.verbose(f"Already registered target: {fsp_target.ad_object.get('dNSHostName')}")
+
                 else:
                     logger.warning(f"Failed to register target for fallback status point {fsp_hostname} from mSSMSManagementPoint entry")
 
@@ -397,7 +408,12 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
             if target:
                 logger.info(f"Found network boot server: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-                yield target.ad_object
+
+                if target.is_new:
+                    logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                    yield target.ad_object
+                else:
+                    logger.verbose(f"Already registered target: {target.ad_object.get('dNSHostName')}")
             else:
                 logger.warning(f"Failed to register target for network boot server {computer_dn} from {obj_class} entry")
 
@@ -466,7 +482,12 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
             if target:
                 logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-                yield target.ad_object
+
+                if target.is_new:
+                    logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                    yield target.ad_object
+                else:
+                    logger.verbose(f"Already registered target: {target.ad_object.get('dNSHostName')}")
             else:
                 logger.warning(f"Failed to register target for computer with SCCM naming pattern {computer.get('name')} ({computer.get('object_sid')})")
 
@@ -558,6 +579,11 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
                 if not target:
                     logger.warning(f"Failed to register target for {ad_obj.get('dNSHostName')} with GenericAll on System Management container")
+                else:
+                    if target.is_new:
+                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
+                    else:
+                        logger.verbose(f"Already registered target: {target.ad_object.get('dNSHostName')}")
 
             elif "user" in [c.lower() for c in obj_class]:
                 obj_type = "user"
