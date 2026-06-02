@@ -187,11 +187,11 @@ def _build_computer_fsp_roles(con: duckdb.DuckDBPyConnection, schema: str) -> No
         con,
         f"""CREATE OR REPLACE TABLE {schema}.computer_fsp_roles AS
             SELECT
-                UNNEST(fsp_hostnames) AS hostname,
+                fsp_hostname AS hostname,
                 'SMS Fallback Status Point@' || site_code AS role,
                 site_code
             FROM {schema}.ldap_management_points_raw
-            WHERE fsp_hostnames IS NOT NULL AND LEN(fsp_hostnames) > 0""",
+            WHERE fsp_hostname IS NOT NULL""",
         "computer_fsp_roles",
     )
 

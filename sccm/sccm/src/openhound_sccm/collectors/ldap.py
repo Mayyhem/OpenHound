@@ -25,7 +25,7 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
     """Parse mSSMSCapabilities XML into structured fields.
 
     Returns a dict with keys: site_type, parent_site_code,
-    command_line_site_code, root_site_code, fsp_hostnames.
+    command_line_site_code, root_site_code, fsp_hostname.
     Returns safe defaults on parse failure or empty input.
     """
     # Default assumption — overwritten below if XML parses successfully
@@ -34,7 +34,7 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
         "parent_site_code": "Undetermined",
         "command_line_site_code": None,
         "root_site_code": None,
-        "fsp_hostnames": [],
+        "fsp_hostname": None,
     }
     if not capabilities_str:
         return result
@@ -62,17 +62,26 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
         if rs is not None and rs.text:
             result["root_site_code"] = rs.text.strip().upper()
 
-        # Extract fallback status point hostnames
-        # Each FSPServer node names a host serving as an FSP for this site
+        # Extract the fallback status point hostname
+        # An FSPServer node names a host serving as an FSP for this site. At
+        # most one FSP is expected per MP; warn and keep the first if several.
         fsp_elem = root.find("FSP")
         if fsp_elem is None:
             fsp_elem = root.find(".//FSP")
         if fsp_elem is not None:
-            result["fsp_hostnames"] = [
+            fsp_hostnames = [
                 s.text.strip()
                 for s in fsp_elem.findall("FSPServer")
                 if s.text and s.text.strip()
             ]
+            if len(fsp_hostnames) > 1:
+                logger.warning(
+                    "Multiple FSPServer entries for site %s; using the first (%s)",
+                    mp_site_code,
+                    fsp_hostnames[0],
+                )
+            if fsp_hostnames:
+                result["fsp_hostname"] = fsp_hostnames[0]
 
         # Determine site type from the relationship between this MP's site code,
         # the CommandLine site code, and the root site code
@@ -183,7 +192,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     """Management points, FSP hosts, and site classification from mSSMSManagementPoint.
 
     One row per mSSMSManagementPoint entry. Registers both the MP hostname and
-    any FSP hostnames parsed from mSSMSCapabilities as collection targets.
+    the FSP hostname parsed from mSSMSCapabilities as collection targets.
     Preproc transforms derive site_types, computer_mp_roles, computer_fsp_roles,
     and computer_site_system_roles from this table.
     """
@@ -243,9 +252,10 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             # FSP hostnames from the capabilities XML
             parsed = _parse_mp_capabilities(entry.get("mSSMSCapabilities") or "", mp_site_code)
 
-            # Register each fallback status point as a collection target;
-            # FSP hostnames come from FSPServer nodes inside the capabilities XML
-            for fsp_hostname in parsed["fsp_hostnames"]:
+            # Register the fallback status point as a collection target;
+            # the FSP hostname comes from the FSPServer node inside the capabilities XML
+            fsp_hostname = parsed["fsp_hostname"]
+            if fsp_hostname:
                 fsp_target = ctx.register_target(
                     fsp_hostname,
                     site_code=mp_code_upper,
@@ -272,7 +282,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "parent_site_code": parsed["parent_site_code"],
                 "command_line_site_code": parsed["command_line_site_code"],
                 "root_site_code": parsed["root_site_code"],
-                "fsp_hostnames": parsed["fsp_hostnames"],
+                "fsp_hostname": parsed["fsp_hostname"],
             }
         except Exception as ex:
             logger.error("Failed to process mSSMSManagementPoint entry %s: %s", entry.get("mSSMSMPName"), ex)

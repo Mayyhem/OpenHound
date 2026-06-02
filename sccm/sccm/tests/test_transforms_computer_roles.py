@@ -23,14 +23,14 @@ def con_with_raw(con):
             parent_site_code VARCHAR,
             command_line_site_code VARCHAR,
             root_site_code VARCHAR,
-            fsp_hostnames VARCHAR[]
+            fsp_hostname VARCHAR
         )
     """)
     con.execute(f"""
         INSERT INTO {SCHEMA}.ldap_management_points_raw VALUES
-        ('mp.contoso.com', 'PS1', 'Primary Site', 'CAS', 'PS1', 'CAS', ['fsp1.contoso.com', 'fsp2.contoso.com']),
-        ('cas-mp.contoso.com', 'CAS', 'Central Administration Site', 'None', 'PS1', 'CAS', []),
-        (NULL, 'SEC', 'Secondary Site', 'PS1', NULL, 'PS1', [])
+        ('mp.contoso.com', 'PS1', 'Primary Site', 'CAS', 'PS1', 'CAS', 'fsp1.contoso.com'),
+        ('cas-mp.contoso.com', 'CAS', 'Central Administration Site', 'None', 'PS1', 'CAS', NULL),
+        (NULL, 'SEC', 'Secondary Site', 'PS1', NULL, 'PS1', NULL)
     """)
     return con
 
@@ -62,14 +62,13 @@ def test_computer_mp_roles_excludes_null_hostname(con_with_raw):
     assert rows == []
 
 
-def test_computer_fsp_roles_unnested(con_with_raw):
+def test_computer_fsp_roles_built(con_with_raw):
     transforms(con_with_raw)
     rows = con_with_raw.execute(
         f"SELECT hostname, role FROM {SCHEMA}.computer_fsp_roles ORDER BY hostname"
     ).fetchall()
     assert ("fsp1.contoso.com", "SMS Fallback Status Point@PS1") in rows
-    assert ("fsp2.contoso.com", "SMS Fallback Status Point@PS1") in rows
-    assert len(rows) == 2  # CAS row had empty fsp_hostnames
+    assert len(rows) == 1  # CAS and SEC rows had no fsp_hostname
 
 
 def test_computer_site_system_roles_union(con_with_raw):
@@ -80,7 +79,6 @@ def test_computer_site_system_roles_union(con_with_raw):
     hostnames = [r[0] for r in rows]
     assert "mp.contoso.com" in hostnames
     assert "fsp1.contoso.com" in hostnames
-    assert "fsp2.contoso.com" in hostnames
     assert "cas-mp.contoso.com" in hostnames
 
 

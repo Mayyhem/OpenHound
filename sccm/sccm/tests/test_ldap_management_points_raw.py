@@ -54,25 +54,26 @@ def test_primary_standalone_no_root():
     assert result["parent_site_code"] == "None"
 
 
-def test_fsp_hostnames_extracted():
+def test_fsp_hostname_extracted_takes_first():
+    # FSP_XML has two FSPServer nodes; only-if-one semantics keeps the first
     result = _parse_mp_capabilities(FSP_XML, "PS1")
-    assert result["fsp_hostnames"] == ["fsp1.contoso.com", "fsp2.contoso.com"]
+    assert result["fsp_hostname"] == "fsp1.contoso.com"
 
 
-def test_empty_fsp_list_when_no_fsp_element():
+def test_no_fsp_hostname_when_no_fsp_element():
     result = _parse_mp_capabilities(PRIMARY_XML, "PS1")
-    assert result["fsp_hostnames"] == []
+    assert result["fsp_hostname"] is None
 
 
 def test_malformed_xml_returns_safe_defaults():
     result = _parse_mp_capabilities("<<not xml>>", "PS1")
     assert result["site_type"] == "Secondary Site"
     assert result["parent_site_code"] == "Undetermined"
-    assert result["fsp_hostnames"] == []
+    assert result["fsp_hostname"] is None
 
 
 def test_empty_string_returns_safe_defaults():
     result = _parse_mp_capabilities("", "PS1")
     assert result["site_type"] == "Secondary Site"
     assert result["parent_site_code"] == "Undetermined"
-    assert result["fsp_hostnames"] == []
+    assert result["fsp_hostname"] is None

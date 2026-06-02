@@ -61,6 +61,32 @@ PER_HOST_RESOURCE_NAMES: tuple[str, ...] = (
     "registry_sccm_components",
 )
 
+@app.transformer(
+    name="per_host_collector_pipeline",
+    parallelized=True,
+    table_name="per_host_collector_pipeline",
+)
+def per_host_collector_pipeline(target: dict, ctx: SourceContext):
+    """DLT transformer, initiates per-host collectors for each discovered target and yields rows to trigger their execution.
+
+    Args:
+        target (dict): Discovered target record.
+    Yields:
+        dict: A row containing the target hostname and resource name for each per-host collector to run.
+    """
+
+    hostname = target.get("hostname")
+    if not hostname:
+        logger.warning("Skipping target with missing hostname: %s", target)
+        return
+
+    for resource_name in PER_HOST_RESOURCE_NAMES:
+        yield {
+            "hostname": hostname,
+            "resource_name": resource_name,
+        }
+
+
 @app.source(name="sccm", max_table_nesting=0)
 def source(
     # These are populated by main.py from the CLI options and secrets, then passed into the SourceContext

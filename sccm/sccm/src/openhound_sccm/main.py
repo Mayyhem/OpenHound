@@ -730,6 +730,7 @@ def collect_sccm(
                         sub_src,
                         write_disposition="append",
                         loader_file_format="jsonl",
+                        #destination="duckdb"
                     )
             finally:
                 os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
