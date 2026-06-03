@@ -1,10 +1,15 @@
-import dlt
 import logging
 import pathlib
+import queue as _queue
+
+import dlt
 
 from .clients.ad import ADClient, ADCredentials
 from .context import SourceContext
 from .main import app
+from .models.raw_table import raw_table_asset
+from .per_host_phases import PER_HOST_PHASES, all_table_names
+from .phased_pipeline.streams import DONE
 
 from .collectors.ldap import (
     ldap_management_points_raw,
@@ -18,7 +23,7 @@ from .collectors.ldap import (
 from .collectors.dns import dns_management_points
 
 from .collectors.local import (
-    local_wmi_sms_authority, 
+    local_wmi_sms_authority,
     local_wmi_sms_lookupmp,
     local_wmi_ccm_client,
     local_client_logs_targets,
@@ -31,60 +36,95 @@ def _parse_csv_option(value: str | None) -> set[str]:
     """Return a stripped set of tokens from a comma-separated CLI value."""
     return {token for raw in (value or "").split(",") if (token := raw.strip())}
 
+
 # ---------------------------------------------------------------------------
-# Shared target queue — set by collect_sccm() before each pipeline.run() call
-# so that the SourceContext created inside source() carries the same queue
-# instance across multiple passes.
+# Shared per-run state — planted by collect_sccm() before each pipeline.run()
+# so the SourceContext created inside source() carries the same instances.
 # ---------------------------------------------------------------------------
 _shared_queue = None
 _shared_ad_cache = None
 _shared_discovered_domains = None
 
-def set_shared_queue(queue) -> None:
-    """Plant (or clear) the shared TargetQueue for the next source() call."""
+
+def set_shared_queue(work_queue) -> None:
+    """Plant (or clear) the shared phased_pipeline.WorkQueue for the next source() call."""
     global _shared_queue
-    _shared_queue = queue
+    _shared_queue = work_queue
+
 
 def set_shared_ad_cache(cache) -> None:
     """Plant (or clear) the shared AD resolution cache for the next source() call."""
     global _shared_ad_cache
     _shared_ad_cache = cache
 
+
 def set_shared_discovered_domains(domains) -> None:
     """Plant (or clear) the shared discovered-domains set for the next source() call."""
     global _shared_discovered_domains
     _shared_discovered_domains = domains
 
-# Names of every per-host resource. collect_sccm() passes this to
-# source().with_resources() for subsequent queue-loop passes
-PER_HOST_RESOURCE_NAMES: tuple[str, ...] = (
-    "registry_sccm_components",
-)
 
-@app.transformer(
-    name="per_host_collector_pipeline",
-    parallelized=True,
-    table_name="per_host_collector_pipeline",
-)
-def per_host_collector_pipeline(target: dict, ctx: SourceContext):
-    """DLT transformer, initiates per-host collectors for each discovered target and yields rows to trigger their execution.
+# ---------------------------------------------------------------------------
+# Per-table stream registry. The per-host engine (run by collect_sccm on a
+# background thread) pushes rows onto these bounded queues; the emit resources
+# below drain them. collect_sccm installs the mapping via set_table_queues()
+# just before running the emit pass, mirroring the _shared_* pattern above.
+# ---------------------------------------------------------------------------
+_table_queues: dict[str, _queue.Queue] | None = None
 
-    Args:
-        target (dict): Discovered target record.
-    Yields:
-        dict: A row containing the target hostname and resource name for each per-host collector to run.
+
+def set_table_queues(mapping: dict[str, _queue.Queue]) -> None:
+    """Plant the per-table stream mapping the emit resources will drain."""
+    global _table_queues
+    _table_queues = mapping
+
+
+def get_table_queues() -> dict[str, _queue.Queue] | None:
+    """Return the currently-installed per-table stream mapping (or None)."""
+    return _table_queues
+
+
+def clear_table_queues() -> None:
+    """Forget the per-table stream mapping after the emit pass finishes."""
+    global _table_queues
+    _table_queues = None
+
+
+def _drain_stream(table_name: str):
+    """Yield rows from one per-table stream until the shared DONE marker.
+
+    Used by the emit resources. A blocking get() means an empty stream is a
+    *wait*, not an end — the resource stops only on DONE, which is broadcast to
+    every stream once per-host collection reaches quiescence.
+    """
+    streams = get_table_queues()
+    if streams is None:
+        return
+    stream = streams[table_name]
+    while True:
+        item = stream.get()
+        if item is DONE:
+            return
+        yield item
+
+
+def _make_emit_resource(table_name: str):
+    """Build one DLT resource that streams a single per-host table to disk.
+
+    Each carries ``columns=raw_table_asset(table_name)`` so convert can map the
+    table to a model and the conformance tests are satisfied. A real collector's
+    follow-up may replace the placeholder model with a typed one.
     """
 
-    hostname = target.get("hostname")
-    if not hostname:
-        logger.warning("Skipping target with missing hostname: %s", target)
-        return
+    @app.resource(name=table_name, parallelized=False, columns=raw_table_asset(table_name))
+    def _emit():
+        yield from _drain_stream(table_name)
 
-    for resource_name in PER_HOST_RESOURCE_NAMES:
-        yield {
-            "hostname": hostname,
-            "resource_name": resource_name,
-        }
+    return _emit
+
+
+# One emit resource per per-host table, registered once at import time.
+_EMIT_RESOURCES = tuple(_make_emit_resource(table) for table in all_table_names(PER_HOST_PHASES))
 
 
 @app.source(name="sccm", max_table_nesting=0)
@@ -159,13 +199,17 @@ def source(
         password=password,
         collection_methods=collection_methods or "All",
         allowed_targets=frozenset(allowed),
-        target_queue=_shared_queue,
+        work_queue=_shared_queue,
         ad_resolution_cache=_shared_ad_cache if _shared_ad_cache is not None else {},
         discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
         site_codes=_parse_csv_option(site_codes) or None,
         dns_resolver=dns_resolver,
     )
 
+    # Discovery (once) resources seed the work queue via register_target. The
+    # per-host phases are NOT DLT-scheduled here; they run in collect_sccm's
+    # worker pool and stream their rows through the emit resources below. Both
+    # sets are returned; collect_sccm selects each stage with with_resources().
     return (
         ldap_sites(ctx),
         ldap_management_points_raw(ctx),
@@ -177,5 +221,6 @@ def source(
         local_wmi_sms_authority(ctx),
         local_wmi_sms_lookupmp(ctx),
         local_wmi_ccm_client(ctx),
-        local_client_logs_targets(ctx)
+        local_client_logs_targets(ctx),
+        *(emit() for emit in _EMIT_RESOURCES),
     )

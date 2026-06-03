@@ -27,10 +27,12 @@ class SourceContext:
     # Collection (-m / --collection-methods)
     collection_methods: str = "All"
 
-    # Public, injectable — shared across queue-loop passes via the module-level
-    # _shared_* pattern in source.py (same as target_queue).
+    # Public, injectable — shared across the run via the module-level _shared_*
+    # pattern in source.py. ``work_queue`` is the phased_pipeline.WorkQueue that
+    # the per-host engine drains; register_target submits newly-discovered,
+    # allow-listed targets onto it.
     allowed_targets: frozenset = field(default_factory=frozenset)
-    target_queue: Any = field(default=None)
+    work_queue: Any = field(default=None)
     ad_resolution_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     discovered_domains: set = field(default_factory=set)
 
@@ -54,11 +56,11 @@ class SourceContext:
     # at iteration time so late additions are picked up.
     #
     # Two parallel indexes:
-    #   _target_hosts_by_hostname — always populated; key = lowercased canonical hostname
+    #   target_hosts_by_hostname — always populated; key = lowercased canonical hostname
     #   _target_hosts_by_sid      — only when SID available; key = objectSid string
     # Both dicts hold references to the same entry dicts, so a mutation via
     # either index is immediately visible via the other.
-    _target_hosts_by_hostname: dict = field(default_factory=dict)  # str -> TargetEntry
+    target_hosts_by_hostname: dict = field(default_factory=dict)  # str -> TargetEntry
     _target_hosts_by_sid: dict = field(default_factory=dict)       # str -> TargetEntry
     _target_hosts_lock: Any = field(default=None)
 
@@ -83,7 +85,6 @@ class SourceContext:
             return True
         return method.lower() in wanted
 
-    # ---- Target-host accumulator (PS1 ``Add-DeviceToTargets`` mirror) -----
 
     def _ensure_target_lock(self) -> Any:
         if self._target_hosts_lock is None:
@@ -289,15 +290,15 @@ class SourceContext:
             # Step 4: Find existing entry — SID index first, hostname fallback
             existing: Optional[TargetEntry] = (
                 self._target_hosts_by_sid.get(sid) if sid else None
-            ) or self._target_hosts_by_hostname.get(canonical_lower)
+            ) or self.target_hosts_by_hostname.get(canonical_lower)
 
             if existing is not None:
-                # FQDN upgrade: re-key _target_hosts_by_hostname
+                # FQDN upgrade: re-key target_hosts_by_hostname
                 if "." in canonical_lower and "." not in existing.hostname.lower():
                     logger.verbose("Upgrading hostname %r -> %r", existing.hostname, canonical)
-                    del self._target_hosts_by_hostname[existing.hostname.lower()]
+                    del self.target_hosts_by_hostname[existing.hostname.lower()]
                     existing.hostname = canonical
-                    self._target_hosts_by_hostname[canonical_lower] = existing
+                    self.target_hosts_by_hostname[canonical_lower] = existing
                 # Backfill ad_object + SID index if we now have one
                 if ad_object and existing.ad_object is None:
                     existing.ad_object = ad_object
@@ -325,14 +326,16 @@ class SourceContext:
                 sources=[source] if source else [],
                 site_code=site_code if site_code else None,
                 is_new=True,
+                completed_phases=set(),
             )
-            self._target_hosts_by_hostname[canonical_lower] = entry
+            self.target_hosts_by_hostname[canonical_lower] = entry
             if sid:
                 self._target_hosts_by_sid[sid] = entry
-            if self.target_queue is not None:
-                self.target_queue.enqueue(canonical)
-            logger.verbose("Added collection target: %r from %r", canonical, source)
+            if self.work_queue is not None:
+                self.work_queue.submit(canonical)
+            logger.info("Added collection target: %r from %r", canonical, source)
             return entry
+
 
     def target_hosts_snapshot(self) -> list:
         """Return the current list of probe targets (TargetEntry objects) as a copy.
@@ -342,4 +345,4 @@ class SourceContext:
         ``register_target`` mutations.
         """
         with self._ensure_target_lock():
-            return list(self._target_hosts_by_hostname.values())
+            return list(self.target_hosts_by_hostname.values())
