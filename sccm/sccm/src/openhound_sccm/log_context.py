@@ -82,10 +82,23 @@ _current_resource: contextvars.ContextVar[Optional[str]] = contextvars.ContextVa
 _resource_complete_callbacks: List[Callable[[str], None]] = []
 _resource_complete_callbacks_lock = threading.Lock()
 
+# Callables registered here are invoked with (hostname: str) when a per-host
+# target finishes its full phase sequence in the worker pool. Used by
+# _OrderedLogFileHandler to flush each host's buffered records as a labelled
+# block the moment that host completes — the per-host analogue of the
+# resource-completion callbacks above.
+_host_complete_callbacks: List[Callable[[str], None]] = []
+_host_complete_callbacks_lock = threading.Lock()
+
 
 def get_current_resource() -> Optional[str]:
     """Return the name of the resource generator currently executing, or None."""
     return _current_resource.get(None)
+
+
+def get_current_target() -> Optional[str]:
+    """Return the target (host/domain) currently in log context, or None."""
+    return _current_target.get(None)
 
 
 def register_resource_complete_callback(cb: Callable[[str], None]) -> None:
@@ -101,6 +114,38 @@ def unregister_resource_complete_callback(cb: Callable[[str], None]) -> None:
         try:
             _resource_complete_callbacks.remove(cb)
         except ValueError:
+            pass
+
+
+def register_host_complete_callback(cb: Callable[[str], None]) -> None:
+    """Register *cb* to be called with the hostname when a target finishes all phases."""
+    with _host_complete_callbacks_lock:
+        if cb not in _host_complete_callbacks:
+            _host_complete_callbacks.append(cb)
+
+
+def unregister_host_complete_callback(cb: Callable[[str], None]) -> None:
+    """Remove a previously registered host-completion callback."""
+    with _host_complete_callbacks_lock:
+        try:
+            _host_complete_callbacks.remove(cb)
+        except ValueError:
+            pass
+
+
+def fire_host_complete(hostname: str) -> None:
+    """Notify every registered host-completion callback that *hostname* is done.
+
+    Passed to the per-host engine as ``on_target_complete``; runs in worker
+    threads, so callbacks must be thread-safe. Exceptions are swallowed so a
+    logging hiccup never aborts collection.
+    """
+    with _host_complete_callbacks_lock:
+        callbacks = list(_host_complete_callbacks)
+    for cb in callbacks:
+        try:
+            cb(hostname)
+        except Exception:
             pass
 
 
@@ -521,8 +566,12 @@ __all__ = [
     "LogContextFilter",
     "VERBOSE",
     "cached_with_log",
+    "fire_host_complete",
     "get_current_resource",
+    "get_current_target",
     "install_filter",
+    "register_host_complete_callback",
+    "unregister_host_complete_callback",
     "per_host_iter",
     "per_pair_iter",
     "phase_context",

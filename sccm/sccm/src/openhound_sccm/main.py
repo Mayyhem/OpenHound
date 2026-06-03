@@ -619,14 +619,25 @@ class _OrderedLogFileHandler(logging.Handler):
         self._path = path.resolve()  # absolute so CWD changes don't affect later writes
         self._buffers: dict[str, list] = {}
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()  # serialize block writes across worker threads
         # Import once at construction time so the relative import never runs
         # inside emit() (which fires on every log record).
-        from .log_context import get_current_resource
+        from .log_context import get_current_resource, get_current_target
         self._get_current_resource = get_current_resource
+        self._get_current_target = get_current_target
+
+    def _bucket_key(self) -> str:
+        """Key the current record's block by resource if one is active (discovery
+        / DLT resources), else by per-host target (worker-pool records), else the
+        catch-all root bucket."""
+        resource = self._get_current_resource()
+        if resource:
+            return resource
+        return self._get_current_target() or "__root__"
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            resource = self._get_current_resource() or "__root__"
+            key = self._bucket_key()
             # Freeze the message string now so args (possibly mutable) are no
             # longer needed when we format at flush time.
             rec = copy.copy(record)
@@ -636,7 +647,7 @@ class _OrderedLogFileHandler(logging.Handler):
                 rec.msg = str(record.msg)
             rec.args = None
             with self._lock:
-                self._buffers.setdefault(resource, []).append(rec)
+                self._buffers.setdefault(key, []).append(rec)
         except Exception:
             self.handleError(record)  # writes traceback to sys.stderr
 
@@ -652,6 +663,16 @@ class _OrderedLogFileHandler(logging.Handler):
         if records and self._write_section(resource_name, records):
             with self._lock:
                 self._buffers.pop(resource_name, None)
+
+    def flush_host(self, hostname: str) -> None:
+        """Flush a host's buffered records as one labelled block.
+
+        Registered as a host-completion callback; fires (possibly from several
+        worker threads at once) when a target finishes its full phase sequence.
+        Block writes are serialized by ``_write_section`` so concurrent host
+        flushes never interleave in the file.
+        """
+        self.flush_resource(hostname)
 
     def flush_all(self) -> None:
         """Flush every remaining buffer — called at handler close time."""
@@ -675,8 +696,9 @@ class _OrderedLogFileHandler(logging.Handler):
                     lines.append(
                         "".join(_traceback.format_exception(*rec.exc_info))
                     )
-            with open(self._path, "a", encoding="utf-8") as fh:
-                fh.writelines(lines)
+            with self._write_lock:
+                with open(self._path, "a", encoding="utf-8") as fh:
+                    fh.writelines(lines)
             return True
         except Exception:
             return False
@@ -716,16 +738,19 @@ def _build_phase_scope():
     return _phase_scope
 
 
-def _run_per_host_stage(pipeline, work_queue, ctx, threads, on_target_complete=None) -> None:
+def _run_per_host_stage(pipeline, work_queue, ctx, threads) -> None:
     """Stage 2: drain the work queue with a worker pool while streaming each
     per-host table to disk through its emit resource.
 
     Runs the engine on a background thread (it produces rows onto the bounded
     per-table streams and, at quiescence, closes them with DONE) while the emit
     resources drain those streams on this thread via ``pipeline.run``. Returns
-    only after both halves finish.
+    only after both halves finish. As each target finishes its phase sequence,
+    ``fire_host_complete`` notifies the ordered-log handler to flush that host's
+    block (a no-op when no handler is registered, e.g. in unit tests).
     """
     from . import source as _source
+    from .log_context import fire_host_complete
     from .per_host_phases import PER_HOST_PHASES, all_table_names
     from .phased_pipeline import build_streams, run_pipeline
 
@@ -742,7 +767,7 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, on_target_complete=N
             max_workers=threads,
             should_run=lambda target, phase, c: c.method_enabled(phase.name),
             phase_scope=phase_scope,
-            on_target_complete=on_target_complete,
+            on_target_complete=fire_host_complete,
         )
 
     pool_thread = threading.Thread(target=_pool, name="per-host-pool", daemon=True)
@@ -821,10 +846,16 @@ def collect_sccm(
     _ordered_level = min(_root_level, logging.INFO)  # floor at INFO; lower if -v/-vv/--debug
     _ordered = _OrderedLogFileHandler(_ordered_log_path, level=_ordered_level)
 
-    from .log_context import register_resource_complete_callback, unregister_resource_complete_callback
+    from .log_context import (
+        register_host_complete_callback,
+        register_resource_complete_callback,
+        unregister_host_complete_callback,
+        unregister_resource_complete_callback,
+    )
     logging.root.addHandler(_diag)
     logging.root.addHandler(_ordered)
     register_resource_complete_callback(_ordered.flush_resource)
+    register_host_complete_callback(_ordered.flush_host)
     # Lower the openhound_sccm namespace to DEBUG so companion debug lines emitted
     # inside except blocks reach the file handler. Console handlers (pinned to WARNING
     # by _apply_log_level) are unaffected — the file handler's own emit() guard drops
@@ -899,6 +930,7 @@ def collect_sccm(
     finally:
         _oh_logger.setLevel(_oh_original_level)
         unregister_resource_complete_callback(_ordered.flush_resource)
+        unregister_host_complete_callback(_ordered.flush_host)
         _ordered.close()  # flushes any in-flight buffers before removal
         logging.root.removeHandler(_ordered)
         logging.root.removeHandler(_diag)
