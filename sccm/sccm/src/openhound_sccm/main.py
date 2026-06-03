@@ -738,7 +738,7 @@ def _build_phase_scope():
     return _phase_scope
 
 
-def _run_per_host_stage(pipeline, work_queue, ctx, threads) -> None:
+def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000) -> None:
     """Stage 2: drain the work queue with a worker pool while streaming each
     per-host table to disk through its emit resource.
 
@@ -754,7 +754,8 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads) -> None:
     from .per_host_phases import PER_HOST_PHASES, all_table_names
     from .phased_pipeline import build_streams, run_pipeline
 
-    streams = build_streams(all_table_names(PER_HOST_PHASES), maxsize=1000)
+    table_names = all_table_names(PER_HOST_PHASES)
+    streams = build_streams(table_names, maxsize=maxsize)
     _source.set_table_queues(streams)
     phase_scope = _build_phase_scope()
 
@@ -770,6 +771,18 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads) -> None:
             on_target_complete=fire_host_complete,
         )
 
+    # Each emit resource blocks on its stream (a blocking get) until DONE, so it
+    # holds a dlt extract worker for the whole run. dlt defaults to 5 workers; if
+    # there are more tables than workers, an undrained table would wedge its
+    # bounded stream and deadlock. Give the pool one worker per table (plus a
+    # margin) for the duration of the emit pass, then restore the prior config.
+    env_overrides = {
+        "EXTRACT__WORKERS": str(len(table_names) + 2),
+        "EXTRACT__MAX_PARALLEL_ITEMS": str(max(20, len(table_names) + 2)),
+    }
+    previous = {key: os.environ.get(key) for key in env_overrides}
+    os.environ.update(env_overrides)
+
     pool_thread = threading.Thread(target=_pool, name="per-host-pool", daemon=True)
     pool_thread.start()
     try:
@@ -781,6 +794,11 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads) -> None:
         pool_thread.join()
     finally:
         _source.clear_table_queues()
+        for key, prior in previous.items():
+            if prior is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = prior
 
 
 # ---------------------------------------------------------------------------
