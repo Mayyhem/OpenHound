@@ -13,9 +13,18 @@ Active Directory, or DLT). It understands only four ideas:
 It can therefore be lifted into its own installable package and reused by any
 project that supplies its own phases and consumes the output streams.
 
-The public surface is populated as the engine is built (see ``engine.py``).
 """
 
+from .engine import Phase, run_one_target, run_pipeline
+from .streams import DONE, broadcast_done, build_streams
 from .work_queue import WorkQueue
 
-__all__ = ["WorkQueue"]
+__all__ = [
+    "WorkQueue",
+    "Phase",
+    "run_one_target",
+    "run_pipeline",
+    "DONE",
+    "build_streams",
+    "broadcast_done",
+]
