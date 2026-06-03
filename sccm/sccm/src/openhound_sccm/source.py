@@ -265,5 +265,5 @@ def source(
         local_wmi_sms_lookupmp(ctx),
         local_wmi_ccm_client(ctx),
         local_client_logs_targets(ctx),
-        *(emit() for emit in _EMIT_RESOURCES),
+        *build_emit_resources(),
     )

@@ -28,8 +28,4 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
 
 def all_table_names(phases: Sequence[Phase]) -> list[str]:
     """Every table the phases may write, de-duplicated, in declaration order."""
-    seen: dict[str, None] = {}
-    for phase in phases:
-        for table in phase.streams:
-            seen.setdefault(table, None)
-    return list(seen)
+    return list(dict.fromkeys(table for phase in phases for table in phase.streams))
