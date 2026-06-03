@@ -121,11 +121,15 @@ def run_pipeline(
                 except Exception:
                     logger.exception("on_target_complete failed for %r", target)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        while True:
-            target = work_queue.next()
-            if target is None:   # quiescent: nothing pending, nothing in flight
-                break
-            executor.submit(worker, target)
-    # All workers have finished by here (next() returned None only at in_flight==0).
-    broadcast_done(streams)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while True:
+                target = work_queue.next()
+                if target is None:   # quiescent: nothing pending, nothing in flight
+                    break
+                executor.submit(worker, target)
+        # All workers have finished by here (next() returned None only at in_flight==0).
+    finally:
+        # Always close the streams — even on an unexpected dispatcher error —
+        # so consumers draining them can never hang.
+        broadcast_done(streams)

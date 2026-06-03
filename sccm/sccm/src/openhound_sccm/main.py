@@ -4,10 +4,13 @@ import logging
 import os
 import pathlib
 import platform
+import shutil
 import socket
 import sys
 import threading
+import time
 import traceback as _traceback
+import types
 import typer
 from openhound.cli.collect import collect as _collect_typer  # noqa: E402
 
@@ -325,6 +328,83 @@ def _strip_version_suffix_from_handlers() -> None:
                 handler.setFormatter(replacement)
 
 
+# ---------------------------------------------------------------------------
+# Windows-safe core log rotation
+# ---------------------------------------------------------------------------
+# OpenHound core attaches a TimedRotatingFileHandler (``when="midnight"``) to
+# BOTH the root and ``dlt`` loggers, each pointed at the same ``openhound.log``
+# (see ``openhound/core/logging.py``). The first record after midnight fires a
+# rollover whose ``os.rename(openhound.log -> openhound.log.<date>)`` fails on
+# Windows with ``WinError 32``, because the sibling handler still holds the
+# file open — so core's daily rotation has never worked on Windows. We cannot
+# edit core, so we mutate the live handler instances from our side:
+#
+#   1. Repoint each to a per-run timestamped file so every run owns a distinct
+#      log and a stale rotated file never collides with a fresh rename target.
+#   2. Replace ``doRollover`` with a copy+truncate that never renames, so a run
+#      crossing midnight (or tripping the size cap) rotates without needing
+#      exclusive access to the open file.
+
+
+def _copytruncate_rollover(self: logging.Handler) -> None:
+    """Windows-safe ``doRollover`` for core's ``RotatingFileHandler``.
+
+    Copies the live log to a dated sibling, then truncates it in place rather
+    than renaming it — so the sibling handler's open handle stays valid and
+    Windows never raises ``WinError 32``. Mirrors core's suffix scheme: a date
+    for time-based rollovers, date + time for size-triggered ones.
+    """
+    self.acquire()
+    try:
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        if getattr(self, "_size_triggered", False):
+            stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+        else:
+            stamp = time.strftime("%Y-%m-%d")
+        src = pathlib.Path(self.baseFilename)
+        if src.exists():
+            shutil.copy2(src, src.with_name(f"{src.name}.{stamp}"))
+            open(src, "w").close()  # truncate in place; keeps path + handle valid
+        self.rolloverAt = self.computeRollover(int(time.time()))
+    finally:
+        self.release()
+
+
+def _make_core_rotation_windows_safe() -> None:
+    """Neutralize the Windows-broken daily rotation in core's log handlers.
+
+    See the section comment above. No-op off Windows, where core's
+    rename-based rollover works correctly. Runs once at module import, after
+    core has already attached its handlers, so it covers every CLI subcommand.
+    """
+    if platform.system() != "Windows":
+        return
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    for log in (logging.getLogger(), logging.getLogger("dlt")):
+        for handler in log.handlers:
+            if type(handler).__name__ != "RotatingFileHandler":
+                continue
+            base = pathlib.Path(handler.baseFilename)
+            handler.acquire()
+            try:
+                if handler.stream:
+                    handler.stream.close()
+                handler.baseFilename = str(base.with_name(f"{base.stem}_{ts}{base.suffix}"))
+                handler.rolloverAt = handler.computeRollover(int(time.time()))
+                handler.doRollover = types.MethodType(_copytruncate_rollover, handler)
+                # Open the new file now (core constructs with delay=False). Core's
+                # shouldRollover calls os.path.getsize(baseFilename) on every record,
+                # so the file must exist before the first log line.
+                handler.stream = handler._open()
+            finally:
+                handler.release()
+
+
+_make_core_rotation_windows_safe()
+
+
 def _detect_windows_domain() -> Optional[str]:
     """Derive the AD domain from the current Windows user context.
 
@@ -607,6 +687,78 @@ class _OrderedLogFileHandler(logging.Handler):
 
 
 # ---------------------------------------------------------------------------
+# Per-host stage helpers (Stage 2 of collect_sccm)
+# ---------------------------------------------------------------------------
+
+def _cli_seed_targets(computers: Optional[str], computer_file) -> list[str]:
+    """Hostnames given on the command line, to seed onto the work queue."""
+    hosts: list[str] = []
+    if computers:
+        hosts.extend(token.strip() for token in computers.split(",") if token.strip())
+    if computer_file:
+        p = pathlib.Path(computer_file)
+        if p.exists():
+            hosts.extend(line.strip() for line in p.read_text().splitlines() if line.strip())
+    return hosts
+
+
+def _build_phase_scope():
+    """Return a context manager factory that tags log lines [target][phase]."""
+    import contextlib
+
+    from .log_context import phase_context, target_context
+
+    @contextlib.contextmanager
+    def _phase_scope(target: str, phase_name: str):
+        with target_context(target), phase_context(phase_name):
+            yield
+
+    return _phase_scope
+
+
+def _run_per_host_stage(pipeline, work_queue, ctx, threads, on_target_complete=None) -> None:
+    """Stage 2: drain the work queue with a worker pool while streaming each
+    per-host table to disk through its emit resource.
+
+    Runs the engine on a background thread (it produces rows onto the bounded
+    per-table streams and, at quiescence, closes them with DONE) while the emit
+    resources drain those streams on this thread via ``pipeline.run``. Returns
+    only after both halves finish.
+    """
+    from . import source as _source
+    from .per_host_phases import PER_HOST_PHASES, all_table_names
+    from .phased_pipeline import build_streams, run_pipeline
+
+    streams = build_streams(all_table_names(PER_HOST_PHASES), maxsize=1000)
+    _source.set_table_queues(streams)
+    phase_scope = _build_phase_scope()
+
+    def _pool() -> None:
+        run_pipeline(
+            work_queue,
+            ctx,
+            PER_HOST_PHASES,
+            streams,
+            max_workers=threads,
+            should_run=lambda target, phase, c: c.method_enabled(phase.name),
+            phase_scope=phase_scope,
+            on_target_complete=on_target_complete,
+        )
+
+    pool_thread = threading.Thread(target=_pool, name="per-host-pool", daemon=True)
+    pool_thread.start()
+    try:
+        pipeline.run(
+            _source.build_emit_resources(),
+            write_disposition="append",
+            loader_file_format="jsonl",
+        )
+        pool_thread.join()
+    finally:
+        _source.clear_table_queues()
+
+
+# ---------------------------------------------------------------------------
 # `openhound collect sccm ...` — full CMBP-style flag surface
 # ---------------------------------------------------------------------------
 @_collect_typer.command(
@@ -639,7 +791,7 @@ def collect_sccm(
     # ---- Behavior ----
     disable_possible_edges: bool = typer.Option(False, "--disable-possible-edges", help="Disable uncertain/possible edges."),
     enable_bad_opsec: bool = typer.Option(False, "--enable-bad-opsec", help="Enable bad-opsec operations (NAA decryption, etc.)."),
-    threads: int = typer.Option(1, "-t", "--threads", help="Per-host phase parallelism."),
+    threads: int = typer.Option(10, "-t", "--threads", help="Number of machines collected concurrently (per-host worker pool size; default 10)."),
     show_cleartext_passwords: bool = typer.Option(False, "--show-cleartext-passwords", help="Display cleartext passwords when discovered."),
     # ---- Machine Account / CRED-2 ----
     machine_name: Optional[str] = typer.Option(None, "--machine-name", help="DOMAIN\\\\MACHINE$ for SCCM client registration. CRED-2 chain not yet implemented."),
@@ -688,16 +840,21 @@ def collect_sccm(
         _apply_connection_context(flag_kwargs)
         _require_domain_or_explain(flag_kwargs)
 
-        from openhound_collector_utils import TargetQueue
-        from .source import PER_HOST_RESOURCE_NAMES, set_shared_queue, set_shared_ad_cache, set_shared_discovered_domains
+        from .per_host_phases import PER_HOST_PHASES
+        from .phased_pipeline import WorkQueue
+        from .source import (
+            DISCOVERY_RESOURCE_NAMES,
+            get_last_ctx,
+            set_shared_ad_cache,
+            set_shared_discovered_domains,
+            set_shared_queue,
+        )
         from .source import source as sccm_source
 
-        queue = TargetQueue(list(PER_HOST_RESOURCE_NAMES))
-        ad_cache: dict = {}
-        discovered_domains: set = set()
-        set_shared_queue(queue)
-        set_shared_ad_cache(ad_cache)
-        set_shared_discovered_domains(discovered_domains)
+        work_queue = WorkQueue()
+        set_shared_queue(work_queue)
+        set_shared_ad_cache({})
+        set_shared_discovered_domains(set())
 
         collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
         ctx = CollectContext(pipeline=collector)
@@ -709,32 +866,25 @@ def collect_sccm(
             set_shared_discovered_domains(None)
             return None
 
-        # Pass 0 — full initial run (replace disposition, all resources).
-        load_info = collector.run(src)
+        # Reuse the exact context discovery built, so the per-host stage shares
+        # its target accumulator, allow-list, caches, and work queue.
+        per_host_ctx = get_last_ctx()
 
-        # Queue loop — run subsequent passes for any targets discovered mid-run
-        # (e.g. hosts found via HTTP MPKEYINFORMATION that weren't in LDAP).
-        pass_num = 1
-        while queue.has_pending():
-            new_hosts = sorted(queue.pending_hosts())
-            logger.info(
-                "Queue pass %d: %d new host(s) with pending phases: %s\n",
-                pass_num, len(new_hosts), "\n".join(new_hosts),
-            )
-            os.environ["SOURCES__SCCM__COMPUTERS"] = ",".join(new_hosts)
-            try:
-                sub_src = sccm_source()
-                if sub_src:
-                    sub_src = sub_src.with_resources(*PER_HOST_RESOURCE_NAMES)
-                    collector.pipeline.run(
-                        sub_src,
-                        write_disposition="append",
-                        loader_file_format="jsonl",
-                        #destination="duckdb"
-                    )
-            finally:
-                os.environ.pop("SOURCES__SCCM__COMPUTERS", None)
-            pass_num += 1
+        # Stage 1 — discovery (once-phases): run only the discovery resources.
+        # They seed the work queue via register_target (allow-list applied).
+        load_info = collector.run(src.with_resources(*DISCOVERY_RESOURCE_NAMES))
+
+        # Seed CLI-specified targets through the same register_target path, so
+        # the allow-list / resolution / dedup is identical for them.
+        if per_host_ctx is not None:
+            for host in _cli_seed_targets(computers, computer_file):
+                per_host_ctx.register_target(host, source="CLI")
+
+        # Stage 2 — per-host collection: a worker pool runs each target's phases
+        # in order while emit resources stream the tables to disk, looping
+        # recursively until the work queue drains.
+        if per_host_ctx is not None and PER_HOST_PHASES:
+            _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
 
         set_shared_queue(None)
         set_shared_ad_cache(None)

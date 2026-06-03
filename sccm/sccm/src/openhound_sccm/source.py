@@ -64,6 +64,36 @@ def set_shared_discovered_domains(domains) -> None:
     _shared_discovered_domains = domains
 
 
+# The SourceContext built by the most recent source() call. collect_sccm reads
+# it right after the discovery pass so the per-host engine shares the SAME
+# context — and therefore the same target accumulator, allow-list, caches, and
+# work queue — as discovery.
+_last_ctx = None
+
+
+def get_last_ctx():
+    """Return the SourceContext built by the most recent source() call (or None)."""
+    return _last_ctx
+
+
+# Discovery (once-phase) resource names, selected for the Stage-1 pass. The
+# per-host emit resources (one per table in all_table_names(PER_HOST_PHASES))
+# are everything else returned by source().
+DISCOVERY_RESOURCE_NAMES: tuple[str, ...] = (
+    "ldap_sites",
+    "ldap_management_points_raw",
+    "ldap_cmrc_devices",
+    "ldap_network_boot_servers",
+    "ldap_pattern_matches",
+    "ldap_system_management_dacl",
+    "dns_management_points",
+    "local_wmi_sms_authority",
+    "local_wmi_sms_lookupmp",
+    "local_wmi_ccm_client",
+    "local_client_logs_targets",
+)
+
+
 # ---------------------------------------------------------------------------
 # Per-table stream registry. The per-host engine (run by collect_sccm on a
 # background thread) pushes rows onto these bounded queues; the emit resources
@@ -116,7 +146,11 @@ def _make_emit_resource(table_name: str):
     follow-up may replace the placeholder model with a typed one.
     """
 
-    @app.resource(name=table_name, parallelized=False, columns=raw_table_asset(table_name))
+    # parallelized=True so each emit resource drains its stream in its own
+    # thread. A single-threaded round-robin extractor would block on the first
+    # emit resource whose stream is momentarily empty while another stream
+    # fills to capacity — a deadlock. Independent threads avoid that.
+    @app.resource(name=table_name, parallelized=True, columns=raw_table_asset(table_name))
     def _emit():
         yield from _drain_stream(table_name)
 
@@ -125,6 +159,11 @@ def _make_emit_resource(table_name: str):
 
 # One emit resource per per-host table, registered once at import time.
 _EMIT_RESOURCES = tuple(_make_emit_resource(table) for table in all_table_names(PER_HOST_PHASES))
+
+
+def build_emit_resources():
+    """Return freshly-bound emit resources for the per-host streaming pass."""
+    return [emit() for emit in _EMIT_RESOURCES]
 
 
 @app.source(name="sccm", max_table_nesting=0)
@@ -205,6 +244,10 @@ def source(
         site_codes=_parse_csv_option(site_codes) or None,
         dns_resolver=dns_resolver,
     )
+
+    # Stash so collect_sccm can reuse this exact context for the per-host stage.
+    global _last_ctx
+    _last_ctx = ctx
 
     # Discovery (once) resources seed the work queue via register_target. The
     # per-host phases are NOT DLT-scheduled here; they run in collect_sccm's
