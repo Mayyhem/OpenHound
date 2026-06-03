@@ -103,23 +103,24 @@ def run_pipeline(
     consumers finish.
 
     ``on_target_complete`` (if given) is called once per target after its phases
-    finish; it must not discover new targets (it runs after the target's
-    in-flight slot is released, so a discovery there could race quiescence).
+    finish but *before* its in-flight slot is released, so a callback that
+    submits a new target cannot race quiescence.
     """
 
     def worker(target: str) -> None:
         try:
             run_one_target(target, context, phases, streams, should_run, phase_scope)
         finally:
-            # Mark finished AFTER run_one_target returns, so any targets this
-            # worker discovered were already submitted while it was in flight —
-            # quiescence cannot be declared mid-discovery.
-            work_queue.complete(target)
+            # Notify completion while the target is still counted in flight, then
+            # release the slot. Releasing last means any target submitted by
+            # run_one_target *or* by on_target_complete is already pending before
+            # in_flight can reach zero — quiescence cannot be declared early.
             if on_target_complete is not None:
                 try:
                     on_target_complete(target)
                 except Exception:
                     logger.exception("on_target_complete failed for %r", target)
+            work_queue.complete(target)
 
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:

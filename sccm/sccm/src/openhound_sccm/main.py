@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import pathlib
+import queue as _queue
 import platform
 import shutil
 import socket
@@ -748,6 +749,11 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000)
     only after both halves finish. As each target finishes its phase sequence,
     ``fire_host_complete`` notifies the ordered-log handler to flush that host's
     block (a no-op when no handler is registered, e.g. in unit tests).
+
+    Not reentrant: it installs a process-global stream registry
+    (``set_table_queues``) and temporarily raises the process-wide
+    ``EXTRACT__WORKERS`` env var, so a single collect run per process is assumed
+    (true for the CLI).
     """
     from . import source as _source
     from .log_context import fire_host_complete
@@ -791,8 +797,20 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000)
             write_disposition="append",
             loader_file_format="jsonl",
         )
-        pool_thread.join()
     finally:
+        # Always await the engine thread. If pipeline.run raised, the emit
+        # consumers stopped draining, so a worker may be blocked on a full
+        # stream; drain the streams until the engine finishes so it reaches
+        # quiescence and join() can never hang. No-op on the success path
+        # (streams already drained, engine already finishing).
+        while pool_thread.is_alive():
+            for stream in streams.values():
+                try:
+                    while True:
+                        stream.get_nowait()
+                except _queue.Empty:
+                    pass
+            pool_thread.join(timeout=0.1)
         _source.clear_table_queues()
         for key, prior in previous.items():
             if prior is None:
