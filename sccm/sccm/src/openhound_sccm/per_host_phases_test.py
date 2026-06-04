@@ -10,16 +10,21 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .collectors import registry
+from .collectors import stubs
 from .phased_pipeline import Phase
 
 PER_HOST_PHASES: tuple[Phase, ...] = (
+    Phase("RemoteRegistry", ("registry_sccm_components",), stubs.stub_remote_registry),
+    Phase("MSSQL", ("mssql_instances",), stubs.stub_mssql),
     Phase(
-        "RemoteRegistry",(
-            "sccm_sites",
-        ), registry.collect_registry
+        "AdminService",
+        ("adminservice_admin_users", "adminservice_client_devices"),
+        stubs.stub_adminservice,
     ),
+    Phase("HTTP", ("http_management_points",), stubs.stub_http),
+    Phase("SMB", ("smb_signing",), stubs.stub_smb),
 )
+
 
 def all_table_names(phases: Sequence[Phase]) -> list[str]:
     """Every table the phases may write, de-duplicated, in declaration order."""

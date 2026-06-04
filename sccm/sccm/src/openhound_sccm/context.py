@@ -326,7 +326,6 @@ class SourceContext:
                 sources=[source] if source else [],
                 site_code=site_code if site_code else None,
                 is_new=True,
-                completed_phases=set(),
             )
             self.target_hosts_by_hostname[canonical_lower] = entry
             if sid:

@@ -26,8 +26,10 @@ dependencies = [
     # explicit password is provided and Kerberos cannot build an LDAP SPN
     # (for example --dc is an IP address with no reverse DNS).
     "pywin32>=306; sys_platform == 'win32'",
-    # DNS SRV / ADIDNS lookups for the DNS phase (Phase 2).
+    # DNS SRV / ADIDNS lookups for the DNS phase.
     "dnspython>=2.4.0",
+    # Used by impacket-based per-host phases.
+    "impacket>=0.11.0",
 ]
 
 [tool.uv.sources]
