@@ -2,6 +2,7 @@ import logging
 import socket
 from typing import Iterable, Any, Optional
 
+from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
 from ..log_context import with_log_context
 from ..main import app
@@ -11,7 +12,6 @@ logger = logging.getLogger(__name__)
 # Try to import impacket for remote registry
 try:
     from impacket.dcerpc.v5 import rrp, transport
-    from impacket.smbconnection import SMBConnection
     HAS_IMPACKET = True
 except ImportError:
     HAS_IMPACKET = False
@@ -25,23 +25,6 @@ SCCM_REG_KEYS = {
     "multisite_components": r"SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_SITE_COMPONENT_MANAGER\Multisite Component Servers",
     "current_user": r"SOFTWARE\Microsoft\SMS\CurrentUser",
 }
-
-
-def _split_user_domain(username: Optional[str], default_domain: str) -> tuple[str, str]:
-    """Split a ``DOMAIN\\user`` or ``user@domain`` into ``(domain, user)``.
-
-    Falls back to the first component of the configured AD ``domain`` when no
-    explicit prefix is present.
-    """
-    if not username:
-        return default_domain.split(".")[0], ""
-    if "\\" in username:
-        d, u = username.split("\\", 1)
-        return d, u
-    if "@" in username:
-        u, d = username.split("@", 1)
-        return d, u
-    return default_domain.split(".")[0], username
 
 
 class _RegistryProbe:
@@ -71,23 +54,14 @@ class _RegistryProbe:
 
         try:
             from impacket.dcerpc.v5 import rrp, transport
-            from impacket.smbconnection import SMBConnection
         except ImportError:
             logger.warning("registry: impacket not installed; skipping host %s", self.hostname)
             return None
 
-        d, u = _split_user_domain(self.username, self.domain)
-        try:
-            smb = SMBConnection(self.hostname, self.hostname, timeout=5)
-            if u and self.password:
-                smb.login(u, self.password, d)
-            else:
-                # Current Kerberos session — best-effort
-                smb.login("", "", d)
-            self.smb = smb
-        except Exception as e:  # noqa: BLE001
-            logger.verbose("registry: SMB login to %s failed: %s", self.hostname, e)
+        smb = connect_smb(self.hostname, self.domain, self.username, self.password)
+        if smb is None:
             return None
+        self.smb = smb
 
         try:
             rpc = transport.SMBTransport(smb.getRemoteHost(), filename=r"\winreg", smb_connection=smb)
@@ -258,7 +232,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[dict[str, An
             logger.info("Could not connect to %s for registry queries", target)
         else:
             # HKLM\SOFTWARE\Microsoft\SMS\Triggers
-            site_code = probe.read_values(SCCM_REG_KEYS["triggers"])
+            site_code = probe.enum_keys(SCCM_REG_KEYS["triggers"])[0] if probe.enum_keys(SCCM_REG_KEYS["triggers"]) else None
             if site_code:
                 logger.info("Found SCCM site code: %s", site_code)
                 yield {
@@ -267,5 +241,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[dict[str, An
                         "source": "RemoteRegistry-Triggers"
                     }
                 }
+            else:
+                logger.warning("Key exists, but no site code subkey found under %s", SCCM_REG_KEYS["triggers"])
 
     logger.info("Remote Registry collection completed for %s", target)

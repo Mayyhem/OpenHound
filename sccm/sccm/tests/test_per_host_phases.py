@@ -5,7 +5,7 @@ at deterministic stubs. One stub (HTTP) discovers a new target to exercise
 recursion; one (AdminService) writes to several tables.
 """
 from openhound_sccm.collectors import stubs
-from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names
+from openhound_sccm.per_host_phases_test import PER_HOST_PHASES, all_table_names
 
 
 class FakeCtx:

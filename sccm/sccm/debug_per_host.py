@@ -22,11 +22,30 @@ import logging
 import os
 
 from openhound_sccm.context import SourceContext
+from openhound_sccm.log_context import VERBOSE, install_filter
 from openhound_sccm.main import _detect_windows_domain
 from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names
 from openhound_sccm.phased_pipeline import DONE, WorkQueue, build_streams, run_pipeline
 
-logging.basicConfig(level=logging.INFO, format="%(threadName)-16s %(message)s")
+# Log to the console the way the main collector does: the framework's
+# "time=..., msg=..." shape at the VERBOSE tier (-vv parity), with the
+# [target][phase] prefix filter. The framework handler installed when the
+# package imports only writes to a file, so the harness adds its own console
+# StreamHandler. (Use logging.INFO for less, or logging.DEBUG to include the
+# dlt / ldap3 internals, by changing the level below.)
+_console = logging.StreamHandler()
+_console.setLevel(VERBOSE)
+_console.setFormatter(
+    logging.Formatter(
+        "%(levelname)-7s time=%(asctime)s, msg=%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+_root = logging.getLogger()
+_root.addHandler(_console)
+if _root.level == 0 or _root.level > VERBOSE:
+    _root.setLevel(VERBOSE)
+install_filter()  # attaches the [target][phase] prefix to the console handler
 
 MAX_WORKERS = 1                 # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                  # 1 = watch backpressure
