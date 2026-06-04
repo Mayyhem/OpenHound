@@ -31,4 +31,6 @@ Don't git commit anything. Just write the code and I will commit/push when ready
 
 Write logs of appropriate level (error, warning, info, verbose, debug) for every if/else and try/except block unless there is absolutely no need, in which case leave a comment.
 
+If you encounter bugs as you go, raise the issue and ask what to do.
+
 This project uses a CLI ticket system for task management. Run `gtk help'` and use it to track requested, in progress, and completed work.

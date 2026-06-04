@@ -23,29 +23,35 @@ import os
 
 from openhound_sccm.context import SourceContext
 from openhound_sccm.log_context import VERBOSE, install_filter
-from openhound_sccm.main import _detect_windows_domain
+from openhound_sccm.main import _apply_log_level, _build_phase_scope, _detect_windows_domain
 from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names
 from openhound_sccm.phased_pipeline import DONE, WorkQueue, build_streams, run_pipeline
 
-# Log to the console the way the main collector does: the framework's
-# "time=..., msg=..." shape at the VERBOSE tier (-vv parity), with the
-# [target][phase] prefix filter. The framework handler installed when the
-# package imports only writes to a file, so the harness adds its own console
-# StreamHandler. (Use logging.INFO for less, or logging.DEBUG to include the
-# dlt / ldap3 internals, by changing the level below.)
-_console = logging.StreamHandler()
-_console.setLevel(VERBOSE)
-_console.setFormatter(
-    logging.Formatter(
-        "%(levelname)-7s time=%(asctime)s, msg=%(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-)
+# Log to the console exactly like the main collector: reuse its own setup, which
+# lowers the framework's console handler to the VERBOSE tier (-vv parity), strips
+# the "(openhound_version=...)" suffix its formatter appends, and installs the
+# [target][phase] prefix filter. Reusing the framework handler (rather than adding
+# a second one) is what avoids the duplicate / version-suffixed lines.
+# (Pass debug=True for the DEBUG tier with dlt / ldap3 internals.)
+_apply_log_level(verbose=2, debug=False)
+
+# Fallback: when no console handler is present (e.g. output redirected with no
+# TTY, so the framework attached only a file handler), add one so the harness
+# still prints — in the same "time=..., msg=..." shape.
 _root = logging.getLogger()
-_root.addHandler(_console)
-if _root.level == 0 or _root.level > VERBOSE:
-    _root.setLevel(VERBOSE)
-install_filter()  # attaches the [target][phase] prefix to the console handler
+if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
+    _console = logging.StreamHandler()
+    _console.setLevel(VERBOSE)
+    _console.setFormatter(
+        logging.Formatter(
+            "%(levelname)-7s time=%(asctime)s, msg=%(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    _root.addHandler(_console)
+    if _root.level == 0 or _root.level > VERBOSE:
+        _root.setLevel(VERBOSE)
+    install_filter()
 
 MAX_WORKERS = 1                 # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                  # 1 = watch backpressure
@@ -85,7 +91,13 @@ def main() -> None:
     # each worker runs run_one_target(host) -> phases in order; the HTTP stub calls
     # ctx.register_target(...) -> wq.submit(...) (recursion). At quiescence
     # wq.next() returns None, the loop breaks, and broadcast_done closes the streams.
-    run_pipeline(wq, ctx, PER_HOST_PHASES, streams, max_workers=MAX_WORKERS)
+    # phase_scope tags each phase's log lines with [target][phase], exactly like
+    # the main collector (_run_per_host_stage passes the same _build_phase_scope()).
+    run_pipeline(
+        wq, ctx, PER_HOST_PHASES, streams,
+        max_workers=MAX_WORKERS,
+        phase_scope=_build_phase_scope(),
+    )
 
     # Drain and report. DONE was broadcast on every stream at quiescence.
     print("\n=== results ===")

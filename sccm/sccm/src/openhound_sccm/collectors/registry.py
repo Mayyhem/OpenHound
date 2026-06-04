@@ -55,7 +55,7 @@ class _RegistryProbe:
         try:
             from impacket.dcerpc.v5 import rrp, transport
         except ImportError:
-            logger.warning("registry: impacket not installed; skipping host %s", self.hostname)
+            logger.warning("impacket not installed; skipping host %s", self.hostname)
             return None
 
         smb = connect_smb(self.hostname, self.domain, self.username, self.password)
@@ -74,9 +74,9 @@ class _RegistryProbe:
             self.root_key = resp["phKey"]
             logger.verbose("Remote Registry bind to %s succeeded", self.hostname)
             return self
-        except Exception as e:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001
             # Most common cause: RemoteRegistry service not running, or no perm.
-            logger.verbose("registry: winreg bind on %s failed: %s", self.hostname, e)
+            logger.verbose("winreg bind on %s failed: %s", self.hostname, ex)
             try:
                 smb.logoff()
             except Exception:
@@ -86,19 +86,24 @@ class _RegistryProbe:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         try:
             if self.dce is not None:
+                logger.verbose("Disconnecting Remote Registry on %s", self.hostname)
                 self.dce.disconnect()
-        except Exception:
+        except Exception as ex:
+            logger.error("Failed to disconnect DCE/RPC on %s: %s", self.hostname, ex)
             pass
         try:
             if self.smb is not None:
+                logger.verbose("Logging off SMB on %s", self.hostname)
                 self.smb.logoff()
-        except Exception:
+        except Exception as ex:
+            logger.error("Failed to log off SMB on %s: %s", self.hostname, ex)
             pass
 
     # ----- read helpers ------------------------------------------------------
 
     def read_value(self, key_path: str, value_name: str) -> Optional[str]:
         from impacket.dcerpc.v5 import rrp
+        logger.verbose("Reading value %s under %s", value_name, key_path)
         try:
             sub = rrp.hBaseRegOpenKey(self.dce, self.root_key, key_path)["phkResult"]
             try:
@@ -108,11 +113,13 @@ class _RegistryProbe:
                 return str(value).rstrip("\x00").strip()
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
-        except Exception:
+        except Exception as ex:
+            logger.error("Failed to read registry value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
             return None
 
     def read_dword(self, key_path: str, value_name: str) -> Optional[int]:
         from impacket.dcerpc.v5 import rrp
+        logger.verbose("Reading DWORD value %s under %s on %s", value_name, key_path, self.hostname)
         try:
             sub = rrp.hBaseRegOpenKey(self.dce, self.root_key, key_path)["phkResult"]
             try:
@@ -125,11 +132,13 @@ class _RegistryProbe:
                 return int(value) if value else None
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
-        except Exception:
+        except Exception as ex:
+            logger.error("Failed to read DWORD value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
             return None
 
     def enum_keys(self, key_path: str) -> Optional[list[str]]:
         from impacket.dcerpc.v5 import rrp
+        logger.verbose("Enumerating subkeys under %s", key_path)
         try:
             sub = rrp.hBaseRegOpenKey(self.dce, self.root_key, key_path)["phkResult"]
             try:
@@ -138,17 +147,25 @@ class _RegistryProbe:
                 while True:
                     try:
                         resp = rrp.hBaseRegEnumKey(self.dce, sub, i)
-                        name = resp["lpNameOut"]
-                        if isinstance(name, bytes):
-                            name = name.decode("utf-16-le", errors="replace")
-                        names.append(str(name).rstrip("\x00").strip())
-                        i += 1
                     except Exception:
-                        break
+                        break  # ERROR_NO_MORE_ITEMS: normal end of enumeration
+                    # lpNameOut is an RRP_UNICODE_STRING wrapper; the subkey name is
+                    # its Data field. Calling str() on the wrapper itself raises
+                    # "__str__ returned non-string (type bytes)". Mirrors read_values().
+                    name_field = resp["lpNameOut"]
+                    try:
+                        name = name_field["Data"]
+                    except (KeyError, TypeError):
+                        name = name_field
+                    if isinstance(name, bytes):
+                        name = name.decode("utf-16-le", errors="replace")
+                    names.append(str(name).rstrip("\x00").strip())
+                    i += 1
                 return names
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
-        except Exception:
+        except Exception as ex:
+            logger.error("Failed to enumerate subkeys under %s: %s", key_path, ex)
             return None
 
     def read_values(self, key_path: str) -> Optional[list[tuple[str, str]]]:
@@ -166,6 +183,7 @@ class _RegistryProbe:
         not raw bytes — so we extract that directly.
         """
         from impacket.dcerpc.v5 import rrp
+        logger.verbose("Enumerating values under %s", key_path)
         try:
             sub = rrp.hBaseRegOpenKey(self.dce, self.root_key, key_path)["phkResult"]
             try:
@@ -203,9 +221,6 @@ class _RegistryProbe:
                     out.append((name, data))
                     i += 1
                 return out
-            except Exception as ex:
-                logger.error("Failed to enumerate values under %s: %s", key_path, ex)
-                return None
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
         except Exception as ex:
@@ -214,7 +229,7 @@ class _RegistryProbe:
 
 
 @with_log_context(phase="RemoteRegistry")
-def collect_registry(target: str, ctx: "SourceContext") -> Iterable[dict[str, Any]]:
+def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield one row per (host, role) discovered via remote registry.
 
     For each host with SMB/445 + RemoteRegistry reachable, reads SCCM_REG_KEYS.
@@ -232,16 +247,15 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[dict[str, An
             logger.info("Could not connect to %s for registry queries", target)
         else:
             # HKLM\SOFTWARE\Microsoft\SMS\Triggers
-            site_code = probe.enum_keys(SCCM_REG_KEYS["triggers"])[0] if probe.enum_keys(SCCM_REG_KEYS["triggers"]) else None
+            logger.info("Querying %s for SCCM site code", SCCM_REG_KEYS["triggers"])
+            subkeys = probe.enum_keys(SCCM_REG_KEYS["triggers"])
+            site_code = subkeys[0] if subkeys else None
             if site_code:
                 logger.info("Found SCCM site code: %s", site_code)
-                yield {
-                    "sccm_sites": {
-                        "site_code": site_code,
-                        "source": "RemoteRegistry-Triggers"
-                    }
+                yield "sccm_sites", {
+                    "site_code": site_code,
+                    "source": "RemoteRegistry-Triggers",
                 }
             else:
-                logger.warning("Key exists, but no site code subkey found under %s", SCCM_REG_KEYS["triggers"])
-
+                logger.warning("Triggers key exists, but no site code subkey found under %s", SCCM_REG_KEYS["triggers"])
     logger.info("Remote Registry collection completed for %s", target)
