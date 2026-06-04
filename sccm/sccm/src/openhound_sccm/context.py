@@ -293,6 +293,7 @@ class SourceContext:
             ) or self.target_hosts_by_hostname.get(canonical_lower)
 
             if existing is not None:
+                logger.verbose(f"Already registered target: {existing.ad_object.get('dNSHostName') if existing.ad_object else existing.hostname}")
                 # FQDN upgrade: re-key target_hosts_by_hostname
                 if "." in canonical_lower and "." not in existing.hostname.lower():
                     logger.verbose("Upgrading hostname %r -> %r", existing.hostname, canonical)

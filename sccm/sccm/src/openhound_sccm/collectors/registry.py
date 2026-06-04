@@ -246,16 +246,52 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
         if probe is None:
             logger.info("Could not connect to %s for registry queries", target)
         else:
+
             # HKLM\SOFTWARE\Microsoft\SMS\Triggers
             logger.info("Querying %s for SCCM site code", SCCM_REG_KEYS["triggers"])
             subkeys = probe.enum_keys(SCCM_REG_KEYS["triggers"])
+            if subkeys and len(subkeys) > 1:
+                logger.warning("Multiple site codes found under %s: %s", SCCM_REG_KEYS["triggers"], subkeys)
             site_code = subkeys[0] if subkeys else None
             if site_code:
                 logger.info("Found SCCM site code: %s", site_code)
                 yield "sccm_sites", {
-                    "site_code": site_code,
                     "source": "RemoteRegistry-Triggers",
+                    "site_code": site_code,
                 }
             else:
                 logger.warning("Triggers key exists, but no site code subkey found under %s", SCCM_REG_KEYS["triggers"])
+
+            # HKLM\SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_SITE_COMPONENT_MANAGER\Component Servers
+            logger.info("Querying %s for SCCM component servers", SCCM_REG_KEYS["component_servers"])
+            subkeys = probe.enum_keys(SCCM_REG_KEYS["component_servers"])
+            if subkeys:
+                for i, server in enumerate(subkeys):
+                    logger.info("Found component server #%d: %s", i + 1, server)
+
+                    target = ctx.register_target(
+                        identifier=server,
+                        source="RemoteRegistry-ComponentServers",
+                    )
+
+                    if target:
+                        # Spread every resolved AD attribute (dNSHostName, name,
+                        # sAMAccountName, object_sid, cn, ...) into the row, then
+                        # layer the registry-derived fields on top. AD `name`
+                        # flows through from ad_object; fall back to the raw
+                        # server name only when AD resolution failed (ad_object
+                        # is None or lacks a name).
+                        row = {
+                            **(target.ad_object or {}),
+                            "source": "RemoteRegistry-ComponentServers",
+                            "sccm_infra": True,
+                            "sccm_site_system_roles": "SMS Component Server@" + site_code if site_code else "SMS Component Server",
+                        }
+                        row.setdefault("name", server)
+                        yield "computers", row
+                    else:
+                        logger.warning(f"Failed to register target for component server {server} found under {SCCM_REG_KEYS['component_servers']} on {probe.hostname}")
+            else:
+                logger.warning("No component servers found under %s", SCCM_REG_KEYS["component_servers"])
+
     logger.info("Remote Registry collection completed for %s", target)

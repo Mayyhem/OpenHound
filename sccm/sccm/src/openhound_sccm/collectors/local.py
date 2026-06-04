@@ -77,12 +77,7 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 if target:
                     logger.info(f"Found current management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                     current_mp_ad_obj = target.ad_object
-
-                    if target.is_new:
-                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
-                        yield target.ad_object
-                    else:
-                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
+                    yield current_mp_ad_obj
                 else:
                     logger.warning(f"Failed to register target for current management point {current_mp} from SMS_Authority")
 
@@ -117,12 +112,7 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
                 if target:
                     logger.info(f"Found management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-
-                    if target.is_new:
-                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
-                        yield target.ad_object
-                    else:
-                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
+                    yield target.ad_object
                 else:
                     logger.warning(f"Failed to register target for management point {mp} from SMS_LookupMP")
 
@@ -266,12 +256,7 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
                 if target:
                     logger.info(f"Found host in client logs: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
-
-                    if target.is_new:
-                        logger.info(f"Registered new target: {target.ad_object.get('dNSHostName')}")
-                        yield target.ad_object
-                    else:
-                        logger.verbose(f"Skipping already registered target: {target.ad_object.get('dNSHostName')}")
+                    yield target.ad_object
                 else:
                     logger.warning(f"Failed to register target for host {host} found in client logs")
             else:
