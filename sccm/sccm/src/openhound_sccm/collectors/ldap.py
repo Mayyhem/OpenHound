@@ -240,8 +240,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({mp_sid})" if mp_sid else ""
                     logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
                     mp_count += 1
-                else:
-                    logger.warning(f"Failed to register target for management point {mp_hostname} from mSSMSManagementPoint entry")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
 
             # Parse capabilities to determine site relationships and extract
             # FSP hostnames from the capabilities XML
@@ -261,8 +261,8 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
                     logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
                     fsp_count += 1
-                else:
-                    logger.warning(f"Failed to register target for fallback status point {fsp_hostname} from mSSMSManagementPoint entry")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
 
             yield {
                 "mp_hostname": mp_hostname,
@@ -408,8 +408,8 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             if target:
                 logger.info(f"Found network boot server: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
-            else:
-                logger.warning(f"Failed to register target for network boot server {computer_dn} from {obj_class} entry")
+            # No else: register_target logs why it skipped (filtered host or
+            # empty name), so a None return isn't a failure here.
 
         except Exception as ex:
             logger.error(f"Failed to process network boot server {dn}: {ex}")
@@ -477,8 +477,8 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             if target:
                 logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
-            else:
-                logger.warning(f"Failed to register target for computer with SCCM naming pattern {computer.get('name')} ({computer.get('object_sid')})")
+            # No else: register_target logs why it skipped (filtered host or
+            # empty name), so a None return isn't a failure here.
 
         except Exception as ex:
             logger.error(f"Failed to process search result {computer.get('name')}: {ex}")
@@ -559,15 +559,13 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             if "computer" in [c.lower() for c in obj_class]:
                 obj_type = "computer"
 
-                # Add as collection target
-                target = ctx.register_target(
+                # Add as collection target. register_target logs why it skipped
+                # (filtered host or empty name), so we don't inspect the result.
+                ctx.register_target(
                     identifier=ad_obj.get("dNSHostName"),
                     source="LDAP-GenericAllSystemManagement",
                     ad_object=ad_obj,
                 )
-
-                if not target:
-                    logger.warning(f"Failed to register target for {ad_obj.get('dNSHostName')} with GenericAll on System Management container")
 
             elif "user" in [c.lower() for c in obj_class]:
                 obj_type = "user"

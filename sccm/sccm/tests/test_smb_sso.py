@@ -262,3 +262,98 @@ def test_registry_probe_delegates_to_connect_smb(monkeypatch):
 
     assert captured["hostname"] == "ps1.mayyhem.com"
     assert captured["domain"] == "mayyhem.com"
+
+
+class _FakeSMB:
+    """Stand-in for an authenticated SMBConnection returned by connect_smb."""
+
+    def getRemoteHost(self):
+        return "1.2.3.4"
+
+    def logoff(self):
+        pass
+
+
+class _FakeDCE:
+    def connect(self):
+        pass
+
+    def bind(self, uuid):
+        pass
+
+    def disconnect(self):
+        pass
+
+
+def _patch_probe_transport(monkeypatch, connect_behaviour):
+    """Wire up a _RegistryProbe so __enter__ reaches the winreg bind offline.
+
+    *connect_behaviour* is called on each fake ``rpc.connect()`` (the point where
+    the real ``\\winreg`` pipe is opened) with the 1-based attempt number; it may
+    raise to simulate a bind failure. Returns the recorded ``sleeps`` list so the
+    test can assert on retry timing.
+    """
+    from impacket.dcerpc.v5 import rrp as impacket_rrp
+    from impacket.dcerpc.v5 import transport as impacket_transport
+
+    monkeypatch.setattr(registry, "connect_smb", lambda *a, **k: _FakeSMB())
+    monkeypatch.setattr(registry.socket, "create_connection", lambda *a, **k: _NoopCtx())
+    monkeypatch.setattr(registry, "HAS_IMPACKET", True)
+
+    sleeps = []
+    monkeypatch.setattr(registry.time, "sleep", lambda s: sleeps.append(s))
+
+    state = {"connects": 0}
+
+    class _FakeRPC:
+        def connect(self):
+            state["connects"] += 1
+            connect_behaviour(state["connects"])
+
+        def get_dce_rpc(self):
+            return _FakeDCE()
+
+    monkeypatch.setattr(impacket_transport, "SMBTransport", lambda *a, **k: _FakeRPC())
+    monkeypatch.setattr(impacket_rrp, "hOpenLocalMachine", lambda dce: {"phKey": "ROOT"})
+    return sleeps, state
+
+
+def test_registry_probe_retries_then_succeeds_on_pipe_not_available(monkeypatch):
+    # The trigger-start race: the first opens find the \winreg pipe not yet
+    # listening; the bind must wait and retry until RemoteRegistry is up.
+    from impacket.nt_errors import STATUS_PIPE_NOT_AVAILABLE
+    from impacket.smbconnection import SessionError
+
+    def _behaviour(attempt):
+        if attempt < 3:
+            raise SessionError(error=STATUS_PIPE_NOT_AVAILABLE)
+
+    sleeps, state = _patch_probe_transport(monkeypatch, _behaviour)
+
+    probe = registry._RegistryProbe("ps1.mayyhem.com", "mayyhem.com", None, None)
+    result = probe.__enter__()
+
+    assert result is probe                       # bind eventually succeeded
+    assert state["connects"] == 3                # took three attempts
+    assert probe.root_key == "ROOT"
+    # Slept once between each of the three attempts, never after success.
+    assert sleeps == [registry.WINREG_BIND_RETRY_DELAY, registry.WINREG_BIND_RETRY_DELAY]
+
+
+def test_registry_probe_does_not_retry_on_other_smb_errors(monkeypatch):
+    # A non-transient SMB error (e.g. access denied) must fail fast: no retry,
+    # no sleep -- we don't want to stall on hosts that will never answer.
+    from impacket.nt_errors import STATUS_ACCESS_DENIED
+    from impacket.smbconnection import SessionError
+
+    def _behaviour(attempt):
+        raise SessionError(error=STATUS_ACCESS_DENIED)
+
+    sleeps, state = _patch_probe_transport(monkeypatch, _behaviour)
+
+    probe = registry._RegistryProbe("ps1.mayyhem.com", "mayyhem.com", None, None)
+    result = probe.__enter__()
+
+    assert result is None
+    assert state["connects"] == 1                # single attempt, no retry
+    assert sleeps == []

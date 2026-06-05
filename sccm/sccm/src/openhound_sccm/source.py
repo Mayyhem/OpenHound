@@ -1,6 +1,7 @@
 import logging
 import pathlib
 import queue as _queue
+from collections.abc import Iterable
 
 import dlt
 
@@ -35,6 +36,26 @@ logger = logging.getLogger(__name__)
 def _parse_csv_option(value: str | None) -> set[str]:
     """Return a stripped set of tokens from a comma-separated CLI value."""
     return {token for raw in (value or "").split(",") if (token := raw.strip())}
+
+
+def _expand_allowed_targets(names: Iterable[str]) -> set[str]:
+    """Lowercase each host name and add its short-name form (text before the
+    first dot), returning the allow-list set.
+
+    ``SourceContext._is_allowed_target`` matches *lowercased* candidate names, so
+    every entry must be lowercased or it can never match; adding the short name
+    lets a host match whether it is later presented as an FQDN or a short name.
+    ``--computers`` and ``--computer-file`` both feed this, so the two stay
+    consistent (previously only the file path lowercased).
+    """
+    allowed: set[str] = set()
+    for raw in names:
+        name = raw.strip().lower()
+        if name:
+            allowed.add(name)
+            if "." in name:
+                allowed.add(name.split(".")[0])
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -207,22 +228,16 @@ def source(
     use_altauth = bool(use_altauth)
     registration_sleep = registration_sleep if registration_sleep is not None else 10
 
-    # Parse allowed targets from --computers and --computer-file.
-    # Both FQDN and short-name forms are added so Test-AllowedTarget matching
-    # works regardless of how a discovered host is later presented.
-    allowed = _parse_csv_option(computers)
-    for name in list(allowed):
-        if "." in name:
-            allowed.add(name.split(".")[0])
+    # Parse allowed targets from --computers and --computer-file. Both feed the
+    # same expansion (lowercased FQDN + short-name forms) so Test-AllowedTarget
+    # matching works regardless of how a discovered host is later presented.
+    allowed = _expand_allowed_targets(_parse_csv_option(computers))
     if computer_file:
         p = pathlib.Path(computer_file)
         if p.exists():
-            for line in p.read_text().splitlines():
-                name = line.strip().lower()
-                if name:
-                    allowed.add(name)
-                    if "." in name:
-                        allowed.add(name.split(".")[0])
+            allowed |= _expand_allowed_targets(p.read_text().splitlines())
+        else:
+            logger.warning("Computer file not found, ignoring: %s", p)
 
     creds = ADCredentials(
         domain=domain,

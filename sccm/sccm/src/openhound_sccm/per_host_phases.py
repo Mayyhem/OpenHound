@@ -18,6 +18,7 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
         "RemoteRegistry",(
             "sccm_sites",
             "computers",
+            "users"
         ), registry.collect_registry
     ),
 )

@@ -248,27 +248,33 @@ class SourceContext:
         source: Optional[str],
         site_code: Optional[str] | None = None,
         ad_object: dict[str, Any] | None = None,
-    ) -> set[TargetEntry] | None:
+    ) -> Optional[TargetEntry]:
         """Register a device as a probe target, mirroring PS1's Add-DeviceToTargets.
 
         Returns the TargetEntry (new or updated) so callers can inspect is_new,
         hostname, ad_object, etc. Returns None when identifier is empty or the
-        target is rejected by the allowed-targets filter.
+        target is rejected by the allowed-targets filter. In both None cases this
+        method logs the reason itself (empty -> debug, filtered -> warning), so a
+        None return is an intentional skip, not a registration failure — callers
+        should not log their own "failed to register" message on the None path.
         """
         if not identifier or not identifier.strip():
+            logger.debug("register_target: empty identifier (source=%r)", source)
             return None
 
         # Step 1: Resolve to AD object (best-effort, non-fatal)
         if not ad_object:
             try:
                 ad_object = self.resolve_principal(identifier)
-            except Exception:
-                logger.warning("AD resolution failed for %r", identifier)
+            except Exception as ex:
+                # Best-effort: a missing LDAP client (ad=None) or a transient LDAP
+                # error leaves ad_object None. The single user-facing "adding target
+                # by name" warning is emitted in Step 3; keep the cause at verbose.
+                logger.verbose("AD resolution failed for %r: %s", identifier, ex)
 
         if ad_object:
             identifier = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
-        else:
-            logger.warning("Could not resolve %r to a domain object; using raw identifier", identifier)
+        # else: unresolved — reported once by the Step 3 warning below, not here.
 
         # Step 2: Allowed-targets filter
         if not self._is_allowed_target(identifier, ad_object):

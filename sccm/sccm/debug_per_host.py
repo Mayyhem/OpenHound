@@ -1,19 +1,21 @@
-"""Throwaway debugger harness for the per-host queueing engine.
+"""Debugger harness for the per-host queueing engine.
 
 Run under the VS Code debugger ("Run and Debug" -> "Debug per-host queue", or
-"Debug Python File"). No Active Directory and no DLT are needed: it seeds the
-work queue by hand and uses the stub phases, so it exercises the queue,
-recursion, ordering, backpressure, and quiescence in isolation.
-
-This file is a scratch helper — delete it when you're done; it isn't imported by
-anything and isn't part of the package.
+"Debug Python File"). No DLT is needed — it seeds the work queue by hand and
+drains raw streams to exercise the queue, recursion, ordering, backpressure,
+and quiescence. It binds LDAP as the current Windows user via SSPI, so per-host
+collectors that resolve principals behave like the full CLI.
 
 Stepping tips
 -------------
 * Keep MAX_WORKERS = 1 while stepping so the debugger stays on one worker thread.
   Set it to 10 to watch real concurrency (harder to single-step).
-* Set ALLOW_LIST to {"hosta", "hostb"} to watch the allow-list suppress the
-  HTTP-stub's discovered hosts (recursion turned off for non-listed machines).
+* COMPUTERS mirrors the CLI's --computers flag: each entry is both a seed
+  (collected) and the allow-list. Only the listed hosts (and their short-name
+  forms) are collected — anything they discover is skipped. To watch a
+  discovered host get collected, add it to COMPUTERS too. Leaving COMPUTERS
+  empty reproduces a CLI run with no --computers (allow-all), but with no seeds
+  the pipeline then has nothing to collect.
 * Set MAXSIZE = 1 to watch backpressure (producers block on put until drained).
   With MAX_WORKERS >= number of tables this still completes; lower it to see a
   stall (that's the dlt-worker-count constraint, here simulated with raw streams).
@@ -21,11 +23,13 @@ Stepping tips
 import logging
 import os
 
+from openhound_sccm.clients.ad import ADClient, ADCredentials
 from openhound_sccm.context import SourceContext
 from openhound_sccm.log_context import VERBOSE, install_filter
 from openhound_sccm.main import _apply_log_level, _build_phase_scope, _detect_windows_domain
 from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names
 from openhound_sccm.phased_pipeline import DONE, WorkQueue, build_streams, run_pipeline
+from openhound_sccm.source import _expand_allowed_targets
 
 # Log to the console exactly like the main collector: reuse its own setup, which
 # lowers the framework's console handler to the VERBOSE tier (-vv parity), strips
@@ -55,35 +59,60 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
 
 MAX_WORKERS = 1                 # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                  # 1 = watch backpressure
-ALLOW_LIST = frozenset()        # {"hosta", "hostb"} = suppress discovered hosts
-SEED_HOSTS = ["ps1-pss.mayyhem.com"]
+COMPUTERS = ["ps1-pss.mayyhem.com"]   # mirrors --computers: each entry is both a seed AND the allow-list
 
-# The domain context gained during _apply_connection_context: derive it from the
-# current Windows user (USERDNSDOMAIN), the same way the CLI does. Its other half
-# — DNS-SRV domain-controller resolution — is skipped on purpose: this harness has
-# no LDAP/DC dependency and that half calls sys.exit() when SRV lookup fails.
+# Derive the domain from the current Windows user (USERDNSDOMAIN), the same way
+# the CLI does. We skip the CLI's DNS-SRV domain-controller lookup (it calls
+# sys.exit() when SRV lookup fails); with no explicit DC, ADClient connects to
+# the domain name, which DNS resolves to a DC.
 DOMAIN = _detect_windows_domain() or "mayyhem.com"
 
 
 def main() -> None:
     wq = WorkQueue()
-    for host in SEED_HOSTS:
-        wq.submit(host)         # [BP] step into submit(): dedup + pending grows
 
-    # ad=None is fine: collect_registry probes the raw target host over SMB and
-    # never needs AD resolution.
+    # Same env vars the CLI's -u/-p populate. Unset → both LDAP and SMB
+    # authenticate as the current Windows user (SSPI); set them to use explicit
+    # credentials, exactly like the CLI.
+    username = os.environ.get("SOURCES__SCCM__USERNAME")
+    password = os.environ.get("SOURCES__SCCM__PASSWORD")
+
+    # --computers does double duty in the CLI: every entry seeds the queue AND
+    # becomes the allow-list. Mirror that here by reusing source.py's expansion
+    # (lowercased FQDN + short-name forms). Empty COMPUTERS -> empty allow-list
+    # (allow-all), matching a CLI run with no --computers; with no seeds the
+    # pipeline then has nothing to collect.
+    allowed = _expand_allowed_targets(COMPUTERS)
+
+    # Build a real LDAP client so per-host collectors that resolve principals
+    # (RemoteRegistry component/database servers, CurrentUser SIDs) behave like
+    # the full CLI. With no explicit DC, ADClient connects to the domain name,
+    # which DNS resolves to a DC.
     ctx = SourceContext(
-        ad=None,
+        ad=ADClient(ADCredentials(domain=DOMAIN, username=username, password=password)),
         domain=DOMAIN,
-        # Same env vars the CLI's -u/-p populate. Unset → impacket falls back to a
-        # null SMB session, which usually can't bind Remote Registry; set these if
-        # the probe fails to authenticate.
-        username=os.environ.get("SOURCES__SCCM__USERNAME"),
-        password=os.environ.get("SOURCES__SCCM__PASSWORD"),
+        username=username,
+        password=password,
         work_queue=wq,
         collection_methods="All",
-        allowed_targets=ALLOW_LIST,
+        allowed_targets=frozenset(allowed),
     )
+
+    # Seed the targets exactly as the CLI does (main.py:946-948). register_target
+    # both records each host in ctx.target_hosts_by_hostname — the probe-target
+    # accumulator the per-host phases read via target_hosts_snapshot(), and that
+    # collect_registry indexes directly as ctx.target_hosts_by_hostname[target] —
+    # AND submits the host onto the work queue. This reproduces the state the run
+    # is in once LDAP/DNS discovery has registered its hosts; a bare wq.submit()
+    # would queue the host but leave that accumulator empty.
+    #
+    # [BP] step into register_target(): it resolves the host in AD (LDAP via
+    # SSPI), applies the allow-list filter, then falls through to wq.submit()
+    # (dedup + pending grows). Because COMPUTERS feeds both the seeds and the
+    # allow-list, every seed always passes the filter; only hosts discovered
+    # mid-run that aren't in COMPUTERS get rejected (returns None, never runs).
+    for host in COMPUTERS:
+        ctx.register_target(host, source="CLI")
 
     streams = build_streams(all_table_names(PER_HOST_PHASES), maxsize=MAXSIZE)
 

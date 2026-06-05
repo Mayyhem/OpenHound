@@ -52,3 +52,9 @@ E. Cleanup pass
 - The linter passes cleanly on all touched files.
 - Code is simplified/cleaned per best practices, with logic moved to preprocess/convert stages where it improves scalability; collector step ordering still matches ConfigManBearPig.ps1.
 - Ope-f3di and Ope-scp1 are closed and referenced as superseded by this ticket.
+
+## Notes
+
+**2026-06-05T20:32:59Z**
+
+Conditional-logging fix: register_target (context.py) returned None for two reasons - empty identifier or allow-list rejection - but every discovery caller logged a misleading 'Failed to register target' WARNING on the None path, duplicating the existing 'Skipping ... not in allowed targets filter' warning. Centralized the why-logging in register_target (empty -> debug, filtered -> existing warning) and removed the bogus else-warning at all ~10 call sites: dns.py x2, ldap.py x5 (incl. the inverted GenericAll site, now no unused assignment), local.py x3, registry.py x2. Also fixed register_target's wrong return annotation set[TargetEntry]|None -> Optional[TargetEntry] and updated its docstring. Net: exactly one accurate log line per skipped host. Suite: 138 passed, same 6 pre-existing baseline failures; ruff clean on changed lines.

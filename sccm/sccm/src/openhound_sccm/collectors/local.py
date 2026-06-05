@@ -78,8 +78,8 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                     logger.info(f"Found current management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                     current_mp_ad_obj = target.ad_object
                     yield current_mp_ad_obj
-                else:
-                    logger.warning(f"Failed to register target for current management point {current_mp} from SMS_Authority")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
 
     except Exception as ex:
         logger.error("Error querying SMS_Authority: %s", ex)
@@ -113,8 +113,8 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 if target:
                     logger.info(f"Found management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
-                else:
-                    logger.warning(f"Failed to register target for management point {mp} from SMS_LookupMP")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
 
     except Exception as ex:
         logger.error("Error querying SMS_LookupMP: %s", ex)
@@ -257,8 +257,8 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 if target:
                     logger.info(f"Found host in client logs: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
-                else:
-                    logger.warning(f"Failed to register target for host {host} found in client logs")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
             else:
                 logger.debug(f"Host found in client logs resolved to non-RFC1918 IP address, skipping: {host} ({resolved_ip})")
         else:

@@ -104,8 +104,8 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 if target:
                     logger.info("Found management point: %s:%s (site: %s)", target_host, port, site_code)
                     yield target.ad_object
-                else:
-                    logger.warning(f"Failed to register target management point {target_host} from SRV record {srv_name}")
+                # No else: register_target logs why it skipped (filtered host or
+                # empty name), so a None return isn't a failure here.
 
     else:
         # ADIDNS fallback via LDAP — searches dnsNode objects under MicrosoftDNS.
@@ -133,8 +133,8 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                         if target:
                             logger.info("Found management point via ADIDNS: %s (site: %s)", name, site_code)
                             yield target.ad_object
-                        else:
-                            logger.warning(f"Failed to register target for management point {name} from ADIDNS search in site {site_code}")
+                        # No else: register_target logs why it skipped (filtered
+                        # host or empty name), so a None return isn't a failure.
 
             except Exception as ex:
                 logger.error("dns_management_points: ADIDNS for %s failed: %s", site_code, ex)
