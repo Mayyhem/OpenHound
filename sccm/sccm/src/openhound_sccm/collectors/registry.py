@@ -299,88 +299,16 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
         if probe is None:
             logger.info("Could not connect to %s for registry queries", target)
         else:
+            # First because it exists on other site system roles, not just site servers
+            yield from get_current_user(probe, ctx)
 
-            # SOFTWARE\Microsoft\SMS\CurrentUser - first because it exists on other site system roles, not just site servers.
-            # The logged-in user's domain SID is the data of the value named "UserSID".
-            # Select it by name (not by enumeration position) so the sibling "Session"
-            # DWORD can never be mistaken for the SID — the order in which the registry
-            # hands back the two values is not guaranteed.
-            logger.verbose("Querying %s for logged-in user's domain SID", SCCM_REG_KEYS["current_user"])
-            values = probe.read_values(SCCM_REG_KEYS["current_user"])
-
-            current_user_sid = None
-            if values is None:
-                # read_values returns None only when the key can't be opened.
-                logger.error("Error querying %s on %s", SCCM_REG_KEYS["current_user"], target)
-            else:
-                current_user_sid = next(
-                    (data for name, data in values if name.lower() == "usersid" and data),
-                    None,
-                )
-                if not current_user_sid:
-                    # Key present but no logged-in user recorded — not an error.
-                    logger.verbose("No UserSID value under %s on %s", SCCM_REG_KEYS["current_user"], target)
-
-            if current_user_sid:
-                logger.verbose("Found CurrentUser SID %s on %s; resolving principal", current_user_sid, target)
-                current_user_ad_object = ctx.resolve_principal(current_user_sid)
-                if current_user_ad_object:
-                    logger.info("Found current user: %s (%s)", current_user_ad_object.get("sAMAccountName"), current_user_sid)
-                    row = {
-                        **(current_user_ad_object or {}),
-                        "source": "RemoteRegistry-CurrentUser",
-                    }
-                    row.setdefault("object_sid", current_user_sid)
-                    yield "users", row
-                else:
-                    logger.warning("Failed to resolve current user SID: %s", current_user_sid)
-
+            # Next because it requires local Administrators privileges to collect but does not require the system to be an SCCM site server
+            yield from get_ntlm_settings(probe, ctx)
+            yield from get_mssql_settings(probe, ctx)
             
-            # NTLM/MSSQL settings are next because they require local Administrators privileges 
-            # to collect but do not require the system to be an SCCM site server
-            signing_required = None
-            restrict_receiving_ntlm_traffic = None
-            disable_loopback_check = None
-
-            logger.verbose("Querying %s for SMB signing requirements", SCCM_REG_KEYS["lanmanserver_parameters"])
-            require_signing_reg = probe.read_dword(SCCM_REG_KEYS["lanmanserver_parameters"], "RequireSecuritySignature")
-
-            if require_signing_reg is not None:
-                signing_required = require_signing_reg == 1
-                logger.verbose(f"SMB signing required on {target}: {signing_required}")
-            
-            logger.verbose("Querying %s for NTLM settings", SCCM_REG_KEYS["msv10"])
-            ntlm_registry_value = probe.read_dword(SCCM_REG_KEYS["msv10"], "RestrictReceivingNTLMTraffic")
-            if ntlm_registry_value is not None:
-                if ntlm_registry_value == 0:
-                    restrict_receiving_ntlm_traffic = "Off"
-                elif ntlm_registry_value == 1:
-                    restrict_receiving_ntlm_traffic = "Deny_All"
-                elif ntlm_registry_value == 2:
-                    restrict_receiving_ntlm_traffic = "Deny_Inbound_Explicit"
-                else:
-                    restrict_receiving_ntlm_traffic = f"Unknown ({ntlm_registry_value})"
-                logger.verbose(f"Found RestrictReceivingNTLMTraffic setting on {target}: {restrict_receiving_ntlm_traffic}")
-
-            logger.verbose("Querying %s for LSA settings", SCCM_REG_KEYS["lsa"])
-            disable_loopback_reg = probe.read_dword(SCCM_REG_KEYS["lsa"], "DisableLoopbackCheck")
-            if disable_loopback_reg is not None:
-                disable_loopback_check = disable_loopback_reg == 1
-                logger.verbose(f"DisableLoopbackCheck is {'enabled' if disable_loopback_check else 'disabled'} on {target}")
-
-            target_entry = ctx.target_hosts_by_hostname[target]
-            row = {
-                **(target_entry.ad_object or {}),
-                "source": "RemoteRegistry-NTLMSettings",
-                "smb_signing_required": signing_required,
-                "restrict_receiving_ntlm_traffic": restrict_receiving_ntlm_traffic,
-                "disable_loopback_check": disable_loopback_check,
-            }
-            row.setdefault("name", target)
-            yield "computers", row
-
-            # Identify MSSQL instances on the target, if any
-            yield from collect_mssql_registry(probe)
+            # Then check for the SCCM site code, which identifies this host as an SCCM site server 
+            # and is needed to interpret the component server roles. If the site code key is missing or empty, 
+            # skip the remaining checks because they only exist on site servers.
         
             # HKLM\SOFTWARE\Microsoft\SMS\Triggers
             logger.verbose("Querying %s for SCCM site code", SCCM_REG_KEYS["triggers"])
@@ -396,6 +324,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                 }
             else:
                 logger.info("%s does not exist or no site code subkey found, skipping remaining Remote Registry checks", SCCM_REG_KEYS["triggers"])
+                logger.info("Remote Registry collection completed for %s", target)
                 return
 
 
@@ -496,7 +425,90 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
     logger.info("Remote Registry collection completed for %s", target)
 
 
-def collect_mssql_registry(probe: _RegistryProbe) -> Iterable[tuple[str, dict[str, Any]]]:
+def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list[str]]:
+    """
+    The logged-in user's domain SID is the data of the value named "UserSID".
+    Select it by name (not by enumeration position) so the sibling "Session"
+    DWORD can never be mistaken for the SID — the order in which the registry
+    hands back the two values is not guaranteed.
+    """
+    logger.verbose("Querying %s for logged-in user's domain SID", SCCM_REG_KEYS["current_user"])
+    values = probe.read_values(SCCM_REG_KEYS["current_user"])
+
+    current_user_sid = None
+    if values is None:
+        # read_values returns None only when the key can't be opened.
+        logger.error("Error querying %s", SCCM_REG_KEYS["current_user"])
+    else:
+        current_user_sid = next(
+            (data for name, data in values if name.lower() == "usersid" and data),
+            None,
+        )
+        if not current_user_sid:
+            # Key present but no logged-in user recorded — not an error.
+            logger.verbose("No UserSID value under %s", SCCM_REG_KEYS["current_user"])
+
+    if current_user_sid:
+        logger.verbose("Found CurrentUser SID %s; resolving principal", current_user_sid)
+        current_user_ad_object = ctx.resolve_principal(current_user_sid)
+        if current_user_ad_object:
+            logger.info("Found current user: %s (%s)", current_user_ad_object.get("sAMAccountName"), current_user_sid)
+            row = {
+                **(current_user_ad_object or {}),
+                "source": "RemoteRegistry-CurrentUser",
+            }
+            row.setdefault("object_sid", current_user_sid)
+            yield "users", row
+        else:
+            logger.warning("Failed to resolve current user SID: %s", current_user_sid)
+
+
+def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dict[str, Any]]:
+    # NTLM/MSSQL settings are next because they require local Administrators privileges 
+    # to collect but do not require the system to be an SCCM site server
+    signing_required = None
+    restrict_receiving_ntlm_traffic = None
+    disable_loopback_check = None
+
+    logger.verbose("Querying %s for SMB signing requirements", SCCM_REG_KEYS["lanmanserver_parameters"])
+    require_signing_reg = probe.read_dword(SCCM_REG_KEYS["lanmanserver_parameters"], "RequireSecuritySignature")
+
+    if require_signing_reg is not None:
+        signing_required = require_signing_reg == 1
+        logger.verbose(f"SMB signing required: {signing_required}")
+    
+    logger.verbose("Querying %s for NTLM settings", SCCM_REG_KEYS["msv10"])
+    ntlm_registry_value = probe.read_dword(SCCM_REG_KEYS["msv10"], "RestrictReceivingNTLMTraffic")
+    if ntlm_registry_value is not None:
+        if ntlm_registry_value == 0:
+            restrict_receiving_ntlm_traffic = "Off"
+        elif ntlm_registry_value == 1:
+            restrict_receiving_ntlm_traffic = "Deny_All"
+        elif ntlm_registry_value == 2:
+            restrict_receiving_ntlm_traffic = "Deny_Inbound_Explicit"
+        else:
+            restrict_receiving_ntlm_traffic = f"Unknown ({ntlm_registry_value})"
+        logger.verbose(f"Found RestrictReceivingNTLMTraffic setting: {restrict_receiving_ntlm_traffic}")
+
+    logger.verbose("Querying %s for LSA settings", SCCM_REG_KEYS["lsa"])
+    disable_loopback_reg = probe.read_dword(SCCM_REG_KEYS["lsa"], "DisableLoopbackCheck")
+    if disable_loopback_reg is not None:
+        disable_loopback_check = disable_loopback_reg == 1
+        logger.verbose(f"DisableLoopbackCheck is {'enabled' if disable_loopback_check else 'disabled'}")
+
+    target_entry = ctx.target_hosts_by_hostname[probe.hostname]
+    row = {
+        **(target_entry.ad_object or {}),
+        "source": "RemoteRegistry-NTLMSettings",
+        "smb_signing_required": signing_required,
+        "restrict_receiving_ntlm_traffic": restrict_receiving_ntlm_traffic,
+        "disable_loopback_check": disable_loopback_check,
+    }
+    row.setdefault("name", target_entry.ad_object.get("name") if target_entry.ad_object else probe.hostname)
+    yield "computers", row
+
+
+def get_mssql_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield one row per SQL instance discovered via remote registry.
     """
     # Try multiple default registry paths for MSSQL instances
@@ -522,7 +534,7 @@ def collect_mssql_registry(probe: _RegistryProbe) -> Iterable[tuple[str, dict[st
 
             reg_key = probe.read_values(reg_path)
             if reg_key is not None:
-                reg_path_found = True
+                reg_path_found = reg_path
                 logger.info("Found MSSQL registry key at %s", reg_path)
 
                 # If we found a valid registry path, read the relevant values
@@ -545,8 +557,26 @@ def collect_mssql_registry(probe: _RegistryProbe) -> Iterable[tuple[str, dict[st
         return
 
     logger.info("Collected EPA settings from %s: ForceEncryption=%s, ExtendedProtection=%s", probe.hostname, force_encryption, extended_protection)
+
+    port_reg = reg_path_found + r"\Tcp\IPAll"
+    port = probe.read_value(port_reg, "TcpPort")
+    if port:
+        logger.info("Found MSSQL TCP port: %s", port)
+
+    instance_name_reg = r"SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
+    instance_names = probe.read_values(instance_name_reg)
+    if instance_names is not None:
+        instance_names = [name for name, _ in instance_names]
+        logger.info("Found MSSQL instance names: %s", ", ".join(instance_names))
+
+    target_entry = ctx.target_hosts_by_hostname[probe.hostname]
+
     yield "mssql_servers", {
         "source": "RemoteRegistry-MSSQL",
-        "force_encryption": force_encryption,
-        "extended_protection": extended_protection,
+        "force_encryption": force_encryption if force_encryption is not None else None,
+        "extended_protection": extended_protection if extended_protection is not None else None,
+        "name": target_entry.ad_object.get("name") if target_entry.ad_object else probe.hostname,
+        "domain_computer_sid": target_entry.ad_object.get("object_sid") if target_entry.ad_object else None,
+        "port": port if port else None,
+        "instance_names": instance_names if instance_names else None,
     }
