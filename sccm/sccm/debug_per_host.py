@@ -59,7 +59,7 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
 
 MAX_WORKERS = 1                 # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                  # 1 = watch backpressure
-COMPUTERS = ["ps1-pss.mayyhem.com"]   # mirrors --computers: each entry is both a seed AND the allow-list
+COMPUTERS = ["ps1-db.mayyhem.com"]   # mirrors --computers: each entry is both a seed AND the allow-list
 
 # Derive the domain from the current Windows user (USERDNSDOMAIN), the same way
 # the CLI does. We skip the CLI's DNS-SRV domain-controller lookup (it calls

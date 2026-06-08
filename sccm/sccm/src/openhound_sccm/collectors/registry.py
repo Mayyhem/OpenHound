@@ -25,6 +25,9 @@ SCCM_REG_KEYS = {
     "component_servers": r"SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_SITE_COMPONENT_MANAGER\Component Servers",
     "multisite_component_servers": r"SOFTWARE\Microsoft\SMS\COMPONENTS\SMS_SITE_COMPONENT_MANAGER\Multisite Component Servers",
     "current_user": r"SOFTWARE\Microsoft\SMS\CurrentUser",
+    "lanmanserver_parameters": r"SYSTEM\CurrentControlSet\Services\LanManServer\Parameters",
+    "msv10": r"SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0",
+    "lsa": r"SYSTEM\CurrentControlSet\Control\Lsa"
 }
 
 
@@ -139,6 +142,12 @@ class _RegistryProbe:
                 return str(value).rstrip("\x00").strip()
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
+        except rrp.DCERPCException as ex:
+            if "ERROR_FILE_NOT_FOUND" in str(ex):
+                logger.verbose("DWORD value %s not found under %s on %s", value_name, key_path, self.hostname)
+            else:
+                logger.error("Failed to read DWORD value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
+            return None
         except Exception as ex:
             logger.error("Failed to read registry value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
             return None
@@ -158,6 +167,12 @@ class _RegistryProbe:
                 return int(value) if value else None
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
+        except rrp.DCERPCException as ex:
+            if "ERROR_FILE_NOT_FOUND" in str(ex):
+                logger.verbose("DWORD value %s not found under %s on %s", value_name, key_path, self.hostname)
+            else:
+                logger.error("Failed to read DWORD value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
+            return None
         except Exception as ex:
             logger.error("Failed to read DWORD value %s under %s on %s: %s", value_name, key_path, self.hostname, ex)
             return None
@@ -190,6 +205,12 @@ class _RegistryProbe:
                 return names
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
+        except rrp.DCERPCException as ex:
+            if "ERROR_FILE_NOT_FOUND" in str(ex):
+                logger.verbose("Registry key %s not found on %s", key_path, self.hostname)
+            else:
+                logger.error("Failed to open registry key %s on %s: %s", key_path, self.hostname, ex)
+            return None
         except Exception as ex:
             logger.verbose("Failed to enumerate subkeys under %s: %s", key_path, ex)
             return None
@@ -249,6 +270,12 @@ class _RegistryProbe:
                 return out
             finally:
                 rrp.hBaseRegCloseKey(self.dce, sub)
+        except rrp.DCERPCException as ex:
+            if "ERROR_FILE_NOT_FOUND" in str(ex):
+                logger.verbose("Registry key %s not found on %s", key_path, self.hostname)
+            else:
+                logger.error("Failed to open registry key %s on %s: %s", key_path, self.hostname, ex)
+            return None
         except Exception as ex:
             logger.error("Failed to open registry key %s: %s", key_path, ex)
             return None
@@ -292,7 +319,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                 )
                 if not current_user_sid:
                     # Key present but no logged-in user recorded — not an error.
-                    logger.info("No UserSID value under %s on %s", SCCM_REG_KEYS["current_user"], target)
+                    logger.verbose("No UserSID value under %s on %s", SCCM_REG_KEYS["current_user"], target)
 
             if current_user_sid:
                 logger.verbose("Found CurrentUser SID %s on %s; resolving principal", current_user_sid, target)
@@ -308,7 +335,53 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                 else:
                     logger.warning("Failed to resolve current user SID: %s", current_user_sid)
 
+            
+            # NTLM/MSSQL settings are next because they require local Administrators privileges 
+            # to collect but do not require the system to be an SCCM site server
+            signing_required = None
+            restrict_receiving_ntlm_traffic = None
+            disable_loopback_check = None
 
+            logger.verbose("Querying %s for SMB signing requirements", SCCM_REG_KEYS["lanmanserver_parameters"])
+            require_signing_reg = probe.read_dword(SCCM_REG_KEYS["lanmanserver_parameters"], "RequireSecuritySignature")
+
+            if require_signing_reg is not None:
+                signing_required = require_signing_reg == 1
+                logger.verbose(f"SMB signing required on {target}: {signing_required}")
+            
+            logger.verbose("Querying %s for NTLM settings", SCCM_REG_KEYS["msv10"])
+            ntlm_registry_value = probe.read_dword(SCCM_REG_KEYS["msv10"], "RestrictReceivingNTLMTraffic")
+            if ntlm_registry_value is not None:
+                if ntlm_registry_value == 0:
+                    restrict_receiving_ntlm_traffic = "Off"
+                elif ntlm_registry_value == 1:
+                    restrict_receiving_ntlm_traffic = "Deny_All"
+                elif ntlm_registry_value == 2:
+                    restrict_receiving_ntlm_traffic = "Deny_Inbound_Explicit"
+                else:
+                    restrict_receiving_ntlm_traffic = f"Unknown ({ntlm_registry_value})"
+                logger.verbose(f"Found RestrictReceivingNTLMTraffic setting on {target}: {restrict_receiving_ntlm_traffic}")
+
+            logger.verbose("Querying %s for LSA settings", SCCM_REG_KEYS["lsa"])
+            disable_loopback_reg = probe.read_dword(SCCM_REG_KEYS["lsa"], "DisableLoopbackCheck")
+            if disable_loopback_reg is not None:
+                disable_loopback_check = disable_loopback_reg == 1
+                logger.verbose(f"DisableLoopbackCheck is {'enabled' if disable_loopback_check else 'disabled'} on {target}")
+
+            target_entry = ctx.target_hosts_by_hostname[target]
+            row = {
+                **(target_entry.ad_object or {}),
+                "source": "RemoteRegistry-NTLMSettings",
+                "smb_signing_required": signing_required,
+                "restrict_receiving_ntlm_traffic": restrict_receiving_ntlm_traffic,
+                "disable_loopback_check": disable_loopback_check,
+            }
+            row.setdefault("name", target)
+            yield "computers", row
+
+            # Identify MSSQL instances on the target, if any
+            yield from collect_mssql_registry(probe)
+        
             # HKLM\SOFTWARE\Microsoft\SMS\Triggers
             logger.verbose("Querying %s for SCCM site code", SCCM_REG_KEYS["triggers"])
             subkeys = probe.enum_keys(SCCM_REG_KEYS["triggers"])
@@ -426,8 +499,6 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
 def collect_mssql_registry(probe: _RegistryProbe) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield one row per SQL instance discovered via remote registry.
     """
-    logger.info("Starting MSSQL registry collection on %s...", probe.hostname)
-
     # Try multiple default registry paths for MSSQL instances
     # These correspond to SQL Server versions: 2012+ (v11+) use MSSQL versions
     reg_paths = [
@@ -444,10 +515,38 @@ def collect_mssql_registry(probe: _RegistryProbe) -> Iterable[tuple[str, dict[st
     force_encryption = None
     extended_protection = None
     reg_path_found = None
-    restrict_receiving_ntlm_traffic = None
-    disable_loopback_check = None
 
     # Try each registry path until one succeeds
     for reg_path in reg_paths:
-    # just open the path to see if it exists
-        reg_path
+        if not reg_path_found:
+
+            reg_key = probe.read_values(reg_path)
+            if reg_key is not None:
+                reg_path_found = True
+                logger.info("Found MSSQL registry key at %s", reg_path)
+
+                # If we found a valid registry path, read the relevant values
+                force_encryption_value = probe.read_dword(reg_path, "ForceEncryption")
+                if force_encryption_value == 1:
+                    force_encryption = "Yes"
+                else:
+                    force_encryption = "No"
+            
+                extended_protection = probe.read_dword(reg_path, "ExtendedProtection")
+                if extended_protection == 1:
+                    extended_protection = "Allowed"
+                elif extended_protection == 2:
+                    extended_protection = "Required"
+                else:                
+                    extended_protection = "Off"
+
+    if not reg_path_found:
+        logger.warning("Could not access any MSSQL registry paths on %s, tried:\n%s", probe.hostname, "\n".join(reg_paths))
+        return
+
+    logger.info("Collected EPA settings from %s: ForceEncryption=%s, ExtendedProtection=%s", probe.hostname, force_encryption, extended_protection)
+    yield "mssql_servers", {
+        "source": "RemoteRegistry-MSSQL",
+        "force_encryption": force_encryption,
+        "extended_protection": extended_protection,
+    }
