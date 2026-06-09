@@ -388,7 +388,7 @@ This extension follows the rules in [AGENTS.md](AGENTS.md) and the [`.agents/`](
    $env:UV_PROJECT_ENVIRONMENT = "$env:TEMP\openhound-venv"; uv run pytest
    ```
 
-3. **Run the checks.** The test suite lives in [tests/](tests/) (CLI parsing, AD auth warnings, the phased-pipeline engine/streams/work-queue, per-host wiring and log blocks, LDAP MP parsing, lookup/transform queries, SMB SSO, …), with a couple of inline tests beside the code they cover ([per_host_phases_test.py](src/openhound_sccm/per_host_phases_test.py), [clients/mssql_epa_test.py](src/openhound_sccm/clients/mssql_epa_test.py)).
+3. **Run the checks.** The test suite lives in [tests/](tests/) (CLI parsing, AD auth warnings, the phased-pipeline engine/streams/work-queue, per-host wiring and log blocks, LDAP MP parsing, lookup/transform queries, SMB SSO, …), with one inline test beside the code it covers ([per_host_phases_test.py](src/openhound_sccm/per_host_phases_test.py)).
 
    ```powershell
    uv run pytest                       # tests
