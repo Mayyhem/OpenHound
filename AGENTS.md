@@ -34,3 +34,22 @@ Write logs of appropriate level (error, warning, info, verbose, debug) for every
 If you encounter bugs as you go, raise the issue and ask what to do.
 
 This project uses a CLI ticket system for task management. Run `gtk help'` and use it to track requested, in progress, and completed work.
+
+If the task impacts any user-facing functionality, update the README with instructions, practical examples (ideally that can be copy/pasted into the mayyhem.com domain environment), diagrams, tables, etc. as needed.
+
+The README.md for the sccm/sccm OpenHound collector has sections for:
+- Logo/Intro
+- Table of Contents
+- Quick Start (with examples)
+- Collection Overview
+- System Requirements
+- Limitations
+- Command Line Options
+- Graph Model
+- Node Reference
+- Edge Reference
+- Understanding the Codebase
+- Testing Changes
+- Contributing
+
+You can use README-CMBP.md as a reference. The README should be true to the sccm/sccm code above all else.

@@ -5,6 +5,8 @@ site/
 addons/
 /collectors/
 ConfigManBearPig.ps1
+/MSSQLHound/
+/RelayInformer/
 
 notebooks
 

@@ -195,6 +195,7 @@ def source(
     domain_controller: str | None = dlt.config.value,
     username: str | None = dlt.secrets.value,
     password: str | None = dlt.secrets.value,
+    nt_hash: str | None = dlt.secrets.value,
     ldap_port: int | None = dlt.config.value,
     # Collection
     collection_methods: str | None = dlt.config.value,
@@ -251,6 +252,7 @@ def source(
         domain=domain,
         username=username,
         password=password,
+        nt_hash=nt_hash,
         collection_methods=collection_methods or "All",
         allowed_targets=frozenset(allowed),
         work_queue=_shared_queue,

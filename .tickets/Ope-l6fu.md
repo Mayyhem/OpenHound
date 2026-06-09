@@ -2,13 +2,14 @@
 id: Ope-l6fu
 status: open
 deps: []
-links: []
+links: [ope-c8cc]
 created: 2026-05-28T13:28:17Z
 type: feature
 priority: 2
 assignee: Mayyhem
 tags: [sccm, mssql, relay]
 ---
+
 # TDS and EPA Implementation Coverage
 
 Ensure SQL Server TDS channel binding and EPA (Extended Protection for Authentication) flags are fully collected and reflected in graph edges. The mssql_epa_flags preproc table is defined but has no collector. EPA enforcement determines whether NTLM relay to MSSQL is feasible, making CoerceAndRelay edges inaccurate without this data.

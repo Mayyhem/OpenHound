@@ -903,3 +903,24 @@ class ADClient:
                     values.append(v)
             out[attr_name] = values if len(values) > 1 else values[0]
         return out
+    
+
+    def get_spns(self, dns_hostname: str) -> list[str]:
+        """
+        Query the servicePrincipalName attribute of a computer object by its hostname.
+        Returns a list of SPNs or an empty list on failure.
+        """
+        try:
+            logger.info("Querying SPNs for %s", dns_hostname)
+            results = list(
+                self.paged_search(
+                    search_filter=f"(dNSHostName={dns_hostname})",
+                    attributes=["servicePrincipalName"],
+                )
+            )
+            if results and "servicePrincipalName" in results[0]:
+                return results[0]["servicePrincipalName"]
+            logger.debug("No SPNs found for %s", dns_hostname)
+        except Exception as ex:
+            logger.error("Failed to query SPN for %s: %s", dns_hostname, ex)
+        return []
