@@ -1088,7 +1088,6 @@ def _preproc_table_map() -> dict[str, str]:
         "adminservice_role_members",
         "adminservice_client_devices",
         "adminservice_site_systems",
-        "adminservice_sites",
         "adminservice_site_definitions",
         "adminservice_r_system",
         "adminservice_r_user",

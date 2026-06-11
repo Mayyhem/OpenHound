@@ -141,7 +141,7 @@ _SYSRES_KEEP = {"NetworkOSPath", "SiteCode", "RoleName", "Type"}
 
 # --- collection helpers (PS1 order) ---------------------------------------
 
-def _sites(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _sites(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Site"
     query = f"?{_SITE_SELECT}"
     logger.verbose("Collecting all sites from %s", path)
@@ -152,16 +152,16 @@ def _sites(client, site_code: str) -> Iterator[tuple[str, dict]]:
     logger.info("Collected %d sites", len(value))
     for site in value:
         yield "adminservice_sites", _row("AdminService-SMS_Site", site_code, site)
-        sc = site.get("SiteCode")
-        if sc:
-            logger.verbose("  %s", sc)
+        target_site_code = site.get("SiteCode")
+        if target_site_code:
+            logger.verbose("  %s", target_site_code)
             logger.debug("    %s", site)
-            yield from _site_definition(client, site_code, sc)
+            yield from _site_definition(client, target_site_code, ctx)
         else:
             logger.warning("Site record missing SiteCode: %s", site)
 
 
-def _site_definition(client, site_code: str, target_site: str) -> Iterator[tuple[str, dict]]:
+def _site_definition(client, target_site: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_SCI_SiteDefinition"
     query = f"?$filter=SiteCode eq '{target_site}'&{_SITEDEF_SELECT}"
     logger.verbose("Collecting site definition for site %s from %s", target_site, path)
@@ -172,17 +172,58 @@ def _site_definition(client, site_code: str, target_site: str) -> Iterator[tuple
     for sdef in value:
         props = sdef.get("Props")
         logger.debug("Site definition for site %s: %s", target_site, sdef)
+
+        site_server_name = sdef.get("SiteServerName")
+        sql_server_fqdn = _prop(props, "SQLServerFQDN", "Value1")
+        sql_service_port = _prop(props, "SQLServicePort", "Value")
+    
         yield "adminservice_site_definitions", _row(
-            "AdminService-SMS_SCI_SiteDefinition", site_code, sdef, drop={"Props"},
+            "AdminService-SMS_SCI_SiteDefinition", target_site, sdef, drop={"Props"},
             extra={
                 "site_guid": _prop(props, "siteGUID", "Value1"),
-                "sql_server_fqdn": _prop(props, "SQLServerFQDN", "Value1"),
-                "sql_service_port": _prop(props, "SQLServicePort", "Value"),
+                "sql_server_fqdn": sql_server_fqdn,
+                "sql_service_port": sql_service_port,
             },
         )
 
+        # Create a computer row for the site server, with a role of "SMS Site Server"
+        if site_server_name:
+            logger.verbose("Found site server for site %s: %s", target_site, site_server_name)
+            
+            # Don't add targets during privileged collection, we don't need them
+            site_server_ad_object = ctx.resolve_principal(site_server_name)
+            if site_server_ad_object:
+                row = {
+                    **(site_server_ad_object or {}),
+                    "source": "AdminService-SiteDefinition",
+                    "sccm_infra": True,
+                    "sccm_site_system_roles": "SMS Site Server@" + target_site if target_site else "SMS Site Server",
+                }
+                row.setdefault("name", site_server_name)
+                yield "adminservice_site_definitions_computers", row
+            else:
+                logger.warning("Failed to resolve site server %s to AD object", site_server_name)
 
-def _reserved_accounts(client, site_code: str) -> Iterator[tuple[str, dict]]:
+        # Create a computer row for the site database server, with a role of "SMS SQL Server"
+        if sql_server_fqdn:
+            logger.verbose("Found SQL server for site %s: %s", target_site, sql_server_fqdn)
+
+            # Don't add targets during privileged collection, we don't need them
+            sql_server_ad_object = ctx.resolve_principal(sql_server_fqdn)
+            if sql_server_ad_object:
+                row = {
+                    **(sql_server_ad_object or {}),
+                    "source": "AdminService-SiteDefinition",
+                    "sccm_infra": True,
+                    "sccm_site_system_roles": "SMS SQL Server@" + target_site if target_site else "SMS SQL Server",
+                }
+                row.setdefault("name", sql_server_fqdn)
+                yield "adminservice_site_definitions_computers", row
+            else:
+                logger.warning("Failed to resolve SQL server %s to AD object", sql_server_fqdn)
+
+
+def _reserved_accounts(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_SCI_Reserved"
     logger.verbose("Collecting stored accounts from %s", path)
     value = _get_value(client, path)
@@ -190,13 +231,25 @@ def _reserved_accounts(client, site_code: str) -> Iterator[tuple[str, dict]]:
         # Issues logged by _get_value
         return
     logger.info("Collected %d stored accounts", len(value))
+
     for account in value:
         logger.verbose("  %s (site: %s)", account.get("UserName"), account.get("SiteCode"))
         logger.debug("    %s", account)
-        yield "adminservice_reserved_accounts", _row("AdminService-SMS_SCI_Reserved", site_code, account)
+        account_ad_object = ctx.resolve_principal(account.get("UserName"))
+        if account_ad_object:
+            row = {
+                **(account_ad_object or {}),
+                "source": "AdminService-SMS_SCI_Reserved",
+                "sccm_infra": True,
+                **account,
+            }
+            row.setdefault("name", account.get("UserName"))
+            yield "adminservice_reserved_accounts", row
+        else:
+            logger.warning("Failed to resolve stored account %s to AD object", account.get("UserName"))
 
 
-def _client_devices(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _client_devices(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_CombinedDeviceResources"
     query = f"?{_DEVICE_SELECT}"
     logger.verbose("Collecting client devices from %s", path)
@@ -208,39 +261,42 @@ def _client_devices(client, site_code: str) -> Iterator[tuple[str, dict]]:
                          device.get("IsClient"), device.get("IsObsolete"))
             continue
         logger.debug("Found client device: %s", device)
+        # Resolving these would take too long, so we'll just add Computer nodes with the SID from the corresponding row in the adminservice_r_system table during the convert stage
         count += 1
         yield "adminservice_client_devices", _row(
             "AdminService-SMS_CombinedDeviceResources", site_code, device)
     logger.info("Collected %d client devices", count)
 
 
-def _r_system(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _r_system(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_R_System"
     query = f"?{_RSYSTEM_SELECT}"
     logger.verbose("Collecting systems and groups from %s", path)
     count = 0
     for system in _paginate(client, path + query):
         logger.debug("Found system: %s", system)
+        # Resolving these would take too long, so we'll just add Computer nodes with the SID from this table during the convert stage
         count += 1
         yield "adminservice_r_system", _row(
             "AdminService-SMS_R_System", site_code, system)
     logger.info("Collected %d system and security group records", count)
 
 
-def _r_user(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _r_user(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_R_User"
     query = f"?{_RUSER_SELECT}"
     logger.verbose("Collecting users and groups from %s", path)
     count = 0
     for user in _paginate(client, path + query):
         logger.debug("Found user: %s", user)
+        # Resolving these would take too long, so we'll just add User nodes with the SID from this table during the convert stage
         count += 1
         yield "adminservice_r_user", _row(
             "AdminService-SMS_R_User", site_code, user)
     logger.info("Collected %d user and security group records", count)
 
 
-def _collections(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _collections(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Collection"
     query = f"?{_COLLECTION_SELECT}"
     logger.verbose("Collecting device and user collections from %s", path)
@@ -253,7 +309,7 @@ def _collections(client, site_code: str) -> Iterator[tuple[str, dict]]:
     logger.info("Collected %d device and user collections", count)
 
 
-def _collection_members(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _collection_members(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_FullCollectionMembership"
     query = "?$select=CollectionID,ResourceID,SiteCode"
     logger.verbose("Collecting collection memberships from %s", path)
@@ -266,7 +322,7 @@ def _collection_members(client, site_code: str) -> Iterator[tuple[str, dict]]:
     logger.info("Collected %d collection memberships", count)
 
 
-def _security_roles(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _security_roles(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Role"
     logger.verbose("Collecting security roles from %s", path)
     count = 0
@@ -279,7 +335,7 @@ def _security_roles(client, site_code: str) -> Iterator[tuple[str, dict]]:
     logger.info("Collected %d security roles", count)
 
 
-def _admins(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _admins(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Admin"
     logger.verbose("Collecting admin users and groups from %s", path)
     count = 0
@@ -292,7 +348,7 @@ def _admins(client, site_code: str) -> Iterator[tuple[str, dict]]:
     logger.info("Collected %d admin users and groups", count)
 
 
-def _site_systems(client, site_code: str) -> Iterator[tuple[str, dict]]:
+def _site_systems(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_SCI_SysResUse"
     logger.verbose("Collecting site system roles from %s", path)
     count = 0
@@ -341,7 +397,7 @@ def collect_adminservice(target: str, ctx: SourceContext) -> Iterable[tuple[str,
             return
         for collection in _COLLECTIONS:
             try:
-                yield from collection(client, site_code)
+                yield from collection(client, site_code, ctx)
             except Exception as ex:  # noqa: BLE001 - one collection failing must not abort the rest
                 logger.warning("AdminService %s failed on %s: %s", collection.__name__, target, ex)
         logger.info("AdminService collection completed for %s (site %s)", target, site_code)

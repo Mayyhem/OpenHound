@@ -4,18 +4,10 @@ import time
 from typing import Iterable, Any, Optional
 
 from ..clients.smb_sso import connect_smb
-from ..context import SourceContext, TargetEntry
+from ..context import SourceContext
 from ..log_context import with_log_context
-from ..main import app
 
 logger = logging.getLogger(__name__)
-
-# Try to import impacket for remote registry
-try:
-    from impacket.dcerpc.v5 import rrp, transport
-    HAS_IMPACKET = True
-except ImportError:
-    HAS_IMPACKET = False
 
 
 # Registry key paths for SCCM

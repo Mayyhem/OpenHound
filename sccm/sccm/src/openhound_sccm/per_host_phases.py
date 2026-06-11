@@ -31,6 +31,7 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
         "AdminService", (
             "adminservice_sites",
             "adminservice_site_definitions",
+            "adminservice_site_definitions_computers",
             "adminservice_reserved_accounts",
             "adminservice_client_devices",
             "adminservice_r_system",
