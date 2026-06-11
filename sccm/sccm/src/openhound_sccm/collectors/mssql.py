@@ -90,7 +90,7 @@ def collect_mssql(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[s
 
     target_entry = ctx.target_hosts_by_hostname.get(target.lower())
 
-    yield "mssql_servers", {
+    yield "mssql_server_instances", {
         "source": "MSSQL-ScanForEPA",
         "force_encryption": force_encryption,
         "extended_protection": extended_protection,

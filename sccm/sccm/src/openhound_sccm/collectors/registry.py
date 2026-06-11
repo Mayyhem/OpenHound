@@ -318,7 +318,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
             site_code = subkeys[0] if subkeys else None
             if site_code:
                 logger.info("Found SCCM site code: %s", site_code)
-                yield "sccm_sites", {
+                yield "remoteregistry_sites", {
                     "source": "RemoteRegistry-Triggers",
                     "site_code": site_code,
                 }
@@ -349,7 +349,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                     "sccm_site_system_roles": "SMS Site Server@" + site_code if site_code else "SMS Site Server",
                 }
                 row.setdefault("name", target)
-                yield "computers", row
+                yield "remoteregistry_computers", row
 
                 for i, server in enumerate(subkeys):
                     logger.info("Found component server #%d: %s", i + 1, server)
@@ -367,7 +367,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                             "sccm_site_system_roles": "SMS Component Server@" + site_code if site_code else "SMS Component Server",
                         }
                         row.setdefault("name", server)
-                        yield "computers", row
+                        yield "remoteregistry_computers", row
                     # No else: register_target logs why it skipped (filtered host
                     # or empty name), so a None return isn't a failure here.
             else:
@@ -397,7 +397,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                     ],
                 }
                 row.setdefault("name", target)
-                yield "computers", row
+                yield "remoteregistry_computers", row
             else:
                 # One or more remote site database servers, each a SQL Server
                 if len(subkeys) == 1:
@@ -418,7 +418,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                             "sccm_site_system_roles": ["SMS SQL Server@" + site_code if site_code else "SMS SQL Server"],
                         }
                         row.setdefault("name", server)
-                        yield "computers", row
+                        yield "remoteregistry_computers", row
                     # No else: register_target logs why it skipped (filtered host
                     # or empty name), so a None return isn't a failure here.
 
@@ -458,7 +458,7 @@ def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list
                 "source": "RemoteRegistry-CurrentUser",
             }
             row.setdefault("object_sid", current_user_sid)
-            yield "users", row
+            yield "remoteregistry_users", row
         else:
             logger.warning("Failed to resolve current user SID: %s", current_user_sid)
 
@@ -505,7 +505,7 @@ def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dic
         "disable_loopback_check": disable_loopback_check,
     }
     row.setdefault("name", target_entry.ad_object.get("name") if target_entry.ad_object else probe.hostname)
-    yield "computers", row
+    yield "remoteregistry_computers", row
 
 
 def get_mssql_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
@@ -571,7 +571,7 @@ def get_mssql_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tu
 
     target_entry = ctx.target_hosts_by_hostname[probe.hostname]
 
-    yield "mssql_servers", {
+    yield "remoteregistry_mssql_servers", {
         "source": "RemoteRegistry-MSSQL",
         "force_encryption": force_encryption if force_encryption is not None else None,
         "extended_protection": extended_protection if extended_protection is not None else None,

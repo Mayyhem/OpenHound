@@ -16,15 +16,15 @@ from .phased_pipeline import Phase
 PER_HOST_PHASES: tuple[Phase, ...] = (
     Phase(
         "RemoteRegistry",(
-            "sccm_sites",
-            "computers",
-            "users",
-            "mssql_servers"
+            "remoteregistry_sites",
+            "remoteregistry_computers",
+            "remoteregistry_users",
+            "remoteregistry_mssql_servers"
         ), registry.collect_registry,
     ),
     Phase(
         "MSSQL",(
-            "mssql_instances",
+            "mssql_server_instances",
         ), mssql.collect_mssql,
     ),
     Phase(
