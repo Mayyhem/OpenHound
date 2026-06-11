@@ -2,7 +2,7 @@
 id: ope-272e
 status: open
 deps: []
-links: []
+links: [ope-b7b2]
 created: 2026-06-08T20:57:57Z
 type: task
 priority: 3

@@ -58,9 +58,9 @@ def collect_mssql(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[s
                 # Instance name is present, but we can't determine the port without connecting to the SQL Browser service, so default to 1433.
                 logger.info("SPN %s contains instance name but no port, defaulting to 1433", spn)
         else:
-            logger.verbose("No MSSQLSvc SPN found for %s, defaulting to port 1433", target)
+            logger.info("No MSSQLSvc SPN found for %s, defaulting to port 1433", target)
     else:
-        logger.verbose("No SPNs found for %s, defaulting to port 1433", target)
+        logger.info("No SPNs found for %s, defaulting to port 1433", target)
         
     if not _check_port(target, port):
         logger.info("MSSQL port %d is not open, skipping", port)

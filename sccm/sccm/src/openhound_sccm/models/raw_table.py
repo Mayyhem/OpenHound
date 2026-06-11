@@ -55,7 +55,7 @@ def raw_table_asset(name: str, description: str = "") -> type[BaseAsset]:
 
         raw_marker: Optional[str] = None
         # ``resource_id`` is needed by Computer.SCCMResourceIDs which falls
-        # back to ``adminservice_r_system_security_groups`` for non-client
+        # back to ``adminservice_r_system`` for non-client
         # AD-pushed hosts. PS1 emission at ConfigManBearPig.ps1:7363.
         resource_id: Optional[int] = None
 

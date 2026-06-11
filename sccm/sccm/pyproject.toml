@@ -30,6 +30,10 @@ dependencies = [
     "dnspython>=2.4.0",
     # Used by impacket-based per-host phases.
     "impacket>=0.11.0",
+    # HTTP transport for the AdminService REST API and the HTTP role-probe
+    # collector (clients/http.py). Auth tokens are minted by impacket / pywin32
+    # SSPI and carried in the Authorization header; requests only moves bytes.
+    "requests>=2.31.0",
 ]
 
 [tool.uv.sources]

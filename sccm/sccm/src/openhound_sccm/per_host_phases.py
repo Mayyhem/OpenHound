@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .collectors import registry, mssql
+from .collectors import registry, mssql, adminservice
 from .phased_pipeline import Phase
 
 PER_HOST_PHASES: tuple[Phase, ...] = (
@@ -26,6 +26,21 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
         "MSSQL",(
             "mssql_instances",
         ), mssql.collect_mssql,
+    ),
+    Phase(
+        "AdminService", (
+            "adminservice_sites",
+            "adminservice_site_definitions",
+            "adminservice_reserved_accounts",
+            "adminservice_client_devices",
+            "adminservice_r_system",
+            "adminservice_r_user",
+            "adminservice_collections",
+            "adminservice_collection_members",
+            "adminservice_security_roles",
+            "adminservice_admins",
+            "adminservice_site_systems",
+        ), adminservice.collect_adminservice,
     ),
 )
 

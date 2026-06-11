@@ -24,6 +24,7 @@ class SourceContext:
     username: str | None = None
     password: str | None = None
     nt_hash: str | None = None
+    kerberos_ticket: str | None = None  # base64-encoded KRB-CRED (.kirbi) for pass-the-ticket
     dns_resolver: str | None = None
     # Collection (-m / --collection-methods)
     collection_methods: str = "All"

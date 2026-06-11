@@ -62,6 +62,8 @@ _FLAG_TO_ENV: dict[str, str] = {
     "domain_controller": "SOURCES__SCCM__DOMAIN_CONTROLLER",
     "username": "SOURCES__SCCM__USERNAME",
     "password": "SOURCES__SCCM__PASSWORD",
+    "nt_hash": "SOURCES__SCCM__NT_HASH",
+    "kerberos_ticket": "SOURCES__SCCM__KERBEROS_TICKET",
     "ldap_port": "SOURCES__SCCM__LDAP_PORT",
     # Collection
     "collection_methods": "SOURCES__SCCM__COLLECTION_METHODS",
@@ -127,6 +129,8 @@ _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--domain-controller",
     "--username",
     "--password",
+    "--nt-hash",
+    "--ticket",
     "--ldap-port",
     "--collection-methods",
     "--computers",
@@ -150,6 +154,8 @@ _SENSITIVE_OPTIONS: set[str] = {
     "-p",
     "--password",
     "--machine-pass",
+    "--nt-hash",
+    "--ticket",
 }
 
 
@@ -839,6 +845,8 @@ def collect_sccm(
     domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username", help="DOMAIN\\\\user for explicit auth."),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password for explicit auth."),
+    nt_hash: Optional[str] = typer.Option(None, "--nt-hash", help="NT hash for pass-the-hash auth (bare 32-hex NT hash; LM half assumed empty). Used by AdminService Kerberos (RC4 key) and NTLM."),
+    ticket: Optional[str] = typer.Option(None, "--ticket", help="Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for pass-the-ticket. AdminService Kerberos only; no NTLM fallback."),
     ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389+sign/seal). 636/3269 → LDAPS; any other port → LDAP."),
     # ---- Collection ----
     collection_methods: Optional[str] = typer.Option(
@@ -902,6 +910,8 @@ def collect_sccm(
     try:
         _warn_for_suspicious_cli_arguments()
         flag_kwargs = locals()
+        # The Typer param is `ticket`; the env map keys it as `kerberos_ticket`.
+        flag_kwargs["kerberos_ticket"] = flag_kwargs.pop("ticket", None)
         _apply_env_overrides(flag_kwargs)
         _drop_empty_dlt_env_values()
         _apply_connection_context(flag_kwargs)
@@ -1077,13 +1087,11 @@ def _preproc_table_map() -> dict[str, str]:
         "adminservice_security_roles",
         "adminservice_role_members",
         "adminservice_client_devices",
-        "adminservice_task_sequences",
-        "adminservice_collection_variables",
         "adminservice_site_systems",
         "adminservice_sites",
         "adminservice_site_definitions",
-        "adminservice_r_system_security_groups",
-        "adminservice_r_user_security_groups",
+        "adminservice_r_system",
+        "adminservice_r_user",
         "adminservice_reserved_accounts",
         "wmi_clients",
         "wmi_users_seen",

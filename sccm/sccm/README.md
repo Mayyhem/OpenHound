@@ -197,7 +197,34 @@ uv run openhound collect sccm <output_path> [resources...] [options]
 | `--dc`, `--domain-controller` | DC hostname or IP. If omitted, resolved from the domain via DNS SRV (`_ldap._tcp.dc._msdcs.<domain>`). |
 | `-u`, `--username` | `DOMAIN\user` for explicit authentication. Omit to use the current Windows user (integrated auth). |
 | `-p`, `--password` | Password for explicit authentication. |
+| `--nt-hash` | NT hash for pass-the-hash (bare 32-hex; empty LM half assumed). Used by AdminService Kerberos (as the RC4 key) and NTLM. |
+| `--ticket` | Base64 Kerberos ticket (`.kirbi` / KRB-CRED) for pass-the-ticket. Kerberos only — no NTLM fallback. |
 | `--ldap-port` | Pin the LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389 with sign-and-seal). |
+
+#### Authentication methods (AdminService / HTTP)
+
+The shared HTTP client ([clients/http.py](src/openhound_sccm/clients/http.py)) authenticates to the SCCM AdminService with **Negotiate**, in this precedence:
+
+1. **Explicit credentials win** — `-u` plus one of `-p` / `--nt-hash` / `--ticket`. Kerberos is tried first (a service ticket for `HTTP/<fqdn>`, built from the password, the NT hash as the RC4 key, or the supplied ticket), with an automatic **NTLM fallback** on protocol failure. A bare-IP target skips Kerberos (no SPN can be formed) and uses NTLM directly.
+2. **Current-user Windows SSO** — passwordless SSPI Negotiate, when no credentials are supplied (Windows only).
+3. **Anonymous** — no `Authorization` header. This is what the HTTP role-probe uses, so it can read the unauthenticated `401`/`403` that reveal site-system roles.
+
+PKI / HTTPS-only sites are **detected** (e.g. a `403` on a probe endpoint), not satisfied — OpenHound does not present a client certificate. The KDC reuses `--dc`; there is no separate `--kdc` flag.
+
+```bash
+# Passwordless, as the current domain user (domain-joined collector):
+uv run openhound collect sccm ./out -d mayyhem.com --sms ps1-sms.mayyhem.com
+
+# Pass-the-hash against a specific SMS provider:
+uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
+    --nt-hash 8846f7eaee8fb117ad06bdd830b7586c --sms ps1-sms.mayyhem.com
+
+# Pass-the-ticket (base64 .kirbi):
+uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
+    --ticket "$(base64 -w0 ticket.kirbi)" --sms ps1-sms.mayyhem.com
+```
+
+> **Status:** the auth client is implemented and unit- and live-validated against the lab AdminService. The AdminService and HTTP collection *phases* that drive it are still being ported (see [`--collection-methods`](#collection)), so `--nt-hash` / `--ticket` are wired end-to-end into the client but full collection lands with those phases.
 
 ### Collection
 
@@ -215,8 +242,8 @@ uv run openhound collect sccm <output_path> [resources...] [options]
 |---|---|
 | `All` | Default — enables every phase |
 | `LDAP`, `Local`, `DNS` | ✅ Discovery phases (Stage 1) |
-| `RemoteRegistry`, `MSSQL` | ✅ Per-host phases (Stage 2) |
-| `AdminService`, `WMI`, `HTTP`, `SMB`, `DHCP` | 🚧 Accepted but stubbed / not yet ported |
+| `RemoteRegistry`, `MSSQL`, `AdminService` | ✅ Per-host phases (Stage 2) |
+| `WMI`, `HTTP`, `SMB`, `DHCP` | 🚧 Accepted but stubbed / not yet ported |
 
 ### Behavior
 
@@ -369,7 +396,7 @@ sccm/sccm/
 These standalone scripts validate pieces of the collector against real infrastructure. They are developer tools, not part of the CLI:
 
 - **`debug_epa_matrix.py`** — flips the SQL Server EPA-related registry settings through all 12 combinations, restarts the service, and verifies the EPA detector reports the right enforcement for each. Modifies a live lab SQL Server — see the in-script warning.
-- **`debug_per_host.py`** — exercises the per-host pipeline (ordering, concurrency, recursion, termination) with stub phases.
+- **`debug_per_host.py`** — exercises the per-host pipeline (ordering, concurrency, recursion, termination) with stub phases. Set `COLLECTION_METHODS` to run only specific collectors (mirrors the `-m`/`--collection-methods` flag).
 - **`spike_smb_sso.py`** — validates the SMB SSPI Negotiate session-setup path.
 
 ### Project standards

@@ -127,13 +127,13 @@ def _build_computer_sccm_infra(con: duckdb.DuckDBPyConnection, schema: str) -> N
             f"SELECT CAST(NULL AS VARCHAR) AS hostname_low, CAST(NULL AS VARCHAR) AS hostname_short, LOWER(object_sid) AS object_sid "
             f"FROM {schema}.ldap_sms_providers WHERE object_sid IS NOT NULL AND object_sid <> ''"
         )
-    if _table_exists(con, schema, "adminservice_r_system_security_groups") and _column_exists(
-        con, schema, "adminservice_r_system_security_groups", "machine_name"
+    if _table_exists(con, schema, "adminservice_r_system") and _column_exists(
+        con, schema, "adminservice_r_system", "machine_name"
     ):
         # SMS_R_System matches on short hostname (no FQDN), so hostname_low is NULL.
         parts.append(
             f"SELECT CAST(NULL AS VARCHAR) AS hostname_low, LOWER(machine_name) AS hostname_short, CAST(NULL AS VARCHAR) AS object_sid "
-            f"FROM {schema}.adminservice_r_system_security_groups "
+            f"FROM {schema}.adminservice_r_system "
             f"WHERE machine_name IS NOT NULL AND machine_name <> ''"
         )
     if not parts:

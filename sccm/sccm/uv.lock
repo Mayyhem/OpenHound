@@ -1555,6 +1555,7 @@ dependencies = [
     { name = "ldap3" },
     { name = "openhound-collector-utils" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "requests" },
     { name = "winkerberos", marker = "sys_platform == 'win32'" },
 ]
 
@@ -1575,6 +1576,7 @@ requires-dist = [
     { name = "ldap3", specifier = ">=2.10.2rc4" },
     { name = "openhound-collector-utils", editable = "../../collector-utils" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "winkerberos", marker = "sys_platform == 'win32'", specifier = ">=0.10.0" },
 ]
 

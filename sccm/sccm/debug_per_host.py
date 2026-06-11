@@ -16,6 +16,12 @@ Stepping tips
   discovered host get collected, add it to COMPUTERS too. Leaving COMPUTERS
   empty reproduces a CLI run with no --computers (allow-all), but with no seeds
   the pipeline then has nothing to collect.
+* COLLECTION_METHODS mirrors the CLI's -m/--collection-methods flag: a
+  comma-separated list of phase names to run (RemoteRegistry, MSSQL,
+  AdminService). "All" (the default) runs every phase. Set it to e.g.
+  "AdminService" to step through just one collector — gated-off phases are
+  skipped via the same ctx.method_enabled(phase.name) gate the full run uses,
+  and their tables report 0 rows below.
 * Set MAXSIZE = 1 to watch backpressure (producers block on put until drained).
   With MAX_WORKERS >= number of tables this still completes; lower it to see a
   stall (that's the dlt-worker-count constraint, here simulated with raw streams).
@@ -37,7 +43,7 @@ from openhound_sccm.source import _expand_allowed_targets
 # [target][phase] prefix filter. Reusing the framework handler (rather than adding
 # a second one) is what avoids the duplicate / version-suffixed lines.
 # (Pass debug=True for the DEBUG tier with dlt / ldap3 internals.)
-_apply_log_level(verbose=2, debug=False)
+_apply_log_level(verbose=2, debug=True)
 
 # Fallback: when no console handler is present (e.g. output redirected with no
 # TTY, so the framework attached only a file handler), add one so the harness
@@ -57,9 +63,11 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
         _root.setLevel(VERBOSE)
     install_filter()
 
-MAX_WORKERS = 1                 # 1 = easy stepping; 10 = real concurrency
-MAXSIZE = 1000                  # 1 = watch backpressure
-COMPUTERS = ["ps1-db.mayyhem.com"]   # mirrors --computers: each entry is both a seed AND the allow-list
+MAX_WORKERS = 1                         # 1 = easy stepping; 10 = real concurrency
+MAXSIZE = 1000                          # 1 = watch backpressure
+COMPUTERS = ["ps1-sms.mayyhem.com"]     # mirrors --computers: each entry is both a seed AND the allow-list
+COLLECTION_METHODS = "AdminService"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService); "All" runs every phase
+PRINT_ROWS = 0                          # rows to dump per table (0 = counts only); set to None to print all
 
 # Derive the domain from the current Windows user (USERDNSDOMAIN), the same way
 # the CLI does. We skip the CLI's DNS-SRV domain-controller lookup (it calls
@@ -94,7 +102,7 @@ def main() -> None:
         username=username,
         password=password,
         work_queue=wq,
-        collection_methods="All",
+        collection_methods=COLLECTION_METHODS,
         allowed_targets=frozenset(allowed),
     )
 
@@ -114,7 +122,13 @@ def main() -> None:
     for host in COMPUTERS:
         ctx.register_target(host, source="CLI")
 
+    # Build streams for every phase's tables (like the CLI), regardless of
+    # COLLECTION_METHODS. Gated-off phases simply never write, so their tables
+    # report 0 rows in the results section below — that's the same shape the CLI
+    # produces when -m excludes a method.
     streams = build_streams(all_table_names(PER_HOST_PHASES), maxsize=MAXSIZE)
+
+    logging.getLogger(__name__).info("per-host phases gated by COLLECTION_METHODS=%s", COLLECTION_METHODS)
 
     # [BP] step into run_pipeline: dispatcher pulls from wq.next(), submits workers;
     # each worker runs run_one_target(host) -> phases in order; the HTTP stub calls
@@ -122,9 +136,13 @@ def main() -> None:
     # wq.next() returns None, the loop breaks, and broadcast_done closes the streams.
     # phase_scope tags each phase's log lines with [target][phase], exactly like
     # the main collector (_run_per_host_stage passes the same _build_phase_scope()).
+    # should_run is the CLI's exact phase gate (main.py _run_per_host_stage): each
+    # phase runs only when ctx.method_enabled(phase.name) is true, so COLLECTION_METHODS
+    # filters phases here precisely as -m/--collection-methods does in the full run.
     run_pipeline(
         wq, ctx, PER_HOST_PHASES, streams,
         max_workers=MAX_WORKERS,
+        should_run=lambda target, phase, c: c.method_enabled(phase.name),
         phase_scope=_build_phase_scope(),
     )
 
@@ -137,8 +155,20 @@ def main() -> None:
             if item is DONE:
                 break
             rows.append(item)
-        hosts = sorted({r.get("host") or r.get("name") for r in rows})
-        print(f"{table:32} {len(rows):3d} rows  hosts={hosts}")
+        # Print the table title with its row count. By default (PRINT_ROWS = 0)
+        # that's all — the per-row dump is too noisy. Set PRINT_ROWS = N to dump
+        # the first N rows beneath it, one row per indented line, each truncated
+        # to 150 chars; set PRINT_ROWS = None to dump every row in full (no row
+        # cap, no per-line truncation).
+        print(f"{table:32} {len(rows):3d} rows")
+        shown = rows if PRINT_ROWS is None else rows[:PRINT_ROWS]
+        for i, row in enumerate(shown):
+            text = repr(row)
+            if PRINT_ROWS is not None and len(text) > 150:
+                text = text[:150] + "..."
+            print(f"    row {i}: {text}")
+        if shown and len(shown) < len(rows):
+            print(f"    ... {len(rows) - len(shown)} more rows (set PRINT_ROWS = None to show all)")
 
 
 if __name__ == "__main__":
