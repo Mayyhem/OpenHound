@@ -13,6 +13,9 @@ from typing import Sequence
 from .collectors import registry, mssql, adminservice, wmi
 from .phased_pipeline import Phase
 
+import logging
+logger = logging.getLogger(__name__)
+
 PER_HOST_PHASES: tuple[Phase, ...] = (
     Phase(
         "RemoteRegistry",(
@@ -72,7 +75,7 @@ def should_run_phase(target: str, phase: Phase, ctx) -> bool:
     """Engine ``should_run`` hook: method gating plus the WMI-is-a-fallback rule.
 
     WMI mirrors AdminService over DCOM, so it only earns its keep when
-    AdminService could not reach this host. Skip it once AdminService has
+    AdminService could not be reached on this host. Skip it once AdminService has
     completed here (recorded on the shared ``TargetEntry.completed_phases``).
     This is the pipeline-native place for the gate — the same hook that already
     enforces ``--collection-methods`` — so the collector stays a plain
@@ -83,5 +86,6 @@ def should_run_phase(target: str, phase: Phase, ctx) -> bool:
     if phase.name == "WMI":
         entry = ctx.target_hosts_by_hostname.get(target.lower())
         if entry is not None and "AdminService" in entry.completed_phases:
+            logger.info("[%s][%s] Skipping WMI phase because AdminService already completed", target, phase.name)
             return False
     return True

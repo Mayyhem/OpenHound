@@ -662,6 +662,12 @@ class ADClient:
             "auto_bind": AUTO_BIND_TLS_BEFORE_BIND if attempt.start_tls else AUTO_BIND_NO_TLS,
             "read_only": True,
             "receive_timeout": 30,
+            # Never chase referrals. A subtree search at the domain root (or a
+            # bad base) makes AD return referrals/continuation references to
+            # other partitions; ldap3 would open new connections to follow them
+            # and die with "invalid server address" when the referral host
+            # isn't reachable. Enumeration only wants this DC's own data.
+            "auto_referrals": False,
         }
         if attempt.auth_mode == "sspi_ntlm":
             return self._open_current_user_ntlm_connection(server=server, attempt=attempt)
@@ -716,6 +722,8 @@ class ADClient:
             authentication=NTLM,
             read_only=True,
             receive_timeout=30,
+            # See _open_connection: don't chase referrals into unreachable servers.
+            auto_referrals=False,
             session_security=ENCRYPT if attempt.session_security else None,
         )
         conn.open(read_server_info=False)

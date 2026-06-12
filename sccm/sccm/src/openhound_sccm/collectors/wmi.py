@@ -3,7 +3,7 @@
 Mirrors ``collectors/adminservice.py`` one-to-one — the same ten collections in
 the same order — but reads the SMS Provider's ``root\\SMS\\site_<code>`` WMI
 namespace over DCOM/WMI (``clients/wmi.WmiClient``) instead of the AdminService
-REST API. It runs only when AdminService could not reach the host; the engine's
+REST API. It runs only when AdminService could not be reached on the host; the engine's
 ``per_host_phases.should_run_phase`` enforces that via ``TargetEntry.completed_phases``.
 
 Row shaping is identical to AdminService: the shared ``sms_rows`` atoms snake-case

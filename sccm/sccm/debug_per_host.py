@@ -18,10 +18,18 @@ Stepping tips
   the pipeline then has nothing to collect.
 * COLLECTION_METHODS mirrors the CLI's -m/--collection-methods flag: a
   comma-separated list of phase names to run (RemoteRegistry, MSSQL,
-  AdminService). "All" (the default) runs every phase. Set it to e.g.
+  AdminService, WMI). "All" (the default) runs every phase. Set it to e.g.
   "AdminService" to step through just one collector — gated-off phases are
   skipped via the same ctx.method_enabled(phase.name) gate the full run uses,
   and their tables report 0 rows below.
+* WMI is the AdminService fallback. To step through the skip, keep AdminService
+  enabled so it completes (e.g. COLLECTION_METHODS = "AdminService,WMI"), put a
+  breakpoint in per_host_phases.should_run_phase, and run against a reachable
+  SMS Provider: AdminService records "AdminService" in the host's
+  TargetEntry.completed_phases (collect_adminservice, right after
+  _identification() succeeds), so should_run_phase returns False for the WMI
+  phase and collect_wmi never runs. Set COLLECTION_METHODS = "WMI" alone for the
+  opposite case — AdminService never runs, so WMI runs as the fallback.
 * Set MAXSIZE = 1 to watch backpressure (producers block on put until drained).
   With MAX_WORKERS >= number of tables this still completes; lower it to see a
   stall (that's the dlt-worker-count constraint, here simulated with raw streams).
@@ -33,7 +41,7 @@ from openhound_sccm.clients.ad import ADClient, ADCredentials
 from openhound_sccm.context import SourceContext
 from openhound_sccm.log_context import VERBOSE, install_filter
 from openhound_sccm.main import _apply_log_level, _build_phase_scope, _detect_windows_domain
-from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names
+from openhound_sccm.per_host_phases import PER_HOST_PHASES, all_table_names, should_run_phase
 from openhound_sccm.phased_pipeline import DONE, WorkQueue, build_streams, run_pipeline
 from openhound_sccm.source import _expand_allowed_targets
 
@@ -66,7 +74,7 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
 MAX_WORKERS = 1                         # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                          # 1 = watch backpressure
 COMPUTERS = ["ps1-sms.mayyhem.com"]     # mirrors --computers: each entry is both a seed AND the allow-list
-COLLECTION_METHODS = "All"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService); "All" runs every phase
+COLLECTION_METHODS = "All"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService, WMI); "All" runs every phase. Use "AdminService,WMI" to step the WMI fallback skip.
 PRINT_ROWS = 0                          # rows to dump per table (0 = counts only); set to None to print all
 
 # Derive the domain from the current Windows user (USERDNSDOMAIN), the same way
@@ -136,13 +144,22 @@ def main() -> None:
     # wq.next() returns None, the loop breaks, and broadcast_done closes the streams.
     # phase_scope tags each phase's log lines with [target][phase], exactly like
     # the main collector (_run_per_host_stage passes the same _build_phase_scope()).
-    # should_run is the CLI's exact phase gate (main.py _run_per_host_stage): each
-    # phase runs only when ctx.method_enabled(phase.name) is true, so COLLECTION_METHODS
-    # filters phases here precisely as -m/--collection-methods does in the full run.
+    # should_run is the CLI's exact phase gate: per_host_phases.should_run_phase
+    # applies ctx.method_enabled(phase.name) (so COLLECTION_METHODS filters phases
+    # like -m/--collection-methods) AND the WMI-is-a-fallback rule.
+    #
+    # [BP] Set a breakpoint in per_host_phases.should_run_phase to watch the WMI
+    # skip: when the WMI phase is evaluated for a host whose AdminService phase
+    # already completed, entry.completed_phases contains "AdminService", so it
+    # returns False and the WMI collector never runs. AdminService records that in
+    # collect_adminservice right after _identification() succeeds. (Keep
+    # AdminService enabled — e.g. COLLECTION_METHODS = "AdminService,WMI" — so it
+    # completes; set COLLECTION_METHODS = "WMI" alone to see the opposite, where
+    # AdminService never runs and WMI runs as the fallback.)
     run_pipeline(
         wq, ctx, PER_HOST_PHASES, streams,
         max_workers=MAX_WORKERS,
-        should_run=lambda target, phase, c: c.method_enabled(phase.name),
+        should_run=should_run_phase,
         phase_scope=_build_phase_scope(),
     )
 

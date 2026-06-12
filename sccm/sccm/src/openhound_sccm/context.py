@@ -210,6 +210,19 @@ class SourceContext:
     def _ldap_resolve(self, name: str, domain: str) -> Optional[dict]:
         """Fire a single paged_search for name within the given domain's base DN."""
         from ldap3.utils.conv import escape_filter_chars
+        # A NetBIOS / single-label domain (e.g. "MAYYHEM") can't form a valid LDAP
+        # naming context: "DC=MAYYHEM" doesn't exist, so AD answers with a referral
+        # that ldap3 chases into "invalid server address". Skip it and let the
+        # caller fall through to the FQDN domain in the try-list. This is why only
+        # NetBIOS-prefixed principals (NAA, sccm_push) ever hit the crash.
+        if "." not in domain:
+            logger.debug(
+                "Skipping LDAP resolve of %r: single-label domain %r has no valid "
+                "naming context; deferring to an FQDN domain",
+                name,
+                domain,
+            )
+            return None
         safe = escape_filter_chars(name.rstrip("$"))
         ldap_filter = (
             f"(|(cn={safe})(sAMAccountName={safe})(sAMAccountName={safe}$)"
