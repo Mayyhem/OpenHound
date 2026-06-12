@@ -10,7 +10,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 >
 > This port is **mid-migration**. The collection side is broad, but the graph-emission side is just getting started. As of today:
 >
-> - **`collect`** runs LDAP / Local / DNS **discovery** plus two real **per-host** phases (**RemoteRegistry** and **MSSQL** EPA detection). The remaining per-host phases (AdminService, WMI, HTTP, SMB, DHCP) are accepted on the command line but are still **stubs**.
+> - **`collect`** runs LDAP / Local / DNS **discovery** plus four real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, and **WMI** (the AdminService fallback). AdminService and WMI are **collect-only** (raw `adminservice_*` / `wmi_*` tables; graph conversion is a later phase). **HTTP / SMB / DHCP** are accepted on the command line but not yet ported.
 > - **`convert`** emits exactly **one** node kind today — [`SCCM_Site`](#node-reference) — and **no edges**. The derived-edge tables are already computed during `preprocess`, but the convert-time consumers that would turn them into graph edges haven't been wired up yet.
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
@@ -137,7 +137,9 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 |---|---|---|
 | **RemoteRegistry** ([collectors/registry.py](src/openhound_sccm/collectors/registry.py)) | Binds the remote registry over SMB (impacket `rrp`) to read SCCM keys under `HKLM\SOFTWARE\Microsoft\SMS` — site codes, component servers/roles, current users, and SQL/MSSQL settings. Retries the initial bind to absorb the RemoteRegistry trigger-start race. | ✅ Implemented |
 | **MSSQL** ([collectors/mssql.py](src/openhound_sccm/collectors/mssql.py)) | Connects to the host's SQL Server (TCP/1433) and probes its **Extended Protection for Authentication (EPA)** enforcement using [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py). | ✅ Implemented |
-| **AdminService / WMI / HTTP / SMB / DHCP** | Accepted as `--collection-methods` tokens, but the per-host collectors are still **stubs** ([collectors/stubs.py](src/openhound_sccm/collectors/stubs.py)) pending per-phase follow-up work. | 🚧 Stub / not yet ported |
+| **AdminService** ([collectors/adminservice.py](src/openhound_sccm/collectors/adminservice.py)) | Queries the SCCM AdminService REST API (`https://<provider>/AdminService/wmi/...`) over Negotiate and collects the site hierarchy, site definitions, reserved accounts, devices, users, collections, security roles, admins, and site-system roles into raw `adminservice_*` tables. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
+| **WMI** ([collectors/wmi.py](src/openhound_sccm/collectors/wmi.py)) | **Fallback for AdminService.** When AdminService is unreachable on a host, queries the *same* SMS Provider classes directly in the `root\SMS\site_<code>` WMI namespace (over DCOM via impacket, or pywin32 for the current Windows user) and writes the mirrored `wmi_*` tables. Runs only on hosts AdminService did **not** already collect — gated by `should_run_phase` reading `TargetEntry.completed_phases`. | ✅ Implemented (collect-only) |
+| **HTTP / SMB / DHCP** | Accepted as `--collection-methods` tokens, but the per-host collectors are not yet ported. | 🚧 Not yet ported |
 
 ---
 
@@ -171,7 +173,7 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 # Limitations
 
 - **Graph output is minimal today.** `convert` emits only the [`SCCM_Site`](#node-reference) node and **no edges**. See the [WIP banner](#-work-in-progress) and the [Edge Reference](#edge-reference).
-- **Most per-host phases are stubs.** Only RemoteRegistry and MSSQL collect real data; AdminService/WMI/HTTP/SMB/DHCP are placeholders.
+- **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, and WMI collect real data (AdminService/WMI are collect-only — raw tables, no graph yet); HTTP/SMB/DHCP are placeholders.
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
@@ -201,7 +203,7 @@ uv run openhound collect sccm <output_path> [resources...] [options]
 | `--ticket` | Base64 Kerberos ticket (`.kirbi` / KRB-CRED) for pass-the-ticket. Kerberos only — no NTLM fallback. |
 | `--ldap-port` | Pin the LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389 with sign-and-seal). |
 
-#### Authentication methods (AdminService / HTTP)
+#### Authentication methods (AdminService / WMI / HTTP)
 
 The shared HTTP client ([clients/http.py](src/openhound_sccm/clients/http.py)) authenticates to the SCCM AdminService with **Negotiate**, in this precedence:
 
@@ -210,6 +212,8 @@ The shared HTTP client ([clients/http.py](src/openhound_sccm/clients/http.py)) a
 3. **Anonymous** — no `Authorization` header. This is what the HTTP role-probe uses, so it can read the unauthenticated `401`/`403` that reveal site-system roles.
 
 PKI / HTTPS-only sites are **detected** (e.g. a `403` on a probe endpoint), not satisfied — OpenHound does not present a client certificate. The KDC reuses `--dc`; there is no separate `--kdc` flag.
+
+The **WMI fallback** ([clients/wmi.py](src/openhound_sccm/clients/wmi.py)) reuses this *exact* credential precedence (`choose_auth`), but realizes each rung over a WMI transport: pass-the-ticket / Kerberos / NTLM (incl. pass-the-hash) over **DCOM** via impacket, current-user **SSPI** via pywin32, and it skips the anonymous rung (DCOM always requires authentication). So `-u`/`-p`/`--nt-hash`/`--ticket` and passwordless current-user collection all work identically whether a host answers over AdminService or only over WMI.
 
 ```bash
 # Passwordless, as the current domain user (domain-joined collector):
@@ -224,7 +228,7 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
     --ticket "$(base64 -w0 ticket.kirbi)" --sms ps1-sms.mayyhem.com
 ```
 
-> **Status:** the auth client is implemented and unit- and live-validated against the lab AdminService. The AdminService and HTTP collection *phases* that drive it are still being ported (see [`--collection-methods`](#collection)), so `--nt-hash` / `--ticket` are wired end-to-end into the client but full collection lands with those phases.
+> **Status:** the auth client is implemented and unit- and live-validated against the lab AdminService. The **AdminService** and **WMI** per-host phases are implemented (collect-only); the **HTTP** collection phase is still being ported (see [`--collection-methods`](#collection)).
 
 ### Collection
 
@@ -233,7 +237,7 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 | `-m`, `--collection-methods` | Comma-separated methods (see the table below). Default `All`. |
 | `-c`, `--computers` | Comma-separated computer targets. |
 | `--cf`, `--computer-file` | Path to a file of computer targets, one per line. |
-| `--sms`, `--sms-provider` | A specific SMS Provider host *(consumed by the not-yet-ported AdminService/WMI phases)*. |
+| `--sms`, `--sms-provider` | A specific SMS Provider host *(consumed by the AdminService / WMI phases)*. |
 | `--sc`, `--site-codes` | Site codes for DNS collection (CSV or file path). |
 
 **`--collection-methods` tokens** (case-insensitive; matched in [context.py](src/openhound_sccm/context.py)):
@@ -242,8 +246,8 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 |---|---|
 | `All` | Default — enables every phase |
 | `LDAP`, `Local`, `DNS` | ✅ Discovery phases (Stage 1) |
-| `RemoteRegistry`, `MSSQL`, `AdminService` | ✅ Per-host phases (Stage 2) |
-| `WMI`, `HTTP`, `SMB`, `DHCP` | 🚧 Accepted but stubbed / not yet ported |
+| `RemoteRegistry`, `MSSQL`, `AdminService`, `WMI` | ✅ Per-host phases (Stage 2). `WMI` is the AdminService fallback — it runs on a host only when AdminService could not reach it. |
+| `HTTP`, `SMB`, `DHCP` | 🚧 Accepted but not yet ported |
 
 ### Behavior
 

@@ -3,35 +3,43 @@
 Ports ConfigManBearPig.ps1's Invoke-AdminServiceCollection: queries the SCCM
 AdminService REST API over Negotiate (the shared HttpClient) and yields raw
 JSONL rows. No AD resolution or graph building — that is a deferred convert
-stage. Collection order matches the PS1 exactly; the two collections the PS1
-does not gather (collection variables, task sequences) are appended last.
+stage. Collection order matches the PS1 exactly.
 """
 import json
 import logging
-import re
 from typing import Any, Iterable, Iterator, Optional
 
 from ..clients.http import ErrorClass, HttpClient
 from ..clients.http_auth import AuthMode
 from ..context import SourceContext
 from ..log_context import with_log_context
+from .sms_rows import (
+    _prop,
+    _row,
+    odata_select,
+    ADMIN_COLUMNS,
+    COLLECTION_COLUMNS,
+    COLLECTION_MEMBER_COLUMNS,
+    DEVICE_COLUMNS,
+    ROLE_COLUMNS,
+    RSYSTEM_COLUMNS,
+    RUSER_COLUMNS,
+    SITE_COLUMNS,
+    SITEDEF_COLUMNS,
+    SYSRES_COLUMNS,
+)
 
 logger = logging.getLogger(__name__)
 
 _BATCH = 1000
 
-# Acronym-aware camelCase/PascalCase -> snake_case (AADDeviceID -> aad_device_id).
-_SNAKE_1 = re.compile(r"([A-Z]+)([A-Z][a-z])")
-_SNAKE_2 = re.compile(r"([a-z0-9])([A-Z])")
-
-
-def _snake(name: str) -> str:
-    return _SNAKE_2.sub(r"\1_\2", _SNAKE_1.sub(r"\1_\2", name)).lower()
-
 
 def _get_value(client, path: str) -> Optional[list]:
     """GET an AdminService path; return its JSON ``value`` list, or None on failure."""
     result = client.get(path)
+    if result.error_class is ErrorClass.CONNECT_FAILURE:
+        logger.verbose("AdminService GET %s failed to connect: %s", path, result.error_message)
+        return None
     if result.error_class is not ErrorClass.RESPONSE:
         logger.warning("AdminService GET %s failed: %s", path, result.error_class.value)
         return None
@@ -65,36 +73,6 @@ def _paginate(client, path: str) -> Iterator[dict]:
         skip += _BATCH
 
 
-def _prop(props: Optional[list], name: str, field: str = "Value1") -> Any:
-    """Return one SMS Props value (by PropertyName), or None."""
-    for p in props or []:
-        if p.get("PropertyName") == name:
-            return p.get(field)
-    return None
-
-
-def _row(source: str, site_code: Optional[str], obj: dict, *,
-         keep: Optional[set] = None, drop: Optional[set] = None,
-         extra: Optional[dict] = None) -> dict:
-    """Build a raw row: snake-cased API fields + source + source_site_code.
-
-    ``keep`` (original field names) whitelists columns for no-$select endpoints;
-    ``drop`` excludes flattened blobs (e.g. Props); ``extra`` adds derived values.
-    OData metadata keys (``@...``) are always dropped.
-    """
-    row: dict[str, Any] = {"source": source, "source_site_code": site_code}
-    drop = drop or set()
-    for k, v in obj.items():
-        if k.startswith("@") or k in drop:
-            continue
-        if keep is not None and k not in keep:
-            continue
-        row[_snake(k)] = v
-    if extra:
-        row.update(extra)
-    return row
-
-
 def _identification(client) -> Optional[str]:
     """Gate: this SMS provider's site code, or None if not a reachable provider."""
     path = "AdminService/wmi/SMS_Identification?$select=ThisSiteCode,ThisSiteName"
@@ -112,38 +90,11 @@ def _identification(client) -> Optional[str]:
     return site_code
 
 
-# --- $select / keep column sets -------------------------------------------
-
-_SITE_SELECT = ("$select=BuildNumber,InstallDir,ReportingSiteCode,ServerName,"
-                "SiteCode,SiteName,Status,Type,Version")
-_SITEDEF_SELECT = ("$select=ParentSiteCode,SiteCode,SiteName,SiteServerDomain,"
-                   "SiteServerName,SiteType,SQLDatabaseName,SQLServerName,Props")
-_DEVICE_SELECT = ("$select=AADDeviceID,AADTenantID,ADLastLogonTime,CNAccessMP,CNLastOfflineTime,"
-                  "CNLastOnlineTime,CoManaged,CurrentLogonUser,DeviceOS,DeviceOSBuild,IsClient,"
-                  "IsObsolete,IsVirtualMachine,LastActiveTime,LastMPServerName,Name,PrimaryUser,"
-                  "ResourceID,SiteCode,SMSID,UserName,UserDomainName")
-_RSYSTEM_SELECT = "$select=Client,Name,Obsolete,ResourceID,SID,SMSUniqueIdentifier,SecurityGroupName,SystemRoles"
-_RUSER_SELECT = ("$select=AADTenantID,AADUserID,DistinguishedName,FullDomainName,FullUserName,Name,"
-                 "ResourceID,SecurityGroupName,SID,UniqueUserName,UserName,UserPrincipalName")
-_COLLECTION_SELECT = ("$select=CollectionID,CollectionType,CollectionVariablesCount,Comment,"
-                      "IsBuiltIn,LastChangeTime,LastMemberChangeTime,LimitToCollectionID,"
-                      "LimitToCollectionName,MemberCount,Name")
-# SMS_Role / SMS_Admin / SMS_SCI_SysResUse reject $select on lazy
-# columns, so fetch all columns and whitelist the ones we want.
-_ROLE_KEEP = {"CopiedFromID", "CreatedBy", "CreatedDate", "IsBuiltIn", "IsSecAdminRole",
-              "LastModifiedBy", "LastModifiedDate", "NumberOfAdmins", "Operations", "RoleID",
-              "RoleName", "RoleDescription", "SourceSite"}
-_ADMIN_KEEP = {"AccountType", "AdminID", "AdminSid", "CategoryNames", "CollectionNames", "CreatedBy",
-               "CreatedDate", "DisplayName", "DistinguishedName", "IsGroup", "LastModifiedBy",
-               "LastModifiedDate", "LogonName", "RoleNames", "Roles", "SourceSite"}
-_SYSRES_KEEP = {"NetworkOSPath", "SiteCode", "RoleName", "Type"}
-
-
 # --- collection helpers (PS1 order) ---------------------------------------
 
 def _sites(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Site"
-    query = f"?{_SITE_SELECT}"
+    query = f"?{odata_select(SITE_COLUMNS)}"
     logger.verbose("Collecting all sites from %s", path)
     value = _get_value(client, path + query)
     if value is None:
@@ -163,7 +114,7 @@ def _sites(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, di
 
 def _site_definition(client, target_site: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_SCI_SiteDefinition"
-    query = f"?$filter=SiteCode eq '{target_site}'&{_SITEDEF_SELECT}"
+    query = f"?$filter=SiteCode eq '{target_site}'&{odata_select(SITEDEF_COLUMNS)}"
     logger.verbose("Collecting site definition for site %s from %s", target_site, path)
     value = _get_value(client, path + query)
     if not value:
@@ -251,7 +202,7 @@ def _reserved_accounts(client, site_code: str, ctx: SourceContext) -> Iterator[t
 
 def _client_devices(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_CombinedDeviceResources"
-    query = f"?{_DEVICE_SELECT}"
+    query = f"?{odata_select(DEVICE_COLUMNS)}"
     logger.verbose("Collecting client devices from %s", path)
     count = 0
     for device in _paginate(client, path + query):
@@ -270,7 +221,7 @@ def _client_devices(client, site_code: str, ctx: SourceContext) -> Iterator[tupl
 
 def _r_system(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_R_System"
-    query = f"?{_RSYSTEM_SELECT}"
+    query = f"?{odata_select(RSYSTEM_COLUMNS)}"
     logger.verbose("Collecting systems and groups from %s", path)
     count = 0
     for system in _paginate(client, path + query):
@@ -284,7 +235,7 @@ def _r_system(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str,
 
 def _r_user(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_R_User"
-    query = f"?{_RUSER_SELECT}"
+    query = f"?{odata_select(RUSER_COLUMNS)}"
     logger.verbose("Collecting users and groups from %s", path)
     count = 0
     for user in _paginate(client, path + query):
@@ -298,7 +249,7 @@ def _r_user(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, d
 
 def _collections(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_Collection"
-    query = f"?{_COLLECTION_SELECT}"
+    query = f"?{odata_select(COLLECTION_COLUMNS)}"
     logger.verbose("Collecting device and user collections from %s", path)
     count = 0
     for collection in _paginate(client, path + query):
@@ -311,7 +262,7 @@ def _collections(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[s
 
 def _collection_members(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, dict]]:
     path = "/AdminService/wmi/SMS_FullCollectionMembership"
-    query = "?$select=CollectionID,ResourceID,SiteCode"
+    query = f"?{odata_select(COLLECTION_MEMBER_COLUMNS)}"
     logger.verbose("Collecting collection memberships from %s", path)
     count = 0
     for member in _paginate(client, path + query):
@@ -328,10 +279,10 @@ def _security_roles(client, site_code: str, ctx: SourceContext) -> Iterator[tupl
     count = 0
     for role in _paginate(client, path):
         # Only include _KEEP fields in debug logs
-        logger.debug("Found security role: %s", {k: v for k, v in role.items() if k in _ROLE_KEEP or k.startswith("@")})
+        logger.debug("Found security role: %s", {k: v for k, v in role.items() if k in ROLE_COLUMNS or k.startswith("@")})
         count += 1
         yield "adminservice_security_roles", _row(
-            "AdminService-SMS_Role", site_code, role, keep=_ROLE_KEEP)
+            "AdminService-SMS_Role", site_code, role, keep=ROLE_COLUMNS)
     logger.info("Collected %d security roles", count)
 
 
@@ -341,10 +292,10 @@ def _admins(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[str, d
     count = 0
     for admin in _paginate(client, path):
         # Only include _KEEP fields in debug logs
-        logger.debug("Found admin user/group: %s", {k: v for k, v in admin.items() if k in _ADMIN_KEEP or k.startswith("@")})
+        logger.debug("Found admin user/group: %s", {k: v for k, v in admin.items() if k in ADMIN_COLUMNS or k.startswith("@")})
         count += 1
         yield "adminservice_admins", _row(
-            "AdminService-SMS_Admin", site_code, admin, keep=_ADMIN_KEEP)
+            "AdminService-SMS_Admin", site_code, admin, keep=ADMIN_COLUMNS)
     logger.info("Collected %d admin users and groups", count)
 
 
@@ -355,10 +306,10 @@ def _site_systems(client, site_code: str, ctx: SourceContext) -> Iterator[tuple[
     for system in _paginate(client, path):
         props = system.get("Props")
         # Only include _KEEP fields in debug logs to avoid logging encrypted cert fields
-        logger.debug("Found site system role: %s", {k: v for k, v in system.items() if k in _SYSRES_KEEP or k.startswith("@")})
+        logger.debug("Found site system role: %s", {k: v for k, v in system.items() if k in SYSRES_COLUMNS or k.startswith("@")})
         count += 1
         yield "adminservice_site_systems", _row(
-            "AdminService-SMS_SCI_SysResUse", site_code, system, keep=_SYSRES_KEEP,
+            "AdminService-SMS_SCI_SysResUse", site_code, system, keep=SYSRES_COLUMNS,
             extra={"sql_server_service_logon_account":
                    _prop(props, "SQL Server Service Logon Account", "Value2")},
         )
@@ -395,6 +346,15 @@ def collect_adminservice(target: str, ctx: SourceContext) -> Iterable[tuple[str,
         if site_code is None:
             logger.info("%s is not a reachable AdminService provider; skipping", target)
             return
+        # Reached the SMS Provider: mark this host collected via AdminService so the
+        # WMI fallback phase (should_run_phase) skips it. Mirrors PS1 setting
+        # CollectionTargets[$target]["Collected"]/["Method"] after identification.
+        entry = ctx.target_hosts_by_hostname.get(target.lower())
+        if entry is not None:
+            entry.completed_phases.add("AdminService")
+            logger.verbose("Marked AdminService complete on %s (site %s)", target, site_code)
+        else:
+            logger.debug("No TargetEntry for %s; WMI-fallback gating unavailable", target)
         for collection in _COLLECTIONS:
             try:
                 yield from collection(client, site_code, ctx)

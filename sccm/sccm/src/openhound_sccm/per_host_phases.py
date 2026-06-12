@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .collectors import registry, mssql, adminservice
+from .collectors import registry, mssql, adminservice, wmi
 from .phased_pipeline import Phase
 
 PER_HOST_PHASES: tuple[Phase, ...] = (
@@ -43,8 +43,45 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
             "adminservice_site_systems",
         ), adminservice.collect_adminservice,
     ),
+    # WMI mirrors AdminService over DCOM and runs only when AdminService could
+    # not reach the host (see should_run_phase). Same collections, same order.
+    Phase(
+        "WMI", (
+            "wmi_sites",
+            "wmi_site_definitions",
+            "wmi_site_definitions_computers",
+            "wmi_reserved_accounts",
+            "wmi_client_devices",
+            "wmi_r_system",
+            "wmi_r_user",
+            "wmi_collections",
+            "wmi_collection_members",
+            "wmi_security_roles",
+            "wmi_admins",
+            "wmi_site_systems",
+        ), wmi.collect_wmi,
+    ),
 )
 
 def all_table_names(phases: Sequence[Phase]) -> list[str]:
     """Every table the phases may write, de-duplicated, in declaration order."""
     return list(dict.fromkeys(table for phase in phases for table in phase.streams))
+
+
+def should_run_phase(target: str, phase: Phase, ctx) -> bool:
+    """Engine ``should_run`` hook: method gating plus the WMI-is-a-fallback rule.
+
+    WMI mirrors AdminService over DCOM, so it only earns its keep when
+    AdminService could not reach this host. Skip it once AdminService has
+    completed here (recorded on the shared ``TargetEntry.completed_phases``).
+    This is the pipeline-native place for the gate — the same hook that already
+    enforces ``--collection-methods`` — so the collector stays a plain
+    "collect everything" function.
+    """
+    if not ctx.method_enabled(phase.name):
+        return False
+    if phase.name == "WMI":
+        entry = ctx.target_hosts_by_hostname.get(target.lower())
+        if entry is not None and "AdminService" in entry.completed_phases:
+            return False
+    return True

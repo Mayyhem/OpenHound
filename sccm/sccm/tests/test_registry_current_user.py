@@ -51,6 +51,14 @@ class FakeProbe:
     def read_values(self, key_path):
         return self._read_values_result
 
+    def read_dword(self, key_path, value_name):
+        # NTLM/MSSQL settings are not under test here; return None so
+        # get_ntlm_settings / get_mssql_settings run without error.
+        return None
+
+    def read_value(self, key_path, value_name):
+        return None
+
 
 class FakeCtx:
     """Context capturing resolve_principal / register_target calls."""
@@ -109,7 +117,7 @@ def test_usersid_value_selected_by_name_not_position(monkeypatch):
         ctx=FakeCtx(resolve_result={"sAMAccountName": "bob"}),
     )
     assert ctx.resolved == ["S-1-5-21-BBB-1107"]
-    user_rows = [row for table, row in rows if table == "users"]
+    user_rows = [row for table, row in rows if table == "remoteregistry_users"]
     assert len(user_rows) == 1
     assert user_rows[0]["object_sid"] == "S-1-5-21-BBB-1107"
 
@@ -139,7 +147,7 @@ def test_empty_usersid_data_resolves_nothing(monkeypatch):
     values = [("UserSID", ""), ("Session", "1")]
     ctx, rows = _run(monkeypatch, enum_results=_site_server(), read_values_result=values)
     assert ctx.resolved == []
-    assert [row for table, row in rows if table == "users"] == []
+    assert [row for table, row in rows if table == "remoteregistry_users"] == []
 
 
 def test_no_usersid_value_resolves_nothing(monkeypatch):
@@ -147,14 +155,14 @@ def test_no_usersid_value_resolves_nothing(monkeypatch):
     values = [("Session", "1")]
     ctx, rows = _run(monkeypatch, enum_results=_site_server(), read_values_result=values)
     assert ctx.resolved == []
-    assert [row for table, row in rows if table == "users"] == []
+    assert [row for table, row in rows if table == "remoteregistry_users"] == []
 
 
 def test_none_result_does_not_crash(monkeypatch):
     """A missing CurrentUser key (read_values -> None) must not raise."""
     ctx, rows = _run(monkeypatch, enum_results=_site_server(), read_values_result=None)
     assert ctx.resolved == []
-    assert [row for table, row in rows if table == "users"] == []
+    assert [row for table, row in rows if table == "remoteregistry_users"] == []
 
 
 # --- Multisite Component Servers ----------------------------------------------
@@ -169,7 +177,7 @@ def test_multisite_empty_key_marks_local_site_database(monkeypatch):
     )
     db_rows = [
         row for table, row in rows
-        if table == "computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
+        if table == "remoteregistry_computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
     ]
     assert len(db_rows) == 1
     roles = db_rows[0]["sccm_site_system_roles"]
@@ -188,7 +196,7 @@ def test_multisite_remote_server_is_registered_as_sql(monkeypatch):
     assert ("PS1-DB.MAYYHEM.COM", "RemoteRegistry-MultisiteComponentServers") in ctx.registered
     db_rows = [
         row for table, row in rows
-        if table == "computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
+        if table == "remoteregistry_computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
     ]
     assert len(db_rows) == 1
     assert db_rows[0]["sccm_site_system_roles"] == ["SMS SQL Server@PS1"]
@@ -201,6 +209,6 @@ def test_multisite_absent_key_emits_no_database_row(monkeypatch):
     )
     db_rows = [
         row for table, row in rows
-        if table == "computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
+        if table == "remoteregistry_computers" and row["source"] == "RemoteRegistry-MultisiteComponentServers"
     ]
     assert db_rows == []

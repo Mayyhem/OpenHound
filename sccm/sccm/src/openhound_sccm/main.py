@@ -745,7 +745,7 @@ def _build_phase_scope():
     return _phase_scope
 
 
-def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000) -> None:
+def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000, phases=None) -> None:
     """Stage 2: drain the work queue with a worker pool while streaming each
     per-host table to disk through its emit resource.
 
@@ -763,10 +763,15 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000)
     """
     from . import source as _source
     from .log_context import fire_host_complete
-    from .per_host_phases import PER_HOST_PHASES, all_table_names
+    from .per_host_phases import PER_HOST_PHASES, all_table_names, should_run_phase
     from .phased_pipeline import build_streams, run_pipeline
 
-    table_names = all_table_names(PER_HOST_PHASES)
+    # `phases` is injectable so integration tests can drive the stage with stub
+    # phases; production always uses the real PER_HOST_PHASES.
+    default_phases = phases is None
+    if phases is None:
+        phases = PER_HOST_PHASES
+    table_names = all_table_names(phases)
     streams = build_streams(table_names, maxsize=maxsize)
     _source.set_table_queues(streams)
     phase_scope = _build_phase_scope()
@@ -775,10 +780,10 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000)
         run_pipeline(
             work_queue,
             ctx,
-            PER_HOST_PHASES,
+            phases,
             streams,
             max_workers=threads,
-            should_run=lambda target, phase, c: c.method_enabled(phase.name),
+            should_run=should_run_phase,
             phase_scope=phase_scope,
             on_target_complete=fire_host_complete,
         )
@@ -799,7 +804,9 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000)
     pool_thread.start()
     try:
         pipeline.run(
-            _source.build_emit_resources(),
+            # Production reuses the cached emit resources; an injected phase set
+            # gets emit resources matching its own tables.
+            _source.build_emit_resources(None if default_phases else table_names),
             write_disposition="append",
             loader_file_format="jsonl",
         )
@@ -1089,9 +1096,24 @@ def _preproc_table_map() -> dict[str, str]:
         "adminservice_client_devices",
         "adminservice_site_systems",
         "adminservice_site_definitions",
+        "adminservice_site_definitions_computers",
         "adminservice_r_system",
         "adminservice_r_user",
         "adminservice_reserved_accounts",
+        # WMI fallback (mirrors the adminservice_* set; ope-3f2a)
+        "wmi_sites",
+        "wmi_site_definitions",
+        "wmi_site_definitions_computers",
+        "wmi_reserved_accounts",
+        "wmi_client_devices",
+        "wmi_r_system",
+        "wmi_r_user",
+        "wmi_collections",
+        "wmi_collection_members",
+        "wmi_security_roles",
+        "wmi_admins",
+        "wmi_site_systems",
+        # Client-side CIM scraping (Ope-ew5k); reserved, not produced by ope-3f2a
         "wmi_clients",
         "wmi_users_seen",
         "wmi_sql_service_accounts",

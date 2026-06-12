@@ -1,4 +1,10 @@
-"""Unit tests for the AdminService collect-only per-host collector."""
+"""Unit tests for the AdminService collect-only per-host collector.
+
+Transport-neutral row shaping (``_snake``/``_row``/``_prop``/column sets) is
+tested in ``test_sms_rows.py``; this module covers the HTTP plumbing
+(``_get_value``/``_paginate``/``_identification``), the per-collection helpers,
+and the orchestrator order + the AdminService completion marker.
+"""
 import json
 
 from openhound_sccm.clients.http import ErrorClass, HttpResult
@@ -41,8 +47,13 @@ def _qint(path, key):
 
 
 class _Ctx:
-    """Minimal SourceContext stand-in."""
-    def __init__(self, enabled=True):
+    """Minimal SourceContext stand-in.
+
+    ``principal`` is what ``resolve_principal`` returns for any name — None to
+    simulate an unresolvable principal (suppresses AD-enriched / *_computers
+    rows), or a dict to simulate a resolved AD object.
+    """
+    def __init__(self, enabled=True, principal=None):
         self._enabled = enabled
         self.domain = "mayyhem.com"
         self.username = None
@@ -50,19 +61,17 @@ class _Ctx:
         self.nt_hash = None
         self.kerberos_ticket = None
         self.ad = None
+        self._principal = principal
+        self.target_hosts_by_hostname = {}
 
     def method_enabled(self, name):
         return self._enabled
 
+    def resolve_principal(self, name):
+        return self._principal
+
 
 # --- plumbing -------------------------------------------------------------
-
-def test_snake_handles_acronyms():
-    assert a._snake("SiteCode") == "site_code"
-    assert a._snake("AADDeviceID") == "aad_device_id"
-    assert a._snake("ThisSiteCode") == "this_site_code"
-    assert a._snake("SMSID") == "smsid"
-
 
 def test_identification_returns_site_code():
     fake = FakeClient({"SMS_Identification": [{"ThisSiteCode": "PS1", "ThisSiteName": "Primary"}]})
@@ -81,13 +90,6 @@ def test_paginate_stops_on_short_page():
     assert len(got) == 2500
     skips = [_qint(c, "$skip") for c in fake.calls]
     assert skips == [0, 1000, 2000]  # 3 pages: 1000, 1000, 500 (short page ends it)
-
-
-def test_row_snakes_and_tags():
-    row = a._row("AdminService-SMS_Site", "PS1",
-                 {"SiteCode": "PS1", "@odata.type": "x", "BuildNumber": "9000"})
-    assert row == {"source": "AdminService-SMS_Site", "source_site_code": "PS1",
-                   "site_code": "PS1", "build_number": "9000"}
 
 
 def test_gate_failure_yields_nothing(monkeypatch):
@@ -114,7 +116,8 @@ def test_sites_emits_site_and_definition_with_flattened_props():
                 {"PropertyName": "SQLServicePort", "Value": 1433},
             ]}],
     }
-    rows = list(a._sites(FakeClient(pages), "PS1"))
+    # principal=None -> site/SQL servers don't resolve, so no *_computers rows.
+    rows = list(a._sites(FakeClient(pages), "PS1", _Ctx(principal=None)))
     tables = {t for t, _ in rows}
     assert tables == {"adminservice_sites", "adminservice_site_definitions"}
     site = next(r for t, r in rows if t == "adminservice_sites")
@@ -126,14 +129,36 @@ def test_sites_emits_site_and_definition_with_flattened_props():
     assert "props" not in sdef  # raw Props blob dropped after flattening
 
 
+def test_sites_emits_computer_rows_when_servers_resolve():
+    pages = {
+        "SMS_Site": [{"SiteCode": "PS1", "ServerName": "ps1.mayyhem.com"}],
+        "SMS_SCI_SiteDefinition": [{
+            "SiteCode": "PS1", "SiteServerName": "ps1.mayyhem.com",
+            "Props": [{"PropertyName": "SQLServerFQDN", "Value1": "ps1-db.mayyhem.com"}]}],
+    }
+    ctx = _Ctx(principal={"object_sid": "S-1-5-21-1", "name": "resolved"})
+    rows = list(a._sites(FakeClient(pages), "PS1", ctx))
+    computer_rows = [r for t, r in rows if t == "adminservice_site_definitions_computers"]
+    # One for the site server, one for the SQL server.
+    assert len(computer_rows) == 2
+    assert all(r["sccm_infra"] is True for r in computer_rows)
+
+
 # --- reserved accounts + client devices ----------------------------------
 
-def test_reserved_accounts():
+def test_reserved_accounts_enriches_resolved_principal():
     pages = {"SMS_SCI_Reserved": [{"UserName": "MAYYHEM\\svc_naa", "SiteCode": "PS1"}]}
-    rows = list(a._reserved_accounts(FakeClient(pages), "PS1"))
-    assert rows == [("adminservice_reserved_accounts",
-                     {"source": "AdminService-SMS_SCI_Reserved", "source_site_code": "PS1",
-                      "user_name": "MAYYHEM\\svc_naa", "site_code": "PS1"})]
+    ctx = _Ctx(principal={"object_sid": "S-1-5-21-7", "name": "svc_naa"})
+    rows = list(a._reserved_accounts(FakeClient(pages), "PS1", ctx))
+    assert rows[0][0] == "adminservice_reserved_accounts"
+    r = rows[0][1]
+    assert r["source"] == "AdminService-SMS_SCI_Reserved" and r["sccm_infra"] is True
+    assert r["object_sid"] == "S-1-5-21-7" and r["UserName"] == "MAYYHEM\\svc_naa"
+
+
+def test_reserved_accounts_skips_unresolvable():
+    pages = {"SMS_SCI_Reserved": [{"UserName": "MAYYHEM\\ghost", "SiteCode": "PS1"}]}
+    assert list(a._reserved_accounts(FakeClient(pages), "PS1", _Ctx(principal=None))) == []
 
 
 def test_client_devices_filters_non_clients_and_obsolete():
@@ -142,7 +167,7 @@ def test_client_devices_filters_non_clients_and_obsolete():
         {"Name": "WS2", "SMSID": "GUID2", "IsClient": False, "IsObsolete": False, "ResourceID": 2},
         {"Name": "WS3", "SMSID": "GUID3", "IsClient": True, "IsObsolete": True, "ResourceID": 3},
     ]}
-    rows = list(a._client_devices(FakeClient(pages), "PS1"))
+    rows = list(a._client_devices(FakeClient(pages), "PS1", _Ctx()))
     names = [r["name"] for _, r in rows]
     assert names == ["WS1"]  # non-client + obsolete skipped
     assert rows[0][0] == "adminservice_client_devices"
@@ -154,7 +179,7 @@ def test_r_system_rows():
     pages = {"SMS_R_System": [{"Name": "WS1", "SID": "S-1-5-21-1", "ResourceID": 1,
                                "SMSUniqueIdentifier": "GUID1", "Client": 1, "Obsolete": 0,
                                "SecurityGroupName": ["MAYYHEM\\g1", "MAYYHEM\\g2"]}]}
-    rows = list(a._r_system(FakeClient(pages), "PS1"))
+    rows = list(a._r_system(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_r_system"
     assert rows[0][1]["security_group_name"] == ["MAYYHEM\\g1", "MAYYHEM\\g2"]
     assert rows[0][1]["sid"] == "S-1-5-21-1"
@@ -163,7 +188,7 @@ def test_r_system_rows():
 def test_r_user_rows():
     pages = {"SMS_R_User": [{"Name": "MAYYHEM\\alice", "SID": "S-1-5-21-9", "ResourceID": 5,
                              "SecurityGroupName": ["MAYYHEM\\admins"], "UserName": "alice"}]}
-    rows = list(a._r_user(FakeClient(pages), "PS1"))
+    rows = list(a._r_user(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_r_user"
     assert rows[0][1]["user_name"] == "alice"
 
@@ -173,7 +198,7 @@ def test_r_user_rows():
 def test_collections_rows():
     pages = {"SMS_Collection": [{"CollectionID": "PS100001", "Name": "All Systems",
                                  "CollectionType": 2, "MemberCount": 42, "IsBuiltIn": True}]}
-    rows = list(a._collections(FakeClient(pages), "PS1"))
+    rows = list(a._collections(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_collections"
     assert rows[0][1]["collection_id"] == "PS100001" and rows[0][1]["member_count"] == 42
 
@@ -181,7 +206,7 @@ def test_collections_rows():
 def test_collection_members_rows():
     pages = {"SMS_FullCollectionMembership": [{"CollectionID": "PS100001", "ResourceID": 16777220,
                                                "SiteCode": "PS1"}]}
-    rows = list(a._collection_members(FakeClient(pages), "PS1"))
+    rows = list(a._collection_members(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_collection_members"
     assert rows[0][1]["resource_id"] == 16777220
 
@@ -192,7 +217,7 @@ def test_security_roles_whitelists_columns():
     pages = {"SMS_Role": [{"RoleID": "SMS0001R", "RoleName": "Full Administrator",
                            "IsBuiltIn": True, "NumberOfAdmins": 1,
                            "LazyJunkColumn": "should be dropped"}]}
-    rows = list(a._security_roles(FakeClient(pages), "PS1"))
+    rows = list(a._security_roles(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_security_roles"
     r = rows[0][1]
     assert r["role_id"] == "SMS0001R" and r["role_name"] == "Full Administrator"
@@ -204,7 +229,7 @@ def test_admins_keeps_role_and_collection_assignments():
                             "Roles": ["SMS0001R"], "RoleNames": ["Full Administrator"],
                             "CollectionNames": "All Systems, All Users", "IsGroup": False,
                             "SecretJunk": "dropped"}]}
-    rows = list(a._admins(FakeClient(pages), "PS1"))
+    rows = list(a._admins(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_admins"
     r = rows[0][1]
     assert r["roles"] == ["SMS0001R"] and r["collection_names"] == "All Systems, All Users"
@@ -217,7 +242,7 @@ def test_site_systems_flattens_service_account():
     pages = {"SMS_SCI_SysResUse": [{
         "NetworkOSPath": "\\\\ps1-db.mayyhem.com", "SiteCode": "PS1", "RoleName": "SMS SQL Server",
         "Props": [{"PropertyName": "SQL Server Service Logon Account", "Value2": "MAYYHEM\\svc_sql"}]}]}
-    rows = list(a._site_systems(FakeClient(pages), "PS1"))
+    rows = list(a._site_systems(FakeClient(pages), "PS1", _Ctx()))
     assert rows[0][0] == "adminservice_site_systems"
     r = rows[0][1]
     assert r["network_os_path"] == "\\\\ps1-db.mayyhem.com" and r["role_name"] == "SMS SQL Server"
@@ -244,7 +269,10 @@ def test_orchestrator_runs_all_collections_in_order(monkeypatch):
     }
     fake = FakeClient(pages)
     monkeypatch.setattr(a.HttpClient, "from_context", classmethod(lambda cls, ctx, target, **kw: fake))
-    rows = list(a.collect_adminservice("ps1-sms.mayyhem.com", _Ctx()))
+    # principal truthy so reserved accounts resolve and emit a row; the test's
+    # SMS_SCI_SiteDefinition carries no server names, so no *_computers rows.
+    ctx = _Ctx(principal={"object_sid": "S-1-5-21-9", "name": "naa"})
+    rows = list(a.collect_adminservice("ps1-sms.mayyhem.com", ctx))
     tables = [t for t, _ in rows]
     # The SMS_Identification gate ran first.
     assert "wmi/SMS_Identification" in fake.calls[0]
@@ -261,12 +289,35 @@ def test_orchestrator_runs_all_collections_in_order(monkeypatch):
     assert expected <= set(all_table_names(PER_HOST_PHASES))
 
 
-def test_one_failing_collection_does_not_abort_rest(monkeypatch):
-    pages = {"SMS_Identification": [{"ThisSiteCode": "PS1"}],
-             "SMS_Site": [{"SiteCode": "PS1"}],
-             "SMS_TaskSequencePackage": [{"PackageID": "TS1", "Name": "Deploy"}]}
-    # All other classes 404 -> their helpers yield nothing, but sites + task seq still appear.
+def test_orchestrator_marks_completed_phase(monkeypatch):
+    from openhound_sccm.models.target_entry import TargetEntry
+    pages = {"SMS_Identification": [{"ThisSiteCode": "PS1"}], "SMS_Site": []}
     fake = FakeClient(pages)
     monkeypatch.setattr(a.HttpClient, "from_context", classmethod(lambda cls, ctx, target, **kw: fake))
-    tables = {t for t, _ in a.collect_adminservice("ps1-sms.mayyhem.com", _Ctx())}
-    assert "adminservice_sites" in tables and "adminservice_task_sequences" in tables
+    entry = TargetEntry(hostname="ps1-sms.mayyhem.com", ad_object=None)
+    ctx = _Ctx()
+    ctx.target_hosts_by_hostname = {"ps1-sms.mayyhem.com": entry}
+    list(a.collect_adminservice("ps1-sms.mayyhem.com", ctx))
+    assert "AdminService" in entry.completed_phases
+
+
+def test_gate_failure_does_not_mark_completed_phase(monkeypatch):
+    from openhound_sccm.models.target_entry import TargetEntry
+    fake = FakeClient({"SMS_Identification": []})  # not a provider
+    monkeypatch.setattr(a.HttpClient, "from_context", classmethod(lambda cls, ctx, target, **kw: fake))
+    entry = TargetEntry(hostname="ps1-sms.mayyhem.com", ad_object=None)
+    ctx = _Ctx()
+    ctx.target_hosts_by_hostname = {"ps1-sms.mayyhem.com": entry}
+    list(a.collect_adminservice("ps1-sms.mayyhem.com", ctx))
+    assert "AdminService" not in entry.completed_phases
+
+
+def test_one_failing_collection_does_not_abort_rest(monkeypatch):
+    # SMS_Site succeeds; every other collection class 404s. Sites must still be
+    # collected and the orchestrator must complete without raising.
+    pages = {"SMS_Identification": [{"ThisSiteCode": "PS1"}],
+             "SMS_Site": [{"SiteCode": "PS1"}]}
+    fake = FakeClient(pages)
+    monkeypatch.setattr(a.HttpClient, "from_context", classmethod(lambda cls, ctx, target, **kw: fake))
+    tables = {t for t, _ in a.collect_adminservice("ps1-sms.mayyhem.com", _Ctx(principal=None))}
+    assert "adminservice_sites" in tables

@@ -262,5 +262,5 @@ class HttpClient:
                 logger.verbose("HTTP authenticated to %s via %s", self._host, rung)
             return result
         # Every rung hit a protocol failure: report as a connect failure.
-        logger.warning("HTTP Negotiate exhausted all rungs (%s) on %s", plan, url)
+        logger.verbose("HTTP Negotiate exhausted all rungs (%s) on %s", plan, url)
         return HttpResult(None, None, ErrorClass.CONNECT_FAILURE)

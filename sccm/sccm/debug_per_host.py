@@ -66,7 +66,7 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
 MAX_WORKERS = 1                         # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                          # 1 = watch backpressure
 COMPUTERS = ["ps1-sms.mayyhem.com"]     # mirrors --computers: each entry is both a seed AND the allow-list
-COLLECTION_METHODS = "AdminService"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService); "All" runs every phase
+COLLECTION_METHODS = "All"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService); "All" runs every phase
 PRINT_ROWS = 0                          # rows to dump per table (0 = counts only); set to None to print all
 
 # Derive the domain from the current Windows user (USERDNSDOMAIN), the same way

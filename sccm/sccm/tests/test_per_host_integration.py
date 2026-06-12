@@ -55,7 +55,13 @@ def _run_stage_with_timeout(pipeline, work_queue, ctx, threads, maxsize=1000, ti
 
     def run():
         try:
-            main_mod._run_per_host_stage(pipeline, work_queue, ctx, threads=threads, maxsize=maxsize)
+            # Drive the stage with the stub phases so the engine orchestration
+            # (recursion / backpressure / allow-list / method gating) is exercised
+            # deterministically, independent of the real network collectors.
+            main_mod._run_per_host_stage(
+                pipeline, work_queue, ctx, threads=threads, maxsize=maxsize,
+                phases=PER_HOST_PHASES,
+            )
         except Exception as exc:  # pragma: no cover - surfaced via errbox
             errbox["exc"] = exc
         finally:

@@ -255,7 +255,6 @@ def test_registry_probe_delegates_to_connect_smb(monkeypatch):
     monkeypatch.setattr(registry, "connect_smb", _fake_connect)
     # Make the TCP/445 reachability probe succeed without real network I/O.
     monkeypatch.setattr(registry.socket, "create_connection", lambda *a, **k: _NoopCtx())
-    monkeypatch.setattr(registry, "HAS_IMPACKET", True)
 
     probe = registry._RegistryProbe("ps1.mayyhem.com", "mayyhem.com", None, None)
     probe.__enter__()
@@ -298,7 +297,6 @@ def _patch_probe_transport(monkeypatch, connect_behaviour):
 
     monkeypatch.setattr(registry, "connect_smb", lambda *a, **k: _FakeSMB())
     monkeypatch.setattr(registry.socket, "create_connection", lambda *a, **k: _NoopCtx())
-    monkeypatch.setattr(registry, "HAS_IMPACKET", True)
 
     sleeps = []
     monkeypatch.setattr(registry.time, "sleep", lambda s: sleeps.append(s))

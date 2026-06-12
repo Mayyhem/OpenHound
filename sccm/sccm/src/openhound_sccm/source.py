@@ -182,9 +182,17 @@ def _make_emit_resource(table_name: str):
 _EMIT_RESOURCES = tuple(_make_emit_resource(table) for table in all_table_names(PER_HOST_PHASES))
 
 
-def build_emit_resources():
-    """Return freshly-bound emit resources for the per-host streaming pass."""
-    return [emit() for emit in _EMIT_RESOURCES]
+def build_emit_resources(table_names=None):
+    """Return freshly-bound emit resources for the per-host streaming pass.
+
+    ``table_names=None`` (production) reuses the cached resources built once at
+    import from the real ``PER_HOST_PHASES``. A caller driving the stage with a
+    different phase set (e.g. integration tests using stub phases) passes that
+    set's table names so the emit resources match the streams the engine writes.
+    """
+    if table_names is None:
+        return [emit() for emit in _EMIT_RESOURCES]
+    return [_make_emit_resource(table)() for table in table_names]
 
 
 @app.source(name="sccm", max_table_nesting=0)
