@@ -34,6 +34,11 @@ dependencies = [
     # collector (clients/http.py). Auth tokens are minted by impacket / pywin32
     # SSPI and carried in the Authorization header; requests only moves bytes.
     "requests>=2.31.0",
+    # X.509 parsing for the unauthenticated HTTP collector's sitesigncert probe
+    # (collectors/http.py): the management point's site-signing certificate is
+    # parsed to read its issuer CN ("Site Server") and SAN DNS name, identifying
+    # the site server. No stdlib X.509 parser exists; cryptography is the standard.
+    "cryptography>=42.0.0",
 ]
 
 [tool.uv.sources]

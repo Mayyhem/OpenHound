@@ -1550,6 +1550,7 @@ name = "sccm"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "dnspython" },
     { name = "impacket" },
     { name = "ldap3" },
@@ -1571,6 +1572,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42.0.0" },
     { name = "dnspython", specifier = ">=2.4.0" },
     { name = "impacket", specifier = ">=0.11.0" },
     { name = "ldap3", specifier = ">=2.10.2rc4" },

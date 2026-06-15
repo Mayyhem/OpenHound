@@ -1120,6 +1120,7 @@ def _preproc_table_map() -> dict[str, str]:
         "http_management_points",
         "http_smsproviders",
         "http_distribution_points",
+        "http_site_servers",
         "http_naa_secrets",
         "http_collection_secrets",
         "smb_site_servers",

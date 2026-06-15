@@ -1,6 +1,6 @@
 ---
 id: ope-9d62
-status: open
+status: in_progress
 deps: [ope-0112, ope-d57d]
 links: []
 created: 2026-06-03T19:29:29Z

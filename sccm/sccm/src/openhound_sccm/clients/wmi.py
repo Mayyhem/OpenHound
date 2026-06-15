@@ -1,35 +1,34 @@
-"""WMI transport for the SMS Provider, the AdminService collector's fallback.
+"""Transport-only WMI client: per-target DCOM/WMI connection + credential ladder.
 
-The SCCM AdminService REST API is a veneer over the SMS Provider's
-``root\\SMS\\site_<code>`` WMI namespace, so when AdminService is unreachable we
-can read the same classes by talking WMI/DCOM directly. ``WmiClient`` plays the
-role ``clients/http.HttpClient`` plays for AdminService: per-target connection +
-credential ladder, returning normalized rows.
+``WmiClient`` plays the role ``clients/http.HttpClient`` plays for HTTP: it owns a
+per-target connection and a credential ladder, and streams normalized rows for a
+WQL query. It is service-agnostic — the caller supplies the WMI *namespace* and
+class (e.g. ``root\\SMS\\site_<code>`` for the SCCM SMS Provider, ``root\\cimv2``
+for stock WMI); nothing here knows about SCCM.
 
-Auth reuses ``http_auth.choose_auth`` for credential *precedence* (identical to
-AdminService), then realizes each rung over a WMI transport:
+Auth reuses ``http_auth.choose_auth`` for credential *precedence*, then realizes
+each rung over a WMI transport:
 
   * ``ticket`` / ``kerberos`` / ``ntlm`` -> impacket DCOM (incl. pass-the-hash,
     pass-the-ticket); cross-platform.
   * ``sspi``     -> pywin32 WMI as the current Windows user; Windows-only.
   * ``anonymous``-> skipped (DCOM always requires authentication).
 
-The first rung that establishes a usable ``root\\SMS`` connection wins and is
-cached; later per-namespace queries reuse it.
+The first rung whose ``execquery`` runs the caller's initial query without raising
+wins and is cached; later queries reuse it. Rows stream: each is yielded as it is
+pulled off the WMI enumerator.
 """
 from __future__ import annotations
 
 import base64
 import logging
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
 from . import http_auth
 from .http_auth import format_hashes, split_user_domain
 
 logger = logging.getLogger(__name__)
-
-_ROOT_SMS = "root\\SMS"
 
 
 def _build_wql(class_name: str, columns: Optional[tuple] = None, where: Optional[str] = None) -> str:
@@ -159,10 +158,14 @@ class _ImpacketBackend:
             self._conns[namespace] = (dcom, svc)
         return self._conns[namespace][1]
 
-    def query(self, namespace: str, wql: str) -> list[dict]:
-        svc = self._services_for(namespace)
-        enum = svc.ExecQuery(wql)
-        out: list[dict] = []
+    def execquery(self, namespace: str, wql: str):
+        """Establish the namespace connection (raising on auth failure) and return
+        the WMI enumerator for *wql*. The auth ladder treats a raised exception
+        here as the signal that this credential rung is unusable."""
+        return self._services_for(namespace).ExecQuery(wql)
+
+    def stream(self, enum) -> Iterator[dict]:
+        """Yield normalized rows off a WMI enumerator until S_FALSE ends it."""
         try:
             while True:
                 try:
@@ -171,10 +174,9 @@ class _ImpacketBackend:
                     if "S_FALSE" in str(ex):
                         break
                     raise
-                out.append(_normalize(obj.getProperties()))
+                yield _normalize(obj.getProperties())
         finally:
             enum.RemRelease()
-        return out
 
     def close(self) -> None:
         for dcom, _svc in self._conns.values():
@@ -203,8 +205,12 @@ class _PyWin32Backend:
             self._services[namespace] = self._locator.ConnectServer(self._target, namespace)
         return self._services[namespace]
 
-    def query(self, namespace: str, wql: str) -> list[dict]:
-        return [_normalize_swbem(o) for o in self._services_for(namespace).ExecQuery(wql)]
+    def execquery(self, namespace: str, wql: str):
+        return self._services_for(namespace).ExecQuery(wql)
+
+    def stream(self, objset) -> Iterator[dict]:
+        for o in objset:
+            yield _normalize_swbem(o)
 
     def close(self) -> None:
         # pywin32 COM objects release on garbage collection; nothing to do.
@@ -227,7 +233,6 @@ class WmiClient:
         self._kerberos_ticket = kerberos_ticket
         self._kdc_host = kdc_host
         self._backend: Any = None       # the rung that connected, cached
-        self._site_code: Optional[str] = None
 
     @classmethod
     def from_context(cls, ctx, target: str) -> "WmiClient":
@@ -297,12 +302,34 @@ class WmiClient:
         tgt = cred.toTGT()
         return username, tgt, None
 
-    def identify(self) -> Optional[str]:
-        """Connect (running the auth ladder) and return this provider's site code.
+    def query(self, namespace: str, class_name: str, *, columns: Optional[tuple] = None,
+              where: Optional[str] = None) -> Iterator[dict]:
+        """Run a WQL query against *namespace*, streaming normalized rows.
 
-        Returns None if no rung established a usable ``root\\SMS`` connection or
-        the host is not an SMS Provider.
+        The first query runs the auth ladder (this query is the probe) and caches
+        the winning backend; later queries reuse it. Yields nothing (and logs) if
+        the ladder is exhausted or the query fails.
         """
+        wql = _build_wql(class_name, columns, where)
+        try:
+            logger.verbose("WMI query on %s (%s): %s", self._target, namespace, wql)
+            raw = self._open(namespace, wql)
+        except Exception as ex:  # noqa: BLE001 - one class failing must not abort the rest
+            logger.warning("WMI query %s on %s failed: %s", class_name, self._target, ex)
+            return
+        if raw is None:
+            return  # ladder exhausted (logged in _open)
+        yield from self._backend.stream(raw)
+
+    def _open(self, namespace: str, wql: str):
+        """Return a WMI enumerator for (namespace, wql).
+
+        On the first call the auth ladder runs, using this query as the rung
+        probe; the first rung whose ``execquery`` returns without raising wins and
+        is cached. Returns None if every rung is exhausted.
+        """
+        if self._backend is not None:
+            return self._backend.execquery(namespace, wql)
         plan = http_auth.choose_auth(
             username=self._username, password=self._password, nt_hash=self._nt_hash,
             ticket=self._kerberos_ticket, target_host=self._target,
@@ -316,49 +343,16 @@ class WmiClient:
             try:
                 logger.verbose("WMI auth attempt on %s via %s", self._target, rung)
                 backend.connect()
-                rows = backend.query(_ROOT_SMS, _build_wql("SMS_ProviderLocation"))
+                raw = backend.execquery(namespace, wql)
             except Exception as ex:  # noqa: BLE001 - this rung failed; try the next
                 logger.verbose("WMI %s rung failed on %s: %s", rung, self._target, ex)
                 backend.close()
                 continue
-            site_code = self._site_code_from_providers(rows)
-            if site_code is None:
-                logger.warning("WMI on %s authenticated via %s but returned no SMS_ProviderLocation", self._target, rung)
-                backend.close()
-                return None
-            logger.info("Identified SMS Provider site via WMI on %s: %s (via %s)", self._target, site_code, rung)
+            logger.info("WMI authenticated on %s via %s", self._target, rung)
             self._backend = backend
-            self._site_code = site_code
-            return site_code
-        logger.info("WMI auth ladder exhausted on %s (%s); not a reachable SMS Provider", self._target, plan)
+            return raw
+        logger.info("WMI auth ladder exhausted on %s (%s)", self._target, plan)
         return None
-
-    @staticmethod
-    def _site_code_from_providers(rows: list[dict]) -> Optional[str]:
-        """Pick the local site's code from SMS_ProviderLocation rows."""
-        if not rows:
-            return None
-        local = next((r for r in rows if r.get("ProviderForLocalSite")), rows[0])
-        return local.get("SiteCode")
-
-    def query(self, class_name: str, *, columns: Optional[tuple] = None,
-              where: Optional[str] = None) -> Optional[list[dict]]:
-        """Run a WQL query against ``root\\SMS\\site_<code>``.
-
-        Returns normalized ``{Name: value}`` dicts, or None on failure. Requires
-        a prior successful :meth:`identify`.
-        """
-        if self._backend is None or self._site_code is None:
-            logger.warning("WMI query on %s before a successful identify(); skipping %s", self._target, class_name)
-            return None
-        namespace = f"root\\SMS\\site_{self._site_code}"
-        wql = _build_wql(class_name, columns, where)
-        try:
-            logger.verbose("WMI query on %s: %s", self._target, wql)
-            return self._backend.query(namespace, wql)
-        except Exception as ex:  # noqa: BLE001 - one class failing must not abort the rest
-            logger.warning("WMI query %s on %s failed: %s", class_name, self._target, ex)
-            return None
 
     def close(self) -> None:
         if self._backend is not None:

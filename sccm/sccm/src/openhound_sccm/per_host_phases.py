@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .collectors import registry, mssql, adminservice, wmi
+from .collectors import registry, mssql, privileged, http
 from .phased_pipeline import Phase
 
 import logging
@@ -44,10 +44,11 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
             "adminservice_security_roles",
             "adminservice_admins",
             "adminservice_site_systems",
-        ), adminservice.collect_adminservice,
+        ), privileged.collect_adminservice,
     ),
-    # WMI mirrors AdminService over DCOM and runs only when AdminService could
-    # not reach the host (see should_run_phase). Same collections, same order.
+    # WMI shares privileged.py's collection helpers (same collections, same
+    # order) over DCOM, and runs only when AdminService could not reach the host
+    # (see should_run_phase).
     Phase(
         "WMI", (
             "wmi_sites",
@@ -62,7 +63,18 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
             "wmi_security_roles",
             "wmi_admins",
             "wmi_site_systems",
-        ), wmi.collect_wmi,
+        ), privileged.collect_wmi,
+    ),
+    # HTTP runs after WMI: unauthenticated web-endpoint role probing. Skipped once
+    # AdminService or WMI has already collected the host (see should_run_phase),
+    # mirroring PS1's "$script:CollectionTargets[$target]['Collected']" skip.
+    Phase(
+        "HTTP", (
+            "http_management_points",
+            "http_distribution_points",
+            "http_smsproviders",
+            "http_site_servers",
+        ), http.collect_http,
     ),
 )
 
@@ -87,5 +99,13 @@ def should_run_phase(target: str, phase: Phase, ctx) -> bool:
         entry = ctx.target_hosts_by_hostname.get(target.lower())
         if entry is not None and "AdminService" in entry.completed_phases:
             logger.info("[%s][%s] Skipping WMI phase because AdminService already completed", target, phase.name)
+            return False
+    # HTTP is an unauthenticated fallback: once a privileged method (AdminService
+    # or WMI) has collected this host, the HTTP role probe adds nothing, so skip
+    # it. Mirrors PS1's "already Collected -> skip HTTP" check (8617).
+    if phase.name == "HTTP":
+        entry = ctx.target_hosts_by_hostname.get(target.lower())
+        if entry is not None and ({"AdminService", "WMI"} & entry.completed_phases):
+            logger.info("[%s][%s] Skipping HTTP phase because AdminService/WMI already collected this host", target, phase.name)
             return False
     return True

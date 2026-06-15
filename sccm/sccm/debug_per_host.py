@@ -26,8 +26,8 @@ Stepping tips
   enabled so it completes (e.g. COLLECTION_METHODS = "AdminService,WMI"), put a
   breakpoint in per_host_phases.should_run_phase, and run against a reachable
   SMS Provider: AdminService records "AdminService" in the host's
-  TargetEntry.completed_phases (collect_adminservice, right after
-  _identification() succeeds), so should_run_phase returns False for the WMI
+  TargetEntry.completed_phases (collect_adminservice, at the end of its
+  collection loop), so should_run_phase returns False for the WMI
   phase and collect_wmi never runs. Set COLLECTION_METHODS = "WMI" alone for the
   opposite case — AdminService never runs, so WMI runs as the fallback.
 * Set MAXSIZE = 1 to watch backpressure (producers block on put until drained).
@@ -73,8 +73,8 @@ if not any(not isinstance(h, logging.FileHandler) for h in _root.handlers):
 
 MAX_WORKERS = 1                         # 1 = easy stepping; 10 = real concurrency
 MAXSIZE = 1000                          # 1 = watch backpressure
-COMPUTERS = ["ps1-sms.mayyhem.com"]     # mirrors --computers: each entry is both a seed AND the allow-list
-COLLECTION_METHODS = "All"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService, WMI); "All" runs every phase. Use "AdminService,WMI" to step the WMI fallback skip.
+COMPUTERS = ["ps1-dp.mayyhem.com"]     # mirrors --computers: each entry is both a seed AND the allow-list
+COLLECTION_METHODS = "HTTP"     # mirrors -m/--collection-methods: CSV of phase names to run (RemoteRegistry, MSSQL, AdminService, WMI); "All" runs every phase. Use "AdminService,WMI" to step the WMI fallback skip.
 PRINT_ROWS = 0                          # rows to dump per table (0 = counts only); set to None to print all
 
 # Derive the domain from the current Windows user (USERDNSDOMAIN), the same way
@@ -152,7 +152,7 @@ def main() -> None:
     # skip: when the WMI phase is evaluated for a host whose AdminService phase
     # already completed, entry.completed_phases contains "AdminService", so it
     # returns False and the WMI collector never runs. AdminService records that in
-    # collect_adminservice right after _identification() succeeds. (Keep
+    # collect_adminservice at the end of its collection loop. (Keep
     # AdminService enabled — e.g. COLLECTION_METHODS = "AdminService,WMI" — so it
     # completes; set COLLECTION_METHODS = "WMI" alone to see the opposite, where
     # AdminService never runs and WMI runs as the fallback.)

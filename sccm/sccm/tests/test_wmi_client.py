@@ -1,8 +1,10 @@
-"""Unit tests for the WMI transport client (clients/wmi.py).
+"""Unit tests for the transport-only WMI client (clients/wmi.py).
 
 Transports are mocked: these cover the auth-ladder logic, the rung->backend
 mapping, WQL construction, and the row normalization (including the embedded
-SMS ``Props`` array) without any network or DCOM.
+SMS ``Props`` array) without any network or DCOM. The client is SCCM-agnostic —
+the caller supplies the namespace and class; site-code identification lives in
+the privileged collector (see test_privileged.py).
 """
 from openhound_sccm.clients import wmi as w
 
@@ -46,25 +48,31 @@ def test_normalize_unwraps_embedded_props_array():
     assert out["Props"] == [{"PropertyName": "siteGUID", "Value1": "{G}"}]
 
 
-# --- ladder ---------------------------------------------------------------
+# --- ladder + streaming query ---------------------------------------------
 
 class FakeBackend:
-    """Records connect/query and can simulate a connect failure."""
-    def __init__(self, *, rows=None, connect_error=None):
+    """Records connect/execquery; `open_error` simulates an auth failure on the
+    first real query (impacket raises when the DCOM connection is established).
+    The fake's "raw enumerator" is just the row list, which `stream` replays."""
+    def __init__(self, *, rows=None, open_error=None):
         self.rows = rows if rows is not None else []
-        self.connect_error = connect_error
+        self.open_error = open_error
         self.connected = False
         self.queries = []
         self.closed = False
 
     def connect(self):
-        if self.connect_error:
-            raise self.connect_error
         self.connected = True
 
-    def query(self, namespace, wql):
+    def execquery(self, namespace, wql):
         self.queries.append((namespace, wql))
+        if self.open_error:
+            raise self.open_error
         return self.rows
+
+    def stream(self, raw):
+        for r in raw:
+            yield r
 
     def close(self):
         self.closed = True
@@ -76,34 +84,52 @@ def _client(**kw):
     return w.WmiClient(**base)
 
 
-def test_ladder_explicit_creds_tries_kerberos_then_ntlm(monkeypatch):
-    attempted = []
-    kerb = FakeBackend(connect_error=OSError("kerberos down"))
+def test_first_query_runs_ladder_then_streams(monkeypatch):
+    monkeypatch.setattr(w.http_auth, "sspi_negotiate_available", lambda: False)
+    kerb = FakeBackend(open_error=OSError("kerberos down"))
     ntlm = FakeBackend(rows=[{"SiteCode": "PS1", "ProviderForLocalSite": True}])
     backends = {"kerberos": kerb, "ntlm": ntlm}
-
     client = _client(username="MAYYHEM\\domainadmin", password="pw")
-
-    def fake_build(rung):
-        attempted.append(rung)
-        return backends.get(rung)
-
-    monkeypatch.setattr(client, "_build_backend", fake_build)
-    assert client.identify() == "PS1"
-    assert attempted == ["kerberos", "ntlm"]   # advanced past the failed kerberos rung
-    assert kerb.closed and ntlm.connected       # failed rung closed; winner kept
+    monkeypatch.setattr(client, "_build_backend", lambda rung: backends.get(rung))
+    rows = list(client.query("root\\SMS", "SMS_ProviderLocation"))
+    assert rows == [{"SiteCode": "PS1", "ProviderForLocalSite": True}]
+    assert kerb.closed and ntlm.connected   # failed rung closed, winner kept
     assert client._backend is ntlm
 
 
-def test_ladder_skips_anonymous_when_no_creds(monkeypatch):
+def test_second_query_reuses_backend_and_builds_namespace_wql(monkeypatch):
     monkeypatch.setattr(w.http_auth, "sspi_negotiate_available", lambda: False)
-    client = _client()  # no creds
-    # _build_backend('anonymous') returns None; identify must not construct anything.
-    assert client.identify() is None
+    ntlm = FakeBackend(rows=[{"SiteCode": "PS1", "ProviderForLocalSite": True}])
+    client = _client(username="u", password="p")
+    monkeypatch.setattr(client, "_build_backend", lambda rung: ntlm if rung == "kerberos" else None)
+    list(client.query("root\\SMS", "SMS_ProviderLocation"))   # runs the ladder once
+    ntlm.rows = [{"RoleName": "Full Admin"}]
+    rows = list(client.query("root\\SMS\\site_PS1", "SMS_Role", where="RoleName = 'x'"))
+    assert rows == [{"RoleName": "Full Admin"}]
+    ns, wql = ntlm.queries[-1]
+    assert ns == "root\\SMS\\site_PS1"
+    assert wql == "SELECT * FROM SMS_Role WHERE RoleName = 'x'"
+
+
+def test_ladder_exhausted_yields_nothing(monkeypatch):
+    monkeypatch.setattr(w.http_auth, "sspi_negotiate_available", lambda: False)
+    dead = FakeBackend(open_error=OSError("nope"))
+    client = _client(username="u", password="p")
+    monkeypatch.setattr(client, "_build_backend", lambda rung: dead if rung in ("kerberos", "ntlm") else None)
+    assert list(client.query("root\\SMS", "SMS_ProviderLocation")) == []
     assert client._backend is None
 
 
-def test_ladder_sspi_uses_pywin32_backend(monkeypatch):
+def test_query_skips_anonymous_when_no_creds(monkeypatch):
+    monkeypatch.setattr(w.http_auth, "sspi_negotiate_available", lambda: False)
+    client = _client()  # no creds -> only the anonymous rung, which DCOM cannot use
+    assert list(client.query("root\\SMS", "SMS_ProviderLocation")) == []
+    assert client._backend is None
+
+
+# --- rung -> backend mapping ----------------------------------------------
+
+def test_build_backend_sspi_uses_pywin32_backend(monkeypatch):
     monkeypatch.setattr(w.http_auth, "sspi_negotiate_available", lambda: True)
     client = _client()  # no creds + sspi available -> ['sspi']
     backend = client._build_backend("sspi")
@@ -119,32 +145,3 @@ def test_build_backend_maps_rungs_to_impacket_with_kerberos_flag():
     # NT hash flows into the LM:NT split impacket expects.
     assert ntlm._nthash == "8846f7eaee8fb117ad06bdd830b7586c"
     assert client._build_backend("anonymous") is None
-
-
-# --- identify -> query ----------------------------------------------------
-
-def test_query_requires_prior_identify():
-    client = _client(username="u", password="p")
-    assert client.query("SMS_Site") is None  # no identify() yet
-
-
-def test_query_builds_namespace_and_wql(monkeypatch):
-    backend = FakeBackend(rows=[{"SiteCode": "PS1", "ProviderForLocalSite": True}])
-    client = _client(username="u", password="p")
-    monkeypatch.setattr(client, "_build_backend", lambda rung: backend if rung == "kerberos" else None)
-    assert client.identify() == "PS1"
-    backend.rows = [{"RoleName": "Full Admin"}]
-    rows = client.query("SMS_Role")
-    assert rows == [{"RoleName": "Full Admin"}]
-    ns, wql = backend.queries[-1]
-    assert ns == "root\\SMS\\site_PS1"
-    assert wql == "SELECT * FROM SMS_Role"
-
-
-def test_site_code_picks_local_provider():
-    rows = [{"SiteCode": "AAA", "ProviderForLocalSite": False},
-            {"SiteCode": "PS1", "ProviderForLocalSite": True}]
-    assert w.WmiClient._site_code_from_providers(rows) == "PS1"
-    # Falls back to the first row when none is flagged local.
-    assert w.WmiClient._site_code_from_providers([{"SiteCode": "AAA"}]) == "AAA"
-    assert w.WmiClient._site_code_from_providers([]) is None

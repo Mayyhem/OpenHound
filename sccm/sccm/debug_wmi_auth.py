@@ -28,6 +28,7 @@ import socket
 import sys
 
 from openhound_sccm.clients.wmi import WmiClient
+from openhound_sccm.collectors.privileged import _wmi_identify
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s: %(message)s")
 log = logging.getLogger("wmi_auth")
@@ -46,25 +47,24 @@ def _probe(name: str, *, target: str, domain: str, kdc: str, **creds) -> bool:
     print(f"\n===== {name} (target={target}) =====")
     client = WmiClient(target=target, domain=domain, kdc_host=kdc, **creds)
     try:
-        site = client.identify()
+        # Identify via the privileged collector's adapter — the same path the
+        # real collector uses (WmiClient itself is SCCM-agnostic now).
+        site = _wmi_identify(client)
         print(f"  identify() -> {site!r}")
         if site is None:
             print("  FAIL: no site code (rung exhausted or not a provider)")
             return False
-        ok = True
+        namespace = f"root\\SMS\\site_{site}"
         for cls in _PROBE_CLASSES:
-            rows = client.query(cls)
-            n = len(rows) if rows is not None else None
+            rows = list(client.query(namespace, cls))   # streaming iterator -> list
             sample = list(rows[0].keys())[:6] if rows else []
-            print(f"  {cls:24} -> {n} rows; sample keys: {sample}")
+            print(f"  {cls:24} -> {len(rows)} rows; sample keys: {sample}")
             # Validate embedded Props normalization on the site definition.
             if cls == "SMS_SCI_SiteDefinition" and rows:
                 props = rows[0].get("Props")
                 print(f"      Props normalized -> {type(props).__name__}, "
                       f"first={props[0] if isinstance(props, list) and props else props}")
-            if rows is None:
-                ok = False
-        return ok
+        return True
     except Exception as ex:  # noqa: BLE001 - live diagnostic
         log.exception("  ERROR during %s: %s", name, ex)
         return False
