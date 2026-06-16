@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
-from .collectors import registry, mssql, privileged, http
+from .collectors import registry, mssql, privileged, http, smb
 from .phased_pipeline import Phase
 
 import logging
@@ -76,6 +76,16 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
             "http_site_servers",
         ), http.collect_http,
     ),
+    # SMB runs last: an unauthenticated SMB2-negotiate signing check plus
+    # authenticated share enumeration to identify site-system roles. Skipped once
+    # AdminService or WMI has already collected the host (see should_run_phase),
+    # mirroring PS1's "already Collected -> skip SMB" check at 9053.
+    Phase(
+        "SMB", (
+            "smb_computers",
+            "smb_sites",
+        ), smb.collect_smb,
+    ),
 )
 
 def all_table_names(phases: Sequence[Phase]) -> list[str]:
@@ -100,12 +110,12 @@ def should_run_phase(target: str, phase: Phase, ctx) -> bool:
         if entry is not None and "AdminService" in entry.completed_phases:
             logger.info("[%s][%s] Skipping WMI phase because AdminService already completed", target, phase.name)
             return False
-    # HTTP is an unauthenticated fallback: once a privileged method (AdminService
-    # or WMI) has collected this host, the HTTP role probe adds nothing, so skip
-    # it. Mirrors PS1's "already Collected -> skip HTTP" check (8617).
-    if phase.name == "HTTP":
+    # HTTP and SMB are fallbacks: once a privileged method (AdminService or WMI)
+    # has collected this host, their role probes add nothing, so skip them.
+    # Mirrors PS1's "already Collected -> skip" checks (HTTP at 8617, SMB at 9053).
+    if phase.name in ("HTTP", "SMB"):
         entry = ctx.target_hosts_by_hostname.get(target.lower())
         if entry is not None and ({"AdminService", "WMI"} & entry.completed_phases):
-            logger.info("[%s][%s] Skipping HTTP phase because AdminService/WMI already collected this host", target, phase.name)
+            logger.info("[%s][%s] Skipping %s phase because AdminService/WMI already collected this host", target, phase.name, phase.name)
             return False
     return True

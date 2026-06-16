@@ -8,12 +8,14 @@ Built entirely on top of impacket's public API — no impacket source edits.
 """
 from __future__ import annotations
 
+import base64
 import importlib
 import logging
 import sys
 from typing import Optional
 
 from .. import log_context  # noqa: F401  (import registers logger.verbose on logging.Logger)
+from .http_auth import format_hashes  # canonical NT-hash -> "LM:NT" normalizer
 from impacket import crypto
 from impacket.nt_errors import STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS
 from impacket.smbconnection import SMBConnection
@@ -192,20 +194,48 @@ def smb_login_sspi(smb_connection, target_spn: str) -> None:
     _install_session_keys(smb3, client.session_key())
 
 
+def _load_ticket(kerberos_ticket: str):
+    """Decode a base64 KRB-CRED (.kirbi) into ``(username, TGT, TGS)`` for impacket.
+
+    Mirrors clients/wmi.py: the client principal is read from the ticket so
+    pass-the-ticket works even when no ``-u`` was supplied. ``kerberosLogin``
+    requests the ``cifs/<host>`` service ticket from this TGT, so TGS is None.
+    """
+    from impacket.krb5.ccache import CCache
+
+    ccache = CCache()
+    ccache.fromKRBCRED(base64.b64decode(kerberos_ticket, validate=True))
+    if not ccache.credentials:
+        raise ValueError("--ticket contains no usable credentials")
+    cred = ccache.credentials[0]
+    username = cred["client"].prettyPrint().decode("utf-8", "replace").split("@")[0]
+    return username, cred.toTGT(), None
+
+
 def connect_smb(
     hostname: str,
     domain: str,
     username: Optional[str],
     password: Optional[str],
     *,
+    nt_hash: Optional[str] = None,
+    kerberos_ticket: Optional[str] = None,
+    kdc_host: Optional[str] = None,
     timeout: int = 5,
 ) -> Optional[SMBConnection]:
     """Return an authenticated SMBConnection to *hostname*, or None on failure.
 
-    Auth ladder (no fall-through after the chosen rung is attempted):
-      1. complete creds (username AND password) -> explicit NTLM login
-      2. else SSPI available                    -> current-user SSPI Negotiate
-      3. else                                   -> anonymous null session
+    Auth ladder (explicit creds win; the chosen rung is the only one attempted):
+      1. kerberos_ticket    -> pass-the-ticket (kerberosLogin with the TGT)
+      2. nt_hash            -> pass-the-hash (NTLM login with the NT hash)
+      3. username+password  -> explicit NTLM login
+      4. SSPI available     -> current-user SSPI Negotiate
+      5. otherwise          -> anonymous null session
+
+    ``nt_hash`` / ``kerberos_ticket`` / ``kdc_host`` mirror the tool's
+    ``--nt-hash`` / ``--ticket`` flags and the resolved DC, so SMB honors the same
+    credential set as the AdminService / WMI clients (via impacket's
+    ``SMBConnection.login`` / ``kerberosLogin``).
     """
     try:
         smb = SMBConnection(hostname, hostname, timeout=timeout)
@@ -214,7 +244,21 @@ def connect_smb(
         return None
 
     try:
-        if username and password:
+        if kerberos_ticket:
+            ticket_user, tgt, tgs = _load_ticket(kerberos_ticket)
+            # Pass-the-ticket may carry no -u; impacket still needs a client
+            # principal for the AP-REQ, so fall back to the ticket's own cname.
+            _, u = _split_user_domain(username or ticket_user, domain)
+            lmhash, nthash = (format_hashes(nt_hash) or ":").split(":")
+            logger.verbose("SMB auth: pass-the-ticket as %s on %s", u, hostname)
+            # doKerberos treats `domain` as the realm -> pass the full DNS domain.
+            smb.kerberosLogin(u, password or "", domain, lmhash, nthash, "", kdc_host, TGT=tgt, TGS=tgs)
+        elif nt_hash:
+            d, u = _split_user_domain(username, domain)
+            lmhash, nthash = (format_hashes(nt_hash) or ":").split(":")
+            logger.verbose("SMB auth: pass-the-hash as %s\\%s on %s", d, u, hostname)
+            smb.login(u, "", d, lmhash, nthash)
+        elif username and password:
             d, u = _split_user_domain(username, domain)
             logger.verbose("SMB auth: explicit NTLM as %s\\%s on %s", d, u, hostname)
             smb.login(u, password, d)

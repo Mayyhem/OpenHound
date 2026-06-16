@@ -355,3 +355,61 @@ def test_registry_probe_does_not_retry_on_other_smb_errors(monkeypatch):
     assert result is None
     assert state["connects"] == 1                # single attempt, no retry
     assert sleeps == []
+
+
+# --- pass-the-hash / pass-the-ticket routing (added with the SMB collector) --
+
+class _RoutingSMB:
+    """Records which impacket auth method connect_smb invoked, with hashes/TGT."""
+
+    def __init__(self):
+        self.calls = []
+
+    def login(self, user, password, domain="", lmhash="", nthash="", *a, **k):
+        self.calls.append(("login", user, password, domain, lmhash, nthash))
+
+    def kerberosLogin(self, user, password, domain="", lmhash="", nthash="",
+                      aesKey="", kdcHost=None, TGT=None, TGS=None, *a, **k):
+        self.calls.append(("kerberosLogin", user, domain, kdcHost, TGT))
+
+    def close(self):
+        pass
+
+
+def _patch_routing(monkeypatch):
+    created = {}
+    monkeypatch.setattr(smb_sso, "SMBConnection", lambda *a, **k: created.setdefault("smb", _RoutingSMB()))
+    # Keep the SSPI / null rungs out of the way and skip real ticket decoding.
+    monkeypatch.setattr(smb_sso, "_SSPI_NEGOTIATE_AVAILABLE", False)
+    monkeypatch.setattr(smb_sso, "_load_ticket", lambda t: ("ticketuser", "FAKE_TGT", None))
+    return created
+
+
+def test_connect_smb_nt_hash_uses_pass_the_hash(monkeypatch):
+    created = _patch_routing(monkeypatch)
+    smb_sso.connect_smb("host", "mayyhem.com", "MAYYHEM\\admin", None, nt_hash="a" * 32)
+    method, user, password, domain, lmhash, nthash = created["smb"].calls[0]
+    assert method == "login" and password == ""      # hash used, password ignored
+    assert (user, domain) == ("admin", "MAYYHEM")
+    assert nthash == "a" * 32
+    assert lmhash == smb_sso.format_hashes("a" * 32).split(":")[0]
+
+
+def test_connect_smb_ticket_uses_pass_the_ticket(monkeypatch):
+    created = _patch_routing(monkeypatch)
+    smb_sso.connect_smb("host", "mayyhem.com", None, None,
+                        kerberos_ticket="Zm9v", kdc_host="dc.mayyhem.com")
+    method, user, domain, kdc, tgt = created["smb"].calls[0]
+    assert method == "kerberosLogin"
+    assert user == "ticketuser"        # client principal derived from the ticket
+    assert domain == "mayyhem.com"     # full DNS domain as the Kerberos realm
+    assert kdc == "dc.mayyhem.com"
+    assert tgt == "FAKE_TGT"
+
+
+def test_connect_smb_ticket_prefers_explicit_user(monkeypatch):
+    created = _patch_routing(monkeypatch)
+    smb_sso.connect_smb("host", "mayyhem.com", "MAYYHEM\\admin", None,
+                        kerberos_ticket="Zm9v", kdc_host="dc")
+    method, user, _domain, _kdc, _tgt = created["smb"].calls[0]
+    assert method == "kerberosLogin" and user == "admin"

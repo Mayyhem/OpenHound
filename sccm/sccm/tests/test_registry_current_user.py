@@ -38,6 +38,10 @@ class FakeProbe:
         self._enum_results = enum_results or {}
         self._read_values_result = read_values_result
         self.hostname = TARGET
+        # The real _RegistryProbe holds an SMB connection; get_ntlm_settings reads
+        # the negotiated signing flag off it when the registry DWORD is absent.
+        # None is enough here (negotiated_signing_required tolerates it).
+        self.smb = None
 
     def __enter__(self):
         return self

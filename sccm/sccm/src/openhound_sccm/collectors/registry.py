@@ -3,6 +3,7 @@ import socket
 import time
 from typing import Iterable, Any, Optional
 
+from ..clients.smb import negotiated_signing_required
 from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
 from ..log_context import with_log_context
@@ -38,11 +39,16 @@ class _RegistryProbe:
     Wraps an SMB connection + a winreg DCE/RPC binding.
     """
 
-    def __init__(self, hostname: str, domain: str, username: Optional[str], password: Optional[str]) -> None:
+    def __init__(self, hostname: str, domain: str, username: Optional[str], password: Optional[str],
+                 nt_hash: Optional[str] = None, kerberos_ticket: Optional[str] = None,
+                 kdc_host: Optional[str] = None) -> None:
         self.hostname = hostname
         self.domain = domain
         self.username = username
         self.password = password
+        self.nt_hash = nt_hash
+        self.kerberos_ticket = kerberos_ticket
+        self.kdc_host = kdc_host
         self.smb = None
         self.dce = None
         self.root_key = None
@@ -65,7 +71,10 @@ class _RegistryProbe:
             logger.warning("impacket not installed; skipping host %s", self.hostname)
             return None
 
-        smb = connect_smb(self.hostname, self.domain, self.username, self.password)
+        smb = connect_smb(
+            self.hostname, self.domain, self.username, self.password,
+            nt_hash=self.nt_hash, kerberos_ticket=self.kerberos_ticket, kdc_host=self.kdc_host,
+        )
         if smb is None:
             return None
         self.smb = smb
@@ -287,7 +296,15 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
 
     logger.info("Starting Remote Registry collection on %s...", target)
 
-    with _RegistryProbe(target, ctx.domain, ctx.username, ctx.password) as probe:
+    # Pass the full credential set so the SMB bind honors password, pass-the-hash
+    # (--nt-hash), pass-the-ticket (--ticket), current-user SSPI, or null session.
+    creds = getattr(getattr(ctx, "ad", None), "creds", None)
+    with _RegistryProbe(
+        target, ctx.domain, ctx.username, ctx.password,
+        nt_hash=getattr(ctx, "nt_hash", None),
+        kerberos_ticket=getattr(ctx, "kerberos_ticket", None),
+        kdc_host=getattr(creds, "domain_controller", None),
+    ) as probe:
         if probe is None:
             logger.info("Could not connect to %s for registry queries", target)
         else:
@@ -459,6 +476,7 @@ def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dic
     # NTLM/MSSQL settings are next because they require local Administrators privileges 
     # to collect but do not require the system to be an SCCM site server
     signing_required = None
+    signing_source = None
     restrict_receiving_ntlm_traffic = None
     disable_loopback_check = None
 
@@ -467,8 +485,21 @@ def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dic
 
     if require_signing_reg is not None:
         signing_required = require_signing_reg == 1
-        logger.verbose(f"SMB signing required: {signing_required}")
-    
+        signing_source = "Registry"
+        logger.verbose(f"SMB signing required (registry): {signing_required}")
+    else:
+        # Registry value absent: fall back to the signing requirement negotiated on
+        # the SMB connection we already hold open (no extra round-trip). Mirrors
+        # PS1's two-tier check -- registry RequireSecuritySignature first, SMB2
+        # negotiate as the fallback (Get-SMBSigningRequiredFromRegistry, 5048).
+        negotiated = negotiated_signing_required(probe.smb)
+        if negotiated is not None:
+            signing_required = negotiated
+            signing_source = "SMB-Negotiate"
+            logger.verbose(f"SMB signing required (negotiate fallback): {signing_required}")
+        else:
+            logger.verbose("SMB signing requirement undetermined on %s (no registry value, negotiate unavailable)", probe.hostname)
+
     logger.verbose("Querying %s for NTLM settings", SCCM_REG_KEYS["msv10"])
     ntlm_registry_value = probe.read_dword(SCCM_REG_KEYS["msv10"], "RestrictReceivingNTLMTraffic")
     if ntlm_registry_value is not None:
@@ -493,6 +524,7 @@ def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dic
         **(target_entry.ad_object or {}),
         "source": "RemoteRegistry-NTLMSettings",
         "smb_signing_required": signing_required,
+        "smb_signing_source": signing_source,
         "restrict_receiving_ntlm_traffic": restrict_receiving_ntlm_traffic,
         "disable_loopback_check": disable_loopback_check,
     }
