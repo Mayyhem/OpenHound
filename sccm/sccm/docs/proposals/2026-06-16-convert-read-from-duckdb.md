@@ -3,7 +3,7 @@
 **To:** OpenHound core maintainer(s)
 **From:** SCCM collector authors
 **Date:** 2026-06-16
-**Against:** `openhound` 0.1.4 (installed package; module paths below map to the core repo's `src/openhound/...`)
+**Against:** `openhound` 0.2.1 (runtime package verified byte-identical to 0.1.4 for every file cited below — the convert/preproc/lookup/opengraph machinery did not change across v0.1.5 → v0.2.1; module paths map to the core repo's `src/openhound/...`)
 **Status:** Proposal / request for guidance before we implement a workaround
 
 ---
@@ -228,7 +228,14 @@ connection) and `.schema`:
 def _duckdb_reader(lookup, table, batch=2000):
     @dlt.resource(name=f"{table}_db")
     def _rows():
-        cur = lookup.client.execute(f"SELECT * FROM {lookup.schema}.{table}")
+        # Use an INDEPENDENT cursor, not lookup.client directly. A DuckDB connection
+        # holds a single active result set: while we are suspended mid-scan, each yielded
+        # row flows into generate_graph, whose as_node/edges call self._lookup -> execute()
+        # on lookup.client. That second execute would replace the connection's active
+        # result and silently truncate this SELECT. lookup.client.cursor() shares the same
+        # database but keeps its own result set, so the driver scan survives those lookups.
+        cur = lookup.client.cursor()
+        cur.execute(f"SELECT * FROM {lookup.schema}.{table}")
         cols = [c[0] for c in cur.description]
         while (rows := cur.fetchmany(batch)):
             for row in rows:
@@ -245,6 +252,12 @@ for graph_resource in graph_resources:
     yield reader | generate_graph(model=graph_resource.model, apply_context=apply_context)
 ```
 
+The independent cursor is load-bearing, not stylistic: the SCCM use case is *iterate one coalesced
+`Computer` row, then call `self._lookup` to fan out its edges* — so a driver scan running
+concurrently with lookups on the same connection is the expected path, not an edge case. Reading
+straight off `lookup.client` would corrupt the scan on the first lookup. (See open question 2 for the
+remaining cross-resource/parallel-extraction concern, which the cursor does not fully settle.)
+
 `generate_graph` is unchanged: it still does `model(**row)` and yields `as_node`/`edges`. In DuckDB
 mode, `graph_resource.table` names a **DuckDB table** (the collector's convert source declares its
 resources with `table_name` set to the preproc table names and the matching Pydantic `columns=` model,
@@ -255,6 +268,11 @@ exactly as today — only the row origin changes).
 - Default `read_from="filesystem"` → **no change** for existing collectors.
 - `read_from="duckdb"` → `convert` iterates `{schema}.{table}` for each registered graph resource.
 - `self._lookup` continues to work in both modes (same connection).
+- **Precondition:** `read_from="duckdb"` requires the collector to register a lookup class on
+  `@app.convert(lookup=...)`. The reader needs `lookup.client`/`lookup.schema`; with no lookup,
+  `run_convert` leaves `lookup_session = None` (`app.py` lines 158–161) and DuckDB mode cannot run.
+  This is acceptable for coalescing collectors, which already require a lookup, but core should
+  raise a clear error rather than `AttributeError` on `None.client` if the flag is set without one.
 
 ---
 
@@ -273,10 +291,13 @@ exactly as today — only the row origin changes).
 
 1. **API surface.** Global `read_from="duckdb"` on `@app.convert` (proposed, simplest) vs a per-resource
    flag on `GraphResource` for mixed filesystem/DuckDB sources?
-2. **Connection concurrency.** Convert already shares one read-only DuckDB connection across all models'
-   `self._lookup` calls; a DuckDB-backed reader adds iteration load on the same connection. Should the
-   reader use a dedicated cursor/connection (DuckDB connections are not safe for concurrent use across
-   threads), especially given DLT may extract resources in parallel?
+2. **Connection concurrency.** Edit 3 already resolves the *single-threaded* hazard: the reader scans
+   through `lookup.client.cursor()` (its own result set) so per-row `self._lookup` calls on
+   `lookup.client` no longer clobber the in-flight scan. The remaining open question is the *parallel*
+   case — DLT may extract the per-resource readers in separate threads, and a single DuckDB connection
+   is not safe for concurrent use across threads. Should the lookup itself hand out a per-thread cursor
+   (or should core open a dedicated read-only connection per reader) so that parallel extraction is
+   safe, rather than relying on every collector to serialize convert?
 3. **Schema/table naming.** Confirm the reader should resolve tables as `{lookup.schema}.{table}` using
    the lookup's `schema` (the preproc `dataset_name`), matching where the transformer writes them.
 4. **Node de-duplication.** Independent of this change: is there interest in convert/destination-side

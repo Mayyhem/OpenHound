@@ -15,8 +15,9 @@ that file unless noted.
 mssql_server_instances, http_*, smb_*, ldap_*, dns_*, local_*). Identities that CMBP resolves inline
 during collection are **already resolved to SIDs** by the collectors (LDAP/AD objects,
 `adminservice_admins.AdminSid`, `r_system.SID`, `r_user.SID`, reserved/site-server/SQL-server
-principals). See [privileged.py:19-21](../../src/openhound_sccm/collectors/privileged.py#L19-L21):
+principals). See [privileged.py:19-21](../../../src/openhound_sccm/collectors/privileged.py#L19-L21):
 device users and `SecurityGroupName[]` are deliberately left **name-only** for downstream resolution.
+(Path note: links below are relative to this file under `docs/superpowers/specs/`.)
 
 The preproc/convert side is dismantled and must be rebuilt from scratch:
 
@@ -27,7 +28,7 @@ The preproc/convert side is dismantled and must be rebuilt from scratch:
 - `models/__init__.py` imports `from .sccm_site import SCCMSite` and describes an "11 derived edge
   models + DerivedEdges aggregator" design — **none of those files exist**.
 - `kinds/edges.py` is **empty**.
-- `_preproc_table_map()` ([main.py:1067](../../src/openhound_sccm/main.py#L1067)) lists table names that
+- `_preproc_table_map()` ([main.py:1067](../../../src/openhound_sccm/main.py#L1067)) lists table names that
   **do not match** the real collected tables (e.g. `ldap_computers`, `registry_sccm_databases`,
   `smb_signing_status`, `mssql_epa_flags`). It is stale and must be rebuilt from the actual collect
   output.
@@ -192,7 +193,7 @@ Prove DuckDB-written gzipped NDJSON round-trips through `read_jsonl` into a mode
 `graph_edges` row → one edge in the output). If `COPY … (FORMAT JSON)` gzip is fussy, switch the
 writeback to Python `gzip`+`json`. Fallback if writeback proves unworkable: the github lookup-driven
 pattern (`_find_all_objects`), documented in
-[the OpenHound proposal](../../docs/proposals/2026-06-16-convert-read-from-duckdb.md).
+[the OpenHound proposal](../../proposals/2026-06-16-convert-read-from-duckdb.md).
 
 ---
 
@@ -310,7 +311,7 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
 
 ## 8. Pending external dependency
 
-The OpenHound proposal ([docs/proposals/2026-06-16-convert-read-from-duckdb.md](../../docs/proposals/2026-06-16-convert-read-from-duckdb.md))
+The OpenHound proposal ([docs/proposals/2026-06-16-convert-read-from-duckdb.md](../../proposals/2026-06-16-convert-read-from-duckdb.md))
 asks the maintainer to let convert read DuckDB tables directly. **It is not a blocker** — this spec
 builds on writeback, entirely within `sccm/sccm`. If the proposal is accepted, the writeback step in
 `transforms.py` is deleted and the convert resources point at DuckDB instead; convert models are
