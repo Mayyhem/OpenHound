@@ -231,16 +231,14 @@ def _is_stronger_auth_required(exc: BaseException) -> bool:
 
 
 def bytes_to_sid(value: bytes | str | None) -> str | None:
-    """Convert a binary objectSid (8+ bytes) into S-1-5-21-... string form.
+    """Convert a binary objectSid (8+ bytes) into S-1-... string form.
 
-    ldap3 sometimes returns SIDs already as strings; pass-through in that case.
+    ldap3 sometimes returns the SID already formatted as a string; pass it through.
     """
     if value is None:
         return None
     if isinstance(value, str):
-        if value.startswith("S-1-"):
-            return value
-        # Some servers return the binary as a base64 or hex string — best effort decode
+        # Already a formatted "S-1-..." string from ldap3 — nothing to decode.
         return value
     if not isinstance(value, (bytes, bytearray)) or len(value) < 8:
         return None
