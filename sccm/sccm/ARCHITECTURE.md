@@ -546,6 +546,8 @@ collected tables — `ldap_computers`, AdminService/`SMS_R_System`, `remoteregis
 **one coalesced row per computer** — but then `convert` has *no supported way to iterate that coalesced
 table*. This is the framework gap that most directly blocks a clean port.
 
+Discussion: https://specterops.slack.com/archives/C09LBVA5T1N/p1781633877476619
+
 ### The add-on / design direction
 
 Two routes out of this gap were written up. The first is a proposed **core** fix, for the framework
