@@ -1,6 +1,8 @@
 # SCCM preproc + convert — design spec
 
 **Date:** 2026-06-16
+**Revised:** 2026-06-16 — mechanism flipped from JSONL *writeback* to a convert-time *DuckDB-reading
+pipeline* (Convert2-Read-DB), per review with the OpenHound author; writeback demoted to documented fallback.
 **Scope:** Port the post-processing / graph-building logic of `ConfigManBearPig.ps1` (CMBP) into the
 OpenHound SCCM collector's `preproc` and `convert` phases. The `collect` phase is complete and
 unchanged.
@@ -40,17 +42,32 @@ Target graph (from CMBP): **15 node kinds + ~35 edge kinds**.
 
 ## 2. Locked decisions
 
-1. **Preproc coalesces + writes JSONL; convert is thin readers.** preproc loads raw JSONL into DuckDB,
-   builds coalesced **one-row-per-entity** node tables and a derived `graph_edges` table, then writes
-   each back into the convert bucket as gzipped JSONL. Convert binds a trivial typed model per table:
-   `row → node` / `row → edge`. Rationale: `convert` can only iterate JSONL from the bucket (the preproc
-   DuckDB is reachable only via `self._lookup`), and SCCM assembles one node (e.g. a `Computer`) from
-   many raw tables — coalescing must happen in preproc SQL. See §4.
+1. **Preproc coalesces in DuckDB; convert emits via the Second Convert Pipeline with DuckDB Read (`Convert2-Read-DB`).** preproc loads raw
+   JSONL into DuckDB and builds coalesced **one-row-per-entity** node tables (`node_*`) and a derived
+   `graph_edges` table via set-based SQL. `convert` then runs an explicit `dlt.pipeline` that reads
+   those DuckDB tables directly and emits to the `opengraph_file` destination, instantiating a trivial
+   typed model per table (`row → node` / `row → edge`). **Rationale:** the framework's built-in convert
+   reader only globs JSONL from the bucket, so a coalesced DuckDB table can't be iterated by it; rather
+   than writing the coalesced tables back to JSONL (a filesystem side-channel that couples the
+   preprocess/convert path args), we read DuckDB directly with a manual pipeline — which the OpenHound
+   author confirms is the more DLT-native pattern. The coalescing itself stays SQL `GROUP BY` (the only
+   construct that does true column + array union across the per-source tables). See §4. The DuckDB
+   read-implementation (a custom `@dlt.resource` over the open lookup connection vs DLT's `sql_database`
+   source) is **deferred to the implementation plan**, where both are prototyped against the real
+   `lookup.duckdb`.
 2. **Offline identity resolution, no collect changes.** preproc builds a `principal_by_name` table from
    the union of every collected `(name, SID)` pair (r_user, r_system, ldap/AD objects, admins, reserved).
    Name-only fields (device users, `SecurityGroupName[]`, SQL service account) are resolved by joining
    against it; unresolved → the edge/node is dropped (matches CMBP's drop-on-failure at
    `Resolve-PrincipalInDomain` :459-904). Logged at warning level.
+   *SID format verified 2026-06-16:* AD-resolved tables carry `object_sid` (from `bytes_to_sid`,
+   [ad.py:233](../../../src/openhound_sccm/clients/ad.py#L233)) and the SMS tables carry `sid`
+   (snake-cased from `SMS_R_System.SID`, [sms_rows.py:78](../../../src/openhound_sccm/collectors/sms_rows.py#L78));
+   both are the canonical `S-1-5-…` string, so the coalesce aliases them to one column and `GROUP BY`
+   collapses the same entity. `principal_by_name` also **back-stops node identity** (not just name-only
+   edge fields): the node coalescing resolves rows whose own SID is NULL (AD resolution failed) by
+   `dNSHostName`/`name` *before* `GROUP BY`; rows still unresolved after that are dropped with a logged
+   count (tier-3 — every emitted node is therefore SID-keyed).
 3. **Active MSSQL only.** Port the two live builders (`Add-MSSQLServerNodesAndEdges` :6050-6186 and
    `Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer` :6187-6292) plus `MSSQL_GetTGS` :1965-1978,
    `MSSQL_ServiceAccountFor`/`GetAdminTGS` :8012-8016, and `MSSQL_AssignAllPermissions` (db→site)
@@ -67,6 +84,32 @@ Target graph (from CMBP): **15 node kinds + ~35 edge kinds**.
    (they never `Upsert`; the `wmi_*` raw tables feed the same coalescing as `adminservice_*`); the
    superseded `Invoke-ProcessRoleAssignments` :1986 duplicate.
 
+### Alternatives considered (2026-06-16 review with the OpenHound author)
+
+Recorded so the mechanism isn't re-litigated:
+
+- **Writeback to JSONL — demoted to documented fallback.** preproc `COPY`s each coalesced `node_*` table
+  and `graph_edges` to `<bucket>/sccm/<table>/data.jsonl.gz`; convert reads them with the framework's
+  filesystem reader (thin `row → node`/`row → edge` models). Fully idiomatic on the *read* side and
+  leaves inspectable JSONL artifacts — but it is a filesystem side-channel: the preproc transformer must
+  learn the bucket path and write into it, coupling the preprocess/convert path args (the awkwardness
+  the §8 proposal flags), and it doubles IO (write + re-read the coalesced rows). The author considers
+  it a last resort. **Kept as the fallback** if Convert2-Read-DB hits a wall (see §4 Stage-0 spike).
+- **Multi-driver emit + BloodHound merge — rejected (scale).** One convert model per contributing raw
+  table, all emitting the same node id, deduped on ingest. In the common worst case (every domain
+  computer is a client), the population is found by *both* LDAP (CmRcService SPN) and privileged
+  `r_system`, so each computer emits ~2× (one extra full copy of the population), with further multiples
+  on per-host-probed infra. Convert2-Read-DB's one-row-per-entity coalescing is flat 1×. Same reasoning for User/Group.
+- **DLT native `merge` write disposition — rejected (semantics + fit).**
+  `@dlt.resource(table_name=…, write_disposition="merge", primary_key="id")` across resources. Two
+  problems: (1) DLT `merge` deduplicates/replaces at the **row** level by key — it does **not**
+  column-coalesce partial rows into one fat row (confirm with a 5-line spike if ever revisited), so it
+  wouldn't combine the per-source fields; and (2) there is **no phase to run it** — collect can't share
+  a resource across the ordered per-host phases (the original constraint) and the key isn't normalized
+  yet, preproc's `PreProcessor.run` hardcodes `write_disposition="replace"` in core (no core edits), and
+  convert's `opengraph_file` destination isn't relational. SQL `GROUP BY` in preproc does the true
+  column + array coalesce that `merge` can't, at the right layer.
+
 ### Open design points (resolve at spec review / Stage 1)
 
 - **Root/environment node.** OpenHound requires one root/environment node and `environmentid` on every
@@ -76,9 +119,13 @@ Target graph (from CMBP): **15 node kinds + ~35 edge kinds**.
   (Computer/User/Group) `environmentid` aligned to their AD domain** so they merge cleanly with
   SharpHound data rather than being re-homed under the SCCM environment. Needs confirmation against
   BloodHound's OpenGraph conventions.
-- **Edges via writeback vs lookup.** Default: materialize `graph_edges` and read it with thin edge
-  models (uniform, most testable). Alternative: keep edges lookup-driven (github-style fan-out) to
-  avoid writing a large edge file. Adjustable per stage.
+- **Edges: materialized `graph_edges` (locked).** preproc builds a single
+  `graph_edges(start_id, end_id, kind, properties)` table by UNION-ing the per-edge-kind SELECTs;
+  convert emits all ~35 kinds through **one** trivial edge model reading that table from DuckDB. The
+  lookup-driven github-style fan-out alternative is rejected at ~35-kind scale (bespoke lookup methods
+  + per-row Python fan-out scattered across ~10 models — the O(n²)/O(n³) trap of §7). This choice is
+  **independent of the node-read mechanism**: `graph_edges` is just another DuckDB table the Convert2-Read-DB pipeline
+  reads.
 
 ---
 
@@ -161,39 +208,55 @@ or **post-proc** (`Invoke-PostProcessing` :1577-1984). Every item maps to a port
 
 ### Preproc (`transforms.py` + `main.py`)
 
-1. `main.py` `preproc(ctx)` stashes `ctx.pipeline.input_path` (the bucket) for the transformer, then
-   returns the corrected raw-table map (DuckDB table → JSONL path under `sccm/<real_table>`).
+1. `main.py` `preproc(ctx)` returns the corrected raw-table map (DuckDB table → JSONL path under
+   `sccm/<real_table>`). No bucket-path stashing is needed — Convert2-Read-DB does not write back.
 2. `transforms(con)`:
    - **Coalesce** each entity into a one-row-per-ID table (`node_computer`, `node_user`, `node_group`,
      `node_site`, `node_client_device`, `node_collection`, `node_admin_user`, `node_security_role`,
      `node_mssql_*`) via `GROUP BY` + array `UNION` — this is CMBP's `Upsert-Node` merge as SQL
      (:1444-1575). `rootSiteCode` is computed here (hierarchy BFS, CMBP :2511/2620) so SCCM object IDs
      are minted final.
+     - *SID normalization in the coalesce:* alias `object_sid`/`sid` to one key (both canonical
+       `S-1-5-…`, §2 Decision #2); resolve NULL-SID rows via `principal_by_name`; **drop
+       `SMS_R_System` rows flagged `Obsolete`** (it keeps stale duplicate records per machine, which
+       would otherwise shadow the live row in `any_value`/array unions); drop rows still without a SID
+       and log the count.
    - **Lookups**: `principal_by_name`, `resource_to_sid`, `device_by_resourceid`, `site_root`,
      `sites_in_hierarchy`.
    - **Derived edges**: build `graph_edges(start_id, end_id, kind, properties)` by `UNION`-ing the
      per-edge-kind SELECTs (CMBP post-processing :1577-1984 + the inline edge logic).
-   - **Writeback**: write each `node_*` table and `graph_edges` to `<bucket>/sccm/<table>/data.jsonl.gz`
-     (DuckDB `COPY … (FORMAT JSON)`, or Python `gzip`+`json` fallback).
+   - **No writeback.** Everything stays in the lookup DuckDB.
 
-### Convert (`source.py` convert source + `models/*`)
+### Convert (`convert_pipeline.py` + `models/*` + `main.py`)
 
-- A convert source declares one DLT resource per coalesced table: `columns=<Model>`,
-  `table_name=<node_* | graph_edges>`. The framework's `opengraph` reader globs
-  `<bucket>/sccm/<table>/**/*.jsonl.gz` and instantiates `<Model>` per row.
-- Node models: typed `<PREFIX>NodeProperties` dataclass (documented `Attributes`) + `as_node` returning
-  the node. No edge logic.
-- Edge model(s): read `graph_edges`; emit `Edge(kind=row.kind, start=EdgePath(row.start_id,
-  match_by="id"), end=EdgePath(row.end_id, match_by="id"), …)`. `EdgeDef` declarations grouped by stage.
-- `self._lookup` is still available for any residual point resolution.
+- `@app.convert(lookup=SCCMLookup)` runs an explicit `dlt.pipeline` (the **Convert2-Read-DB helper**) that, for each
+  `node_*` table and `graph_edges`, reads rows from the lookup DuckDB and instantiates the typed model,
+  emitting `as_node` / edges to the `opengraph_file` destination
+  (`output_path = ctx.output_path`, `source_kind = app.source_kind`). The helper **`mkdir`s
+  `output_path` first** — the destination opens files without creating the dir, and the helper runs
+  before the framework would create it.
+- The **DuckDB read source** is either a custom `@dlt.resource` over the open lookup connection (an
+  independent cursor, so it can't clobber `self._lookup` queries) or DLT's `sql_database` source —
+  chosen in the implementation plan (§2 Decision #1).
+- **Node models:** typed `<PREFIX>NodeProperties` dataclass (documented `Attributes`) + `as_node`
+  returning the node. No edge logic. **Edge model:** reads `graph_edges`; emits `Edge(kind=row.kind,
+  start=EdgePath(row.start_id, match_by="id"), end=EdgePath(row.end_id, match_by="id"), …)`. `EdgeDef`
+  declarations grouped by stage.
+- The framework's `@app.convert` still expects a `(DltSource, dict)` return; return a **minimal/empty
+  source** so the framework's own pipeline is a no-op (all emission happens in the Convert2-Read-DB pipeline).
+  `self._lookup` remains available for any residual point resolution.
+- **Output coexistence verified:** `opengraph_file` appends uniquely-numbered files
+  (`{table}-{n}.json`) via a process-global counter ([destination.py:12-49](../../../.venv/Lib/site-packages/openhound/destinations/opengraph/destination.py)),
+  so the Convert2-Read-DB pipeline and the framework no-op pipeline never collide.
 
 ### Validation of the mechanism (Stage 0 spike)
 
-Prove DuckDB-written gzipped NDJSON round-trips through `read_jsonl` into a model end-to-end (one tiny
-`graph_edges` row → one edge in the output). If `COPY … (FORMAT JSON)` gzip is fussy, switch the
-writeback to Python `gzip`+`json`. Fallback if writeback proves unworkable: the github lookup-driven
-pattern (`_find_all_objects`), documented in
-[the OpenHound proposal](../../proposals/2026-06-16-convert-read-from-duckdb.md).
+Prove a tiny `graph_edges` row in DuckDB round-trips through the Convert2-Read-DB pipeline into **one edge** in
+`<graph>/*.json`, and one `node_*` row into **one node**. **Fallback if Convert2-Read-DB proves unworkable:**
+writeback — preproc `COPY … (FORMAT JSON)` gzip into the bucket, convert reads via the framework's
+filesystem reader (§2 alternatives; the
+[OpenHound proposal](../../proposals/2026-06-16-convert-read-from-duckdb.md) covers the core-level
+variant).
 
 ---
 
@@ -201,15 +264,15 @@ pattern (`_find_all_objects`), documented in
 
 | File | Role |
 |---|---|
-| `src/openhound_sccm/transforms.py` | recreate — coalescing + derived-edge SQL + JSONL writeback |
-| `src/openhound_sccm/lookup.py` | recreate — `SCCMLookup(LookupManager)` cached methods |
+| `src/openhound_sccm/transforms.py` | recreate — coalescing + derived-edge SQL (no writeback) |
+| `src/openhound_sccm/lookup.py` | recreate — `SCCMLookup(LookupManager)` cached methods + the row iterators the Convert2-Read-DB pipeline reads |
+| `src/openhound_sccm/convert_pipeline.py` | **new** — the Convert2-Read-DB manual `dlt.pipeline` (read `node_*`/`graph_edges` from DuckDB → `opengraph_file`); `mkdir`s output first |
 | `src/openhound_sccm/graph.py` | recreate — `SCCMNodeProperties`/`SCCMNode`/`SCCMEdgeProperties` |
 | `src/openhound_sccm/kinds/edges.py` | populate — all edge-kind constants |
 | `src/openhound_sccm/kinds/nodes.py` | keep (already complete) |
-| `src/openhound_sccm/models/*.py` | one typed model per coalesced node table + edge model(s) |
+| `src/openhound_sccm/models/*.py` | one typed model per coalesced node table + the edge model |
 | `src/openhound_sccm/models/__init__.py` | fix imports/exports to match real files |
-| `src/openhound_sccm/source.py` | add the convert source returning model-bound resources |
-| `src/openhound_sccm/main.py` | fix `transforms` import; rebuild `_preproc_table_map()`; register `@app.convert(lookup=SCCMLookup)`; stash bucket path |
+| `src/openhound_sccm/main.py` | fix `transforms` import; rebuild `_preproc_table_map()`; register `@app.convert(lookup=SCCMLookup)` to run the Convert2-Read-DB pipeline and return a minimal source |
 | `README.md` | Node/Edge Reference, preproc/convert sections, mayyhem.com examples |
 
 ---
@@ -228,12 +291,14 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
 
 ### Stage 0 — Unblock & scaffold
 - **PS1:** export/seed_data structure :9523-9846; traversable allow-list :2216-2255.
-- **Do:** recreate `graph.py` (base node/props/edge classes), `lookup.py` (`SCCMLookup` skeleton),
-  `transforms.py` (no-op transform + the writeback helper + the Stage-0 spike table); fix `main.py`
-  import; rebuild `_preproc_table_map()` to the real collected tables; register `@app.convert`;
+- **Do:** recreate `graph.py` (base node/props/edge classes), `lookup.py` (`SCCMLookup` skeleton + the
+  DuckDB row iterator), `transforms.py` (no-op transform + coalescing skeleton + the Stage-0 spike
+  table), `convert_pipeline.py` (the Convert2-Read-DB helper); fix `main.py` import; rebuild `_preproc_table_map()` to
+  the real collected tables; register `@app.convert` (runs the Convert2-Read-DB pipeline, returns a minimal source);
   populate `kinds/edges.py`; fix `models/__init__.py`.
 - **Validate:** package imports; `openhound preprocess sccm …` and `openhound convert sccm …` both run
-  to completion; the spike `graph_edges` row appears as one edge in `<graph>`.
+  to completion; the spike `graph_edges` row appears as one edge in `<graph>` via the Convert2-Read-DB pipeline (and
+  one `node_*` row as one node).
 
 ### Stage 1 — Base nodes + Site + hierarchy
 - **PS1:** `Upsert-Node` merge semantics :1444-1575; AdminService site emit :7043; hierarchy
@@ -242,9 +307,9 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
 - **Do:** coalesce `node_computer`/`node_user`/`node_group`/`node_site`; compute `rootSiteCode`;
   `principal_by_name`. Emit Computer/User/Group/Base + SCCM_Site; `SCCM_AdminsReplicatedTo`. Decide the
   root/environment node (§2 open point).
-- **Validate:** `computers.json`/`users.json`/`groups.json` + `SCCM_Site` nodes present with merged
-  arrays (site-system roles unioned, no dup computer nodes per SID); `SCCM_AdminsReplicatedTo` matches
-  the lab hierarchy; spot-check one site's `rootSiteCode`.
+- **Validate:** `computer`/`user`/`group` + `SCCM_Site` nodes present with merged arrays (site-system
+  roles unioned, no dup computer nodes per SID); `SCCM_AdminsReplicatedTo` matches the lab hierarchy;
+  spot-check one site's `rootSiteCode`.
 
 ### Stage 2 — SCCM entities + inline edges
 - **PS1:** ClientDevice :7220-7300; Collection :7532 (+HasMember :7617); AdminUser :7767 (+IsMappedTo
@@ -305,14 +370,19 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
 | `collectionSource` vs `CollectionSource` casing | :9072/4696 | Normalize to one key during coalescing. |
 | Hardcoded `:1433` | :6055/7997 | Use collected SQL port where available; fall back to 1433 only if unknown. |
 | EPA/SMB-signing default-to-vulnerable assumptions | :6675-6681 etc. | Preserve intent; label inferred/possible per EPA-uncertainty convention; gate with `--disable-possible-edges`. |
+| `SMS_R_System` keeps obsolete duplicate records per machine | r_system collection | Filter `Obsolete` in the coalesce so a stale row can't shadow the live one (§4). |
+| `bytes_to_sid` had a dead str branch + a misleading "base64/hex decode" comment | [ad.py:233](../../../src/openhound_sccm/clients/ad.py#L233) | **Fixed 2026-06-16:** the two identical `return value` branches collapsed into one honest pass-through; false comment removed. Behavior-preserving — both call sites pass bytes. |
 | Dead WMI graph-emit / Host node / role-assignment dup | :8210-8600 / :2373 / :1986 | Not ported (§2 exclusions). |
 
 ---
 
-## 8. Pending external dependency
+## 8. Relationship to the convert-read-from-DuckDB proposal
 
-The OpenHound proposal ([docs/proposals/2026-06-16-convert-read-from-duckdb.md](../../proposals/2026-06-16-convert-read-from-duckdb.md))
-asks the maintainer to let convert read DuckDB tables directly. **It is not a blocker** — this spec
-builds on writeback, entirely within `sccm/sccm`. If the proposal is accepted, the writeback step in
-`transforms.py` is deleted and the convert resources point at DuckDB instead; convert models are
-otherwise unchanged.
+Convert2-Read-DB is the **userland form** of the OpenHound proposal
+([docs/proposals/2026-06-16-convert-read-from-duckdb.md](../../proposals/2026-06-16-convert-read-from-duckdb.md)):
+it reads coalesced DuckDB tables at convert time **without a core change**, by running our own pipeline.
+If the proposal is accepted (the framework's own convert reader gains a DuckDB mode), the manual Convert2-Read-DB
+pipeline collapses into a normal convert source whose resources point at the DuckDB tables — the models
+are unchanged and the explicit pipeline is deleted. Not a blocker either way; the design lives entirely
+within `sccm/sccm`. The *writeback* fallback (§2 alternatives) remains the escape hatch if the manual
+pipeline proves unworkable in practice.

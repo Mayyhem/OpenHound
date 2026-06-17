@@ -114,7 +114,7 @@ thread pool. The bridge is in [`source.py`](src/openhound_sccm/source.py):
   body is *block on this table's queue until `DONE`* — [`_drain_stream` / `_make_emit_resource`](src/openhound_sccm/source.py#L144-L178).
   A blocking `get()` means "an empty queue is a *wait*, not an end." This turns each DLT resource into a
   **consumer** of the engine's output instead of a producer.
-- The two halves run concurrently in [`_run_per_host_stage`](src/openhound_sccm/main.py#L748-L833):
+- The two halves run concurrently in [`_run_per_host_stage`](src/openhound_sccm/main.py#L748-L832):
   the **engine runs on a background thread**
   (producing rows onto the bounded streams, then closing them with `DONE` at quiescence) while
   **`pipeline.run(...)` drains those streams on the main thread**.
@@ -151,7 +151,7 @@ Stage 1 is selected with `src.with_resources(*DISCOVERY_RESOURCE_NAMES)`
   `EXTRACT__WORKERS`), so it assumes **one collect run per process** — true for the CLI, documented as
   "not reentrant" ([main.py:759-762](src/openhound_sccm/main.py#L759-L762)).
 - The `finally` block must drain streams while joining the engine thread so a crashed `pipeline.run`
-  can't leave a worker blocked forever on a full queue ([main.py:813-826](src/openhound_sccm/main.py#L813-L826)).
+  can't leave a worker blocked forever on a full queue ([main.py:813-832](src/openhound_sccm/main.py#L813-L832)).
 - We pay the cost of running two cooperating schedulers (our engine + DLT's extractor) instead of one.
 
 ---
@@ -195,7 +195,8 @@ thread** without the noise of a 10-way thread pool.
     debugger never jumps between targets — the deterministic-sequential mode. `= 10` reproduces real
     concurrency.
   - `COMPUTERS` mirrors `--computers` (seed + allow-list); `COLLECTION_METHODS` mirrors
-    `-m/--collection-methods`; `MAXSIZE = 1` lets you watch backpressure block a producer.
+    `-m/--collection-methods`; `MAXSIZE` (the bounded-stream depth, default 1000) set to `1` lets you
+    watch backpressure block a producer.
 
   The same determinism is reachable from the real CLI with `--threads 1 -c <one-host> -m <one-method>` —
   the engine's `run_one_target` is a public, standalone entry point precisely so a single target can be
@@ -233,7 +234,7 @@ phase, via the context) call `submit(host)`; the dispatcher calls `next()`/`comp
 is knowing **when collection is actually finished** when new work can appear at any moment. The queue
 tracks *in-flight* work (handed out but not completed) and declares **quiescence** — `next()` returns
 `None` — only when *nothing is pending and nothing is in flight*
-([work_queue.py:55-79](src/openhound_sccm/phased_pipeline/work_queue.py#L55-L79)).
+([work_queue.py:55-68](src/openhound_sccm/phased_pipeline/work_queue.py#L55-L68)).
 
 The race-free guarantee rests on an **ordering contract** spelled out in the module docstring
 ([work_queue.py:15-21](src/openhound_sccm/phased_pipeline/work_queue.py#L15-L21)) and enforced in the
@@ -250,9 +251,10 @@ Two more pieces wire discovery into this loop:
   [§4](#4-targeted-collection-an-include-only-allow-list)), dedups by SID then hostname (with an FQDN
   upgrade path), merges sources/site-codes onto an existing `TargetEntry`, and — for a genuinely new host —
   calls `work_queue.submit(...)` ([context.py:355-356](src/openhound_sccm/context.py#L355-L356)). Both
-  Stage-1 discovery resources and the CLI's `--computers` seeds go through this *same* funnel
-  ([main.py:963-965](src/openhound_sccm/main.py#L963-L965)) so dedup and filtering are identical.
-- [`target_hosts_snapshot`](src/openhound_sccm/context.py#L361-L368) lets phases read the *current* target
+  Stage-1 discovery resources (which call it from inside `collectors/*`) and the CLI's `--computers`
+  seeds ([main.py:963-965](src/openhound_sccm/main.py#L963-L965)) go through this *same* funnel, so dedup
+  and filtering are identical.
+- [`target_hosts_snapshot`](src/openhound_sccm/context.py#L361-L369) lets phases read the *current* target
   set at iteration time, so a host discovered after a phase started is still picked up — the OpenHound
   equivalent of CMBP's "iterate the updated list."
 
@@ -282,12 +284,13 @@ be decoupled.
 
 - `--computers` and `--computer-file` feed [`_expand_allowed_targets`](src/openhound_sccm/source.py#L41-L58),
   which lowercases each name **and** adds its short-name form so a host matches whether it's later seen as
-  an FQDN or a NetBIOS name. The result becomes `SourceContext.allowed_targets`
-  ([source.py:244-267](src/openhound_sccm/source.py#L244-L267)).
+  an FQDN or a NetBIOS name. The lowercased, short-name-expanded set is assembled at
+  [source.py:244-248](src/openhound_sccm/source.py#L244-L248) and handed to `SourceContext.allowed_targets`
+  ([source.py:267](src/openhound_sccm/source.py#L267)).
 - [`_is_allowed_target`](src/openhound_sccm/context.py#L239-L258) (CMBP's `Test-AllowedTarget`) is checked
   inside `register_target`: an **empty** allow-list means *allow all* (pure discovery mode), and a
   non-empty one rejects any host whose candidate name forms don't intersect it — logging the skip rather
-  than silently dropping it ([context.py:294-297](src/openhound_sccm/context.py#L294-L297)).
+  than silently dropping it ([context.py:296-297](src/openhound_sccm/context.py#L296-L297)).
 
 Because the gate sits at the single registration funnel, the same filter governs LDAP-discovered hosts,
 DNS-discovered hosts, mid-run HTTP-discovered siblings, and CLI seeds alike. `--computers` therefore does
@@ -321,7 +324,7 @@ PowerShell tool does — rather than demanding flags. None of that fits a one-to
 ### The add-on: a hand-registered Typer command + a flag→env bridge + context discovery
 
 Rather than use `@app.collect()`, [`main.py`](src/openhound_sccm/main.py) registers
-[`collect_sccm`](src/openhound_sccm/main.py#L838-L1009) **directly on the framework's public Typer group**
+[`collect_sccm`](src/openhound_sccm/main.py#L842-L1009) **directly on the framework's public Typer group**
 (`from openhound.cli.collect import collect as _collect_typer`) so it can expose the full CMBP flag surface
 ([main.py:842-885](src/openhound_sccm/main.py#L842-L885)). It then assigns `app.collector = collect_sccm`
 ([main.py:1057](src/openhound_sccm/main.py#L1057)) so the framework's import-time
@@ -380,7 +383,7 @@ then current-user SSO, then (where the protocol allows) anonymous.*
 |---|---|---|---|
 | **HTTP / AdminService** | shared `choose_auth` in [`clients/http_auth.py:134-168`](src/openhound_sccm/clients/http_auth.py#L134-L168), driven by [`clients/http.py`](src/openhound_sccm/clients/http.py) | pass-the-ticket → explicit (Kerberos→NTLM) → current-user SSPI → **anonymous** | `impacket` (krb5/ntlm/spnego), `pywin32` (SSPI), `requests` |
 | **WMI (AdminService fallback)** | reuses the **same** `choose_auth` ([`clients/wmi.py:333-353`](src/openhound_sccm/clients/wmi.py#L333-L353)) | pass-the-ticket → explicit (Kerberos→NTLM) → current-user SSPI → ~~anonymous~~ (skipped — DCOM requires auth) | `impacket` (DCOM), `pywin32` (`win32com`) |
-| **LDAP / AD** | attempt plan in [`clients/ad.py`](src/openhound_sccm/clients/ad.py) (`_build_attempt_plan`) | explicit NTLM → current-user SSPI-NTLM → Kerberos (GSSAPI) → anonymous, each over an auto-detected transport | `ldap3`, `pywin32` (SSPI), `winkerberos`/`gssapi` |
+| **LDAP / AD** | attempt plan in [`clients/ad.py`](src/openhound_sccm/clients/ad.py) (`_build_attempt_plan`) | explicit NTLM (exclusive when username+password set); otherwise Kerberos (GSSAPI) → current-user SSPI-NTLM → anonymous — each over an auto-detected transport | `ldap3`, `pywin32` (SSPI), `winkerberos`/`gssapi` |
 | **SMB (RemoteRegistry + SMB phases)** | inline ladder in `connect_smb` ([`clients/smb_sso.py:215-279`](src/openhound_sccm/clients/smb_sso.py#L215-L279)) | pass-the-ticket → pass-the-hash → explicit password → current-user SSPI Negotiate → null session | `impacket` (SMBConnection, krb5 CCache), `pywin32` (SSPI) |
 | **MSSQL EPA probe** | `impacket_prober` / `sspi_prober` in [`clients/mssql_epa.py`](src/openhound_sccm/clients/mssql_epa.py) | explicit creds **or** current Windows user | `impacket` (tds/ntlm), `pywin32` (SSPI) |
 
@@ -545,39 +548,50 @@ table*. This is the framework gap that most directly blocks a clean port.
 
 ### The add-on / design direction
 
-The problem and a proposed *core* fix are written up for the framework maintainers in
+Two routes out of this gap were written up. The first is a proposed **core** fix, for the framework
+maintainers, in
 [`docs/proposals/2026-06-16-convert-read-from-duckdb.md`](docs/proposals/2026-06-16-convert-read-from-duckdb.md):
 an opt-in `read_from="duckdb"` selector on `@app.convert` that makes the convert reader iterate the
 preproc tables through the already-open lookup connection (using an **independent cursor** so per-row
 `self._lookup` calls don't clobber the in-flight scan).
 
-Because we can't depend on a core change landing, the **chosen no-core-change approach** (recorded in the
-spec; sketched in [`docs/proposals/2026-06-16-computer-node-multi-driver-merge.md`](docs/proposals/2026-06-16-computer-node-multi-driver-merge.md))
-works entirely within public extension points:
+Because we can't depend on a core change landing, the **chosen approach needs no core edit**. It is
+recorded in the spec as the **Second Convert Pipeline with DuckDB Read** (`Convert2-Read-DB`):
 
-1. **`preproc`** builds a `computers_merged` mega-table in DuckDB — `UNION` every contributing table
+1. **`preproc`** loads the raw JSONL into DuckDB and builds **coalesced, one-row-per-entity** node tables
+   (`node_*`) plus a derived `graph_edges` table with set-based SQL — `UNION` every contributing table
    normalized to a common shape, then `GROUP BY sid` (scalars coalesce via `any_value`, arrays union via
-   `list_distinct(flatten(...))`). This is the in-DuckDB equivalent of CMBP's `Upsert-Node`.
-2. A thin `SCCMLookup.computer_by_sid(sid)` returns the whole merged row as a dict (the framework's
-   `_find_single_object` only returns one column, so this is a small custom method on the shared lookup
-   connection).
-3. **`convert`** declares one trivial **driver per contributing table**, each binding the same `Computer`
-   base model via a uniquely-named subclass. Every emission looks up `computer_by_sid` and builds the
-   **identical** node, so the duplicates that result are byte-for-byte the same and **BloodHound merges
-   them by `ObjectIdentifier`** on ingest. (The framework reads the convert source *only* to learn each
-   model's `table_name`; it never runs those generators, so the drivers can be empty one-liners.)
+   `list_distinct(flatten(...))`). This `GROUP BY` is the in-DuckDB equivalent of CMBP's `Upsert-Node`, and
+   the only construct that does a true column-and-array union across the per-source tables.
+2. **`convert`** then runs its **own explicit `dlt.pipeline`** that reads those coalesced DuckDB tables
+   directly and emits to the `opengraph_file` destination, instantiating a trivial typed model per table
+   (`row → node` / `row → edge`). Reading DuckDB straight from the manual pipeline — rather than first
+   writing the coalesced rows back out to JSONL — is the more DLT-native of the two patterns, confirmed
+   with the OpenHound author. Each entity is therefore emitted **exactly once** (flat 1×).
 
-A fallback "side pipeline" form (`B′` — a second `dlt.pipeline` reading the mega-table through the lookup
-connection, emitting Computers exactly once) is documented but **not chosen**, because it bolts a second
-pipeline inside the convert hook and re-implements the framework's node-shaping.
+Two alternatives were considered and **rejected**, recorded so the mechanism isn't re-litigated:
+
+- **Multi-driver emit + merge-by-id — rejected on scale.** One trivial `convert` driver per contributing
+  table, each emitting the *same* `Computer` node id so BloodHound coalesces the byte-identical duplicates
+  by `ObjectIdentifier` on ingest. It stays within public extension points, but in the common worst case
+  (every domain computer is a client, found by *both* LDAP and the privileged `r_system`) each computer
+  emits ~2×, with further multiples on per-host-probed infrastructure — where Convert2-Read-DB's one-row-per-entity
+  coalescing stays flat 1×. Sketched, as history, in
+  [`docs/proposals/2026-06-16-computer-node-multi-driver-merge.md`](docs/proposals/2026-06-16-computer-node-multi-driver-merge.md).
+- **JSONL writeback — kept as the documented fallback.** `preproc` `COPY`s each coalesced table back to
+  `<bucket>/sccm/<table>/data.jsonl.gz`, and `convert` reads it with the framework's stock filesystem
+  reader. Fully idiomatic on the read side, but a filesystem side-channel: the preproc transformer must
+  learn the bucket path and write into it (coupling the preproc/convert path args), and it doubles IO.
+  Held in reserve if Convert2-Read-DB hits a wall.
 
 ### Trade-offs
 
-The chosen approach trades a little disk (duplicate node emissions) and a reliance on BloodHound's
-merge-by-id for staying entirely within supported extension points. The "emit duplicates, merge by id"
-safety holds **only because** every emitter reads the *same* merged row — no emitter ever uses its own
-sparse row. If a future node type can't guarantee byte-identical copies, the spec's trigger is to switch
-*that path* to `B′`.
+Convert2-Read-DB keeps each entity to a single emission — no duplicate-node disk cost and no dependence on BloodHound's
+merge-by-id — at the price of `convert` carrying its **own** `dlt.pipeline` that reads DuckDB and re-shapes
+nodes itself instead of using the stock JSONL reader. The exact DuckDB read-implementation (a custom
+`@dlt.resource` over the open lookup connection vs. DLT's `sql_database` source) is **deferred to the
+implementation plan**, where both are prototyped against the real `lookup.duckdb`. If Convert2-Read-DB proves
+unworkable, the JSONL-writeback fallback above is the documented escape hatch.
 
 ---
 
@@ -592,7 +606,7 @@ sparse row. If a future node type can't guarantee byte-identical copies, the spe
 | Windows auth (×5 protocols) | `clients/*` auth stacks carried by the extension | Framework Negotiate/Kerberos/SMB/DCOM support |
 | Logging & diagnostics | Filters + extra handlers + runtime mutation of live handlers | A pluggable logging/formatting API |
 | Windows log-rollover fix | Runtime monkey-patch of core's handler instances | A Windows-safe `doRollover` in core |
-| Convert from DuckDB | `preproc` mega-table + multi-driver emit + merge-by-id | `read_from="duckdb"` on `@app.convert` (proposed) |
+| Convert from DuckDB | `preproc` coalesced tables + a second `convert`-time `dlt.pipeline` (Convert2-Read-DB) | `read_from="duckdb"` on `@app.convert` (proposed) |
 
 ---
 

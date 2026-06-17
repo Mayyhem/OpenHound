@@ -8,6 +8,8 @@ You CANNOT make changes to OpenHound's code to accomplish this. Only modify code
 
 Adhere strictly to the rules in sccm/sccm/AGENTS.md and the .agents/ directory. 
 
+Read sccm/sccm/ARCHITECTURE.md before working on any cross-cutting collector subsystem (the per-host phased pipeline, recursive target discovery / the include-only allow-list, the Windows authentication stacks under clients/, the logging/diagnostics layer, the Windows-specific fixes, or the preprocess/convert design). It documents how and why this extension had to diverge from a stock OpenHound (REST-API-only) collector. When your work changes one of those subsystems, update the relevant section of ARCHITECTURE.md as part of the same change, fix any code references it invalidates, and add a new section if you introduce a new kind of divergence.
+
 Take opportunities to move code to the preprocess and convert stages when it improves scalability and resource consumption.
 
 Prioritize code readability over efficiency. Take opportunities to simplify code and remove unnecessary code. No features need to be retained for backwards compatibility reasons.

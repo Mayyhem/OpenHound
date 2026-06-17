@@ -8,6 +8,13 @@ under `.agents/skills/`.
 
 - Read `.agents/standards/openhound.md` before making OpenHound collector changes.
 - Read `.agents/standards/workflow.md` before developing a new collector or making broad collector changes.
+- Read `ARCHITECTURE.md` before touching any cross-cutting collector subsystem (the per-host phased
+  pipeline, recursive discovery / target allow-list, the Windows authentication stacks under `clients/`,
+  the logging/diagnostics layer, the Windows-specific fixes, or the preproc/convert design). It explains
+  how and why this extension diverges from a stock OpenHound (REST-API-only) collector. **Update the
+  relevant section of `ARCHITECTURE.md` in the same change** whenever you alter one of those subsystems,
+  and fix any `file:line` references your change invalidates. Add a new section if you introduce a new
+  category of divergence.
 - Load the `openhound` skill from `.agents/skills/openhound/` for task-specific workflows.
 
 ## Task Skill
