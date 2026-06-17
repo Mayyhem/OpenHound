@@ -279,8 +279,16 @@ variant).
 
 ## 6. Stages
 
-Each stage is independently runnable and ends with a **manual validation** block. Each maps to gtk
-ticket(s). Standard test loop (collect once, reuse the raw JSONL):
+Each stage is independently runnable and ends with **two deliverables**: the **manual validation**
+block below, and a written **manual-validation harness** — a standalone doc at
+`docs/superpowers/plans/<stage>-validation.md` styled as a **code tour**: a step-through of the
+stage's actual code in execution order via a small in-process driver script, with exact breakpoint
+locations (`file:line`), what to inspect at each stop, the expected debugger state, and the plan
+detail each stop verifies — plus a black-box CLI/output smoke check. **Writing that harness is the final task of
+every stage's implementation plan** (the automated `*_test.py` suite uses synthetic data; the harness
+is how a human confirms real behavior). Stage 0's harness:
+[`2026-06-16-sccm-preproc-convert-stage0-validation.md`](../plans/2026-06-16-sccm-preproc-convert-stage0-validation.md).
+Each stage maps to gtk ticket(s). Standard test loop (collect once, reuse the raw JSONL):
 
 ```bash
 # one-time: collect against the lab (or reuse an existing <raw> tree)

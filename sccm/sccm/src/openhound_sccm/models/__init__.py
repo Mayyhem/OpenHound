@@ -1,19 +1,8 @@
 """SCCM extension model registry.
 
-Each module here defines one or more `BaseAsset` subclasses that the OpenHound
-convert phase invokes to produce OpenGraph nodes/edges. Models are imported
-here so `@app.asset` decorators register with the app on package import.
-
-11 derived edge models are under ``models/derived/``. The actual
-edge fan-out is performed by the single ``DerivedEdges`` aggregator
-(``models/derived/aggregator.py``); the other 10 are schema-only placeholders
-that register their edge kinds with ``app.assets`` for documentation.
+Each module here defines `BaseAsset` subclasses the convert phase uses to produce
+OpenGraph nodes/edges. Concrete node/edge models arrive in Stage 1+; Stage 0 has none,
+so this package is intentionally empty of model imports.
 """
 
-from .sccm_site import SCCMSite
-
-__all__ = [
-    # Base node models
-    "SCCMSite",
-    # Derived edge models
-]
+__all__: list[str] = []

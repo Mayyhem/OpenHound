@@ -16,7 +16,6 @@ from ..context import SourceContext
 from ..log_context import with_log_context
 from ..main import app
 from ..models.raw_table import raw_table_asset
-from ..models import SCCMSite
 
 logger = logging.getLogger(__name__)
 

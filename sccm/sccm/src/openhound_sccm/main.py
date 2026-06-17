@@ -29,6 +29,9 @@ from openhound.core.preproc import PreProcContext
 from openhound.core.progress import Progress
 from dlt.common.pipeline import LoadInfo
 from dlt.extract.source import DltSource
+import dlt
+from .convert_pipeline import emit_graph_from_duckdb
+from .lookup import SCCMLookup
 from .transforms import transforms
 
 logger = logging.getLogger(__name__)
@@ -1136,3 +1139,27 @@ def _preproc_table_map() -> dict[str, str]:
 def preproc(ctx: PreProcContext) -> dict[str, str]:
     """Build a DuckDB lookup database from collected SCCM JSONL."""
     return _preproc_table_map()
+
+
+@dlt.source(name="sccm_convert_noop")
+def _noop_convert_source():
+    """The framework runs Converter.run over whatever @app.convert returns. All real
+    emission happens in the Convert2-Read-DB pipeline (run in `convert` below), so this source carries
+    no graph-resource models — Converter.run finds no models and its own pipeline is a
+    no-op. opengraph_file appends uniquely-numbered files, so the two pipelines writing
+    to the same output dir never collide."""
+
+    @dlt.resource(name="_noop")
+    def _empty():
+        return
+        yield  # unreachable; makes _empty a generator yielding nothing
+
+    return _empty
+
+
+@app.convert(lookup=SCCMLookup)
+def convert(ctx: ConvertContext):
+    """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), then hand the
+    framework a no-op source."""
+    emit_graph_from_duckdb(ctx.lookup, ctx.output_path, app.source_kind)
+    return _noop_convert_source(), {}

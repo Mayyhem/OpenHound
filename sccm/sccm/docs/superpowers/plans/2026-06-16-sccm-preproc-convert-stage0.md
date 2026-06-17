@@ -624,3 +624,13 @@ Expected: all Stage-0 tests PASS.
 **Placeholder scan:** no TBD/TODO; every code step shows complete code; the two contingency notes (empty-source, CLI entrypoint) are real fallbacks with concrete actions, not placeholders.
 
 **Type consistency:** `SCCMLookup(client, schema="sccm")` constructed one-arg by the framework (Task 6) and in tests (Task 3) — consistent. `table_rows(table)` signature identical across Tasks 3, 4. `emit_graph_from_duckdb(lookup, output_path, source_kind, node_tables=None, edge_table="graph_edges")` — call sites in Task 4 test and Task 6 match. Schema string `"sccm"` consistent across `transforms`, `SCCMLookup`, and the preproc `dataset_name`. Node/edge dict shapes identical between the Task 1 spike, `_spike_node`/`_spike_edge` (Task 4), and the assertions (Tasks 4, 7).
+
+---
+
+## Manual validation (final deliverable)
+
+After the tasks pass, validate Stage 0 by hand with the harness:
+[`2026-06-16-sccm-preproc-convert-stage0-validation.md`](./2026-06-16-sccm-preproc-convert-stage0-validation.md)
+— copy-pasteable `preprocess`/`convert` commands plus the expected DuckDB tables and OpenGraph output.
+Per the spec §6 convention, **every stage plan ends with writing such a harness** so a human can
+confirm real behavior before committing (the automated `*_test.py` suite only exercises synthetic data).
