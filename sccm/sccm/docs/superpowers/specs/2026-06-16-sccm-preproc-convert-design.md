@@ -336,6 +336,36 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
   (IDs already `@rootSiteCode`); `resource_to_sid`, `device_by_resourceid`; build the inline edges.
 - **Validate:** all four SCCM entity kinds present; spot-check an admin's `SCCM_IsMappedTo`/`IsAssigned`,
   a collection's `HasMember`, a device's `HasPrimaryUser`, a computer's `MemberOf`, against the lab.
+- **Resolved 2026-06-23 (grilled with the user; implementation plan
+  [`../plans/2026-06-23-sccm-preproc-convert-stage2.md`](../plans/2026-06-23-sccm-preproc-convert-stage2.md), gtk `ope-2ff3`):**
+  - **Scope:** `SCCM_HasNetworkAccessAccount` is **deferred** (its NAA-secret collector is unbuilt — the spec's
+    Stage-2 listing of `:4185` is dropped from this stage). `HasSession` is built from **both** the RemoteRegistry
+    logged-on user (`:5029`) **and** the MSSQL service account on the site DB server
+    (`adminservice_site_systems.sql_server_service_logon_account`, `:8007`) — gated to *domain* accounts.
+  - **Node ids:** `SCCM_ClientDevice` = `smsid` (no site suffix); the other three = `<id>@root_site_code` minted final.
+  - **Possible-client (`:3272`) moves INTO Stage 2** (was implicitly Stage 6 via `--disable-possible-edges`): emitted
+    with the **deterministic** id `upper(object_sid)@root_site_code` (same `@root_site_code` convention as the other
+    SCCM-native nodes; distinct from the Computer node's raw-SID id and from real client GUIDs), gated by
+    `--disable-possible-edges` *and* on `root_site_code` being present (no root → skip, else the id would collapse to
+    the bare SID and collide with the Computer node). `ad_domain_sid` carries the raw SID for Stage 4 SameHostAs, so
+    the duplicate-vs-real-client merge (Stage 4) is unaffected by the id format.
+  - **Nested groups deferred to the SharpHound merge (evidence-based):** group→group nesting is not in any collected
+    SCCM table (`adminservice_user_group` has no membership column; `security_group_name` on r_system/r_user is
+    direct-only — verified against the lab, e.g. it omits `BUILTIN\Administrators` for Domain Admins). `MemberOf`
+    stays `principal → group`; group→group `MemberOf` is supplied by a merged SharpHound collection on the same
+    SID-keyed `Group` nodes (`environmentid` = domain SID). Documented as a README assumption + Limitation. CMBP
+    never built group nesting either.
+  - **`--disable-possible-edges` plumbing (new mechanism, reused by Stage 6):** `collect` persists a one-row
+    `collection_settings` table (`disable_possible_edges`, `enable_bad_opsec`); `preproc` reads it and skips the
+    possible rows. The flag was previously a dead collect-time placeholder ([source.py:234](../../src/openhound_sccm/source.py#L234)).
+  - **Traversable allow-list implemented here** (it was parked in Stage 0 but Stage 0 was plumbing-only): a
+    `TRAVERSABLE_EDGE_KINDS` constant transcribed from CMBP `:2216-2249` drives `EdgeProperties.traversable`. This
+    retroactively fixes Stage 1's `SCCM_AdminsReplicatedTo` (currently emitted `traversable=False`).
+  - **Graph integrity (refines Decision #2's drop-on-failure):** an edge endpoint that *resolves* to an id but has
+    no `node_*` row gets a **synthesised bare node** (id + kind inferred from the edge position; ambiguous →
+    `Base`) plus a logged warning, rather than a dropped edge. Name→SID *resolution* failures still drop+log.
+  - **One collect change beyond settings:** stamp the host computer SID onto the `remoteregistry_users` current-user
+    row so `HasSession` has a start endpoint ([registry.py:471-483](../../src/openhound_sccm/collectors/registry.py#L471-L483)).
 
 ### Stage 3 — Containment + RBAC fan-out
 - **PS1:** `SCCM_Contains` :1659-1690; role fan-out + role-kind mapping :1714-1827; `SCCM_AllPermissions`
