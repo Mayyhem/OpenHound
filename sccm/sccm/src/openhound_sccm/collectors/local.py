@@ -75,7 +75,7 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 )
 
                 if target:
-                    logger.info(f"Found current management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                    logger.info(f"Found current management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     current_mp_ad_obj = target.ad_object
                     yield current_mp_ad_obj
                 # No else: register_target logs why it skipped (filtered host or
@@ -111,7 +111,7 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 )
 
                 if target:
-                    logger.info(f"Found management point: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                    logger.info(f"Found management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
                 # No else: register_target logs why it skipped (filtered host or
                 # empty name), so a None return isn't a failure here.
@@ -165,11 +165,11 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
                 yield {
                     "ad_domain_sid": this_computer_ad_obj.get("object_sid") if this_computer_ad_obj else None,
-                    "current_management_point": current_mp_ad_obj.get("dNSHostName") if current_mp_ad_obj else None,
+                    "current_management_point": current_mp_ad_obj.get("dns_host_name") if current_mp_ad_obj else None,
                     "current_management_point_sid": current_mp_ad_obj.get("object_sid") if current_mp_ad_obj else None,
-                    "distinguished_name": this_computer_ad_obj.get("distinguishedName") if this_computer_ad_obj else None,
-                    "dns_host_name": this_computer_ad_obj.get("dNSHostName") if this_computer_ad_obj else None,
-                    "name": this_computer_ad_obj.get("sAMAccountName") if this_computer_ad_obj else None,
+                    "distinguished_name": this_computer_ad_obj.get("distinguished_name") if this_computer_ad_obj else None,
+                    "dns_host_name": this_computer_ad_obj.get("dns_host_name") if this_computer_ad_obj else None,
+                    "name": this_computer_ad_obj.get("sam_account_name") if this_computer_ad_obj else None,
                     "previous_smsid_change_date": client_id_change_date,
                     "previous_smsid": previous_client_id,
                     "site_code": site_code if site_code else None,
@@ -235,7 +235,7 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
 
     for host in sorted(discovered.keys()):
         # Skip localhost references and current machine
-        if host in ("localhost", "127.0.0.1", this_computer_ad_obj.get("dNSHostName").lower() if this_computer_ad_obj else None, this_computer_ad_obj.get("sAMAccountName").lower() if this_computer_ad_obj else None):
+        if host in ("localhost", "127.0.0.1", this_computer_ad_obj.get("dns_host_name").lower() if this_computer_ad_obj else None, this_computer_ad_obj.get("sam_account_name").lower() if this_computer_ad_obj else None):
             logger.debug(f"Skipping localhost reference found in client logs: {host}")
             continue
 
@@ -255,7 +255,7 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 )
 
                 if target:
-                    logger.info(f"Found host in client logs: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                    logger.info(f"Found host in client logs: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
                 # No else: register_target logs why it skipped (filtered host or
                 # empty name), so a None return isn't a failure here.

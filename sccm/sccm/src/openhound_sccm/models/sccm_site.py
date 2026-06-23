@@ -1,0 +1,102 @@
+# src/openhound_sccm/models/sccm_site.py
+"""SCCMSite: converts a node_site coalesced row into an SCCMNode.
+
+Each row in the node_site preproc table represents one SCCM site (keyed by
+site code). This model reads those rows and emits an SCCM_Site node with the
+hierarchy and infrastructure properties populated.
+"""
+import logging
+
+from openhound.core.asset import BaseAsset
+from pydantic import ConfigDict
+
+from ..graph import SCCMNode, SCCMSiteProperties
+from ..kinds import nodes as nk
+
+logger = logging.getLogger(__name__)
+
+# Integer site_type values from the SCCM database map to human-readable strings.
+# Values match CMBP's site type constants (ps1:2620 area).
+_SITE_TYPE_LABELS: dict[int, str] = {
+    1: "Secondary Site",
+    2: "Primary Site",
+    4: "Central Administration Site",
+}
+
+
+class SCCMSite(BaseAsset):
+    """One coalesced site row -> one OpenGraph SCCM_Site node.
+
+    Fields map directly to the node_site columns produced by
+    transforms._node_site(). Extra columns from the DB are silently
+    ignored (extra="ignore") so schema drift doesn't crash convert.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    site_code: str | None = None
+    site_guid: str | None = None
+    parent_site_code: str | None = None
+    site_type: int | None = None          # raw integer from DB; converted in as_node
+    site_name: str | None = None          # human-readable display name
+    server_name: str | None = None        # site server hostname
+    sql_server_name: str | None = None
+    sql_database_name: str | None = None
+    version: str | None = None
+    build_number: str | None = None
+    install_dir: str | None = None
+    root_site_code: str | None = None
+    collection_source: list[str] = []
+
+    @property
+    def as_node(self) -> SCCMNode | None:
+        """Build the SCCMNode, or return None if the row has no usable site_code."""
+        if not self.site_code:
+            # No site code means we have no merge key; drop the row.
+            logger.warning("SCCMSite: dropping row with no site_code")
+            return None
+
+        # environmentid is the root of the hierarchy; fall back to the site's
+        # own code for standalone / single-site deployments with no CAS.
+        env = self.root_site_code or self.site_code
+
+        # Convert the integer site_type to a human-readable label.
+        site_type_str = _SITE_TYPE_LABELS.get(self.site_type) if self.site_type is not None else None
+        if self.site_type is None:
+            # no site_type from any source; leave unset
+            pass
+        elif site_type_str is None:
+            logger.warning(
+                "SCCMSite: unrecognised site_type %r for site %r; leaving as None",
+                self.site_type,
+                self.site_code,
+            )
+
+        display = self.site_name or self.site_code
+
+        return SCCMNode(
+            id=self.site_code,
+            kinds=[nk.SCCM_SITE],
+            properties=SCCMSiteProperties(
+                name=display,
+                displayname=display,
+                environmentid=env,
+                collection_source=list(self.collection_source),
+                site_code=self.site_code,
+                parent_site_code=self.parent_site_code,
+                root_site_code=self.root_site_code,
+                site_type=site_type_str,
+                site_guid=self.site_guid,
+                site_server_name=self.server_name,
+                sql_server_name=self.sql_server_name,
+                sql_database_name=self.sql_database_name,
+                version=self.version,
+                build_number=self.build_number,
+                install_dir=self.install_dir,
+            ),
+        )
+
+    @property
+    def edges(self):
+        """Site edges (SCCM_AdminsReplicatedTo) are built in Task 7."""
+        return iter(())

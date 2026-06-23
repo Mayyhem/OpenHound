@@ -112,13 +112,22 @@ Recorded so the mechanism isn't re-litigated:
 
 ### Open design points (resolve at spec review / Stage 1)
 
-- **Root/environment node.** OpenHound requires one root/environment node and `environmentid` on every
-  emitted node. CMBP has none (it merges into existing BloodHound AD data by ObjectIdentifier).
-  *Proposed default:* emit a single SCCM environment node = the **hierarchy root site** (top
-  CAS/primary), set `environmentid` to it on all SCCM/MSSQL nodes, and **leave Base AD
-  (Computer/User/Group) `environmentid` aligned to their AD domain** so they merge cleanly with
-  SharpHound data rather than being re-homed under the SCCM environment. Needs confirmation against
-  BloodHound's OpenGraph conventions.
+- **Root/environment node — RESOLVED 2026-06-17 (with the BloodHound maintainer).** OpenHound's node
+  model requires an `environmentid` *property* on every node (no default). **No environment *node* is
+  emitted** — property only. Assignment:
+  - **Base AD nodes** (Computer/User/Group): `environmentid` = the node's **AD domain SID**, derived
+    per node by stripping the RID from its own SID (`S-1-5-21-A-B-C-1104` → `S-1-5-21-A-B-C`). This
+    merges them with SharpHound's AD nodes of the same SID under the same domain rather than re-homing
+    them. Derivation is per node, so one collect legitimately spans multiple AD domains.
+  - **SCCM-native nodes** (SCCM_Site/Collection/AdminUser/SecurityRole/ClientDevice): `environmentid` =
+    the hierarchy **`rootSiteCode`**.
+  - **MSSQL_\*** (incl. Login/DatabaseUser/roles): `environmentid` = the **AD domain SID of the SQL
+    server's domain-joined host** — *not* the SCCM environment.
+  - **Well-known/builtin SIDs** (e.g. `S-1-5-32-*`, `S-1-5-11`) have no `S-1-5-21` domain SID; the
+    Stage 1 plan defines their handling (proposed: SharpHound-style per-domain qualification).
+  - **Documented assumption (→ README Limitations):** within one organization a site code is never
+    reused, and two organizations are never loaded into the same graph — so the raw `rootSiteCode` is a
+    safe SCCM environment id.
 - **Edges: materialized `graph_edges` (locked).** preproc builds a single
   `graph_edges(start_id, end_id, kind, properties)` table by UNION-ing the per-edge-kind SELECTs;
   convert emits all ~35 kinds through **one** trivial edge model reading that table from DuckDB. The

@@ -43,6 +43,7 @@ from .sms_rows import (
     SITE_COLUMNS,
     SITEDEF_COLUMNS,
     SYSRES_COLUMNS,
+    USERGROUP_COLUMNS,
 )
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,13 @@ def _r_user(run: _Run) -> Iterator[tuple[str, dict]]:
     return _simple(run, "SMS_R_User", "r_user", RUSER_COLUMNS, "user and security group records")
 
 
+def _user_group(run: _Run) -> Iterator[tuple[str, dict]]:
+    # SMS_R_User / SMS_R_System list groups by NAME only (SecurityGroupName); this
+    # class is the one resource that carries each group's SID, so preproc can resolve
+    # those names offline (principal_by_name) instead of a live AD lookup per name.
+    return _simple(run, "SMS_R_UserGroup", "user_group", USERGROUP_COLUMNS, "security group records")
+
+
 def _collections(run: _Run) -> Iterator[tuple[str, dict]]:
     return _simple(run, "SMS_Collection", "collections", COLLECTION_COLUMNS, "device and user collections")
 
@@ -225,6 +233,7 @@ _COLLECTIONS = (
     _client_devices,
     _r_system,
     _r_user,
+    _user_group,
     _collections,
     _collection_members,
     _security_roles,

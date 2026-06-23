@@ -32,6 +32,11 @@ from dlt.extract.source import DltSource
 import dlt
 from .convert_pipeline import emit_graph_from_duckdb
 from .lookup import SCCMLookup
+from .models.computer import ComputerNode
+from .models.group import GroupNode
+from .models.replication_edge import ReplicationEdge
+from .models.sccm_site import SCCMSite
+from .models.user import UserNode
 from .transforms import transforms
 
 logger = logging.getLogger(__name__)
@@ -1063,47 +1068,57 @@ app.collector = collect_sccm
 def _preproc_table_map() -> dict[str, str]:
     """Return the DuckDB-table → JSONL-path mapping consumed by ``preprocess``.
 
-    Tables that aren't present yet are still listed so future phases land
-    without an extra edit — DLT silently skips entries whose JSONL directory
-    is missing.
+    Each entry maps the exact DuckDB table name to the JSONL directory path
+    that DLT writes during collection. Only tables that an actual collector
+    emits are listed here — stale names that no collector produces are omitted
+    so preproc does not silently load wrong data.
+
+    The canonical source of truth for each table name is:
+    - LDAP/DNS/Local: the ``name=`` argument on ``@app.resource`` in
+      ``collectors/ldap.py``, ``collectors/dns.py``, ``collectors/local.py``.
+    - RemoteRegistry/MSSQL/HTTP/SMB: the ``"table_name"`` string passed to
+      ``yield "table_name", row`` in those per-host collectors.
+    - AdminService/WMI: ``run.table("suffix")`` in ``privileged.py``, which
+      expands to ``adminservice_<suffix>`` or ``wmi_<suffix>`` from
+      ``PER_HOST_PHASES`` in ``per_host_phases.py``.
     """
     base_tables = [
-        # LDAP base tables (Phase 1)
-        "ldap_computers",
-        "ldap_users",
-        "ldap_groups",
+        # LDAP discovery phase (ldap.py @app.resource name=...)
         "ldap_sites",
         "ldap_management_points_raw",
-        "ldap_sms_providers",
         "ldap_cmrc_devices",
         "ldap_network_boot_servers",
-        "ldap_system_management_acl",
-        "ldap_group_memberships",
-        # Once-phase enrichment (Phase 2)
-        "local_management_points",
-        "local_distribution_points",
-        "local_naa_secrets",
+        "ldap_pattern_matches",
+        "ldap_system_management_dacl",
+        # DNS discovery phase (dns.py @app.resource name=...)
         "dns_management_points",
-        "dhcp_pxe_dps",
-        # Per-host enrichment (Phase 3)
-        "registry_sccm_databases",
-        "registry_current_users",
-        "registry_sccm_components",
-        "registry_mssql_settings",
-        "mssql_epa_flags",
-        "adminservice_admins",
+        # Local discovery phase (local.py @app.resource name=...)
+        "local_wmi_sms_authority",
+        "local_wmi_sms_lookupmp",
+        "local_wmi_ccm_client",
+        "local_client_logs_targets",
+        # RemoteRegistry per-host phase (registry.py yield "table", row)
+        "remoteregistry_sites",
+        "remoteregistry_computers",
+        "remoteregistry_users",
+        "remoteregistry_mssql_servers",
+        # MSSQL per-host phase (mssql.py yield "table", row)
+        "mssql_server_instances",
+        # AdminService per-host phase (privileged.py run.table("suffix"))
+        "adminservice_sites",
+        "adminservice_site_definitions",
+        "adminservice_site_definitions_computers",
+        "adminservice_reserved_accounts",
+        "adminservice_client_devices",
+        "adminservice_r_system",
+        "adminservice_r_user",
+        "adminservice_user_group",
         "adminservice_collections",
         "adminservice_collection_members",
         "adminservice_security_roles",
-        "adminservice_role_members",
-        "adminservice_client_devices",
+        "adminservice_admins",
         "adminservice_site_systems",
-        "adminservice_site_definitions",
-        "adminservice_site_definitions_computers",
-        "adminservice_r_system",
-        "adminservice_r_user",
-        "adminservice_reserved_accounts",
-        # WMI fallback (mirrors the adminservice_* set; ope-3f2a)
+        # WMI per-host phase (privileged.py run.table("suffix"); same suffixes as AdminService)
         "wmi_sites",
         "wmi_site_definitions",
         "wmi_site_definitions_computers",
@@ -1111,26 +1126,20 @@ def _preproc_table_map() -> dict[str, str]:
         "wmi_client_devices",
         "wmi_r_system",
         "wmi_r_user",
+        "wmi_user_group",
         "wmi_collections",
         "wmi_collection_members",
         "wmi_security_roles",
         "wmi_admins",
         "wmi_site_systems",
-        # Client-side CIM scraping (Ope-ew5k); reserved, not produced by ope-3f2a
-        "wmi_clients",
-        "wmi_users_seen",
-        "wmi_sql_service_accounts",
+        # HTTP per-host phase (http.py yield via _role_row / _sitesigncert_probe)
         "http_management_points",
-        "http_smsproviders",
         "http_distribution_points",
+        "http_smsproviders",
         "http_site_servers",
-        "http_naa_secrets",
-        "http_collection_secrets",
-        "smb_site_servers",
-        "smb_distribution_points",
-        "smb_signing_status",
-        "derived_edges",
-        "derived_nodes",
+        # SMB per-host phase (smb.py yield "table", row)
+        "smb_computers",
+        "smb_sites",
     ]
     return {table: f"sccm/{table}" for table in base_tables}
 
@@ -1157,9 +1166,24 @@ def _noop_convert_source():
     return _empty
 
 
+# Registry of (table_name, ModelClass) pairs that the convert pipeline iterates.
+# Grows by one entry per task: Task 3 = Computer, Task 4 = User, Task 5 = Group,
+# Task 6 = SCCM_Site, Task 7 = graph_edges (via EDGE_SPECS).
+NODE_SPECS: list[tuple[str, type]] = [
+    ("node_computer", ComputerNode),
+    ("node_user", UserNode),
+    ("node_group", GroupNode),
+    ("node_site", SCCMSite),
+]
+
+EDGE_SPECS: list[tuple[str, type]] = [
+    ("graph_edges", ReplicationEdge),
+]
+
+
 @app.convert(lookup=SCCMLookup)
 def convert(ctx: ConvertContext):
     """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), then hand the
     framework a no-op source."""
-    emit_graph_from_duckdb(ctx.lookup, ctx.output_path, app.source_kind)
+    emit_graph_from_duckdb(ctx.lookup, ctx.output_path, app.source_kind, NODE_SPECS, EDGE_SPECS)
     return _noop_convert_source(), {}

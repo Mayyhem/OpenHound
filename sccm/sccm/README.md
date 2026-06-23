@@ -11,7 +11,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, but the graph-emission side is just getting started. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits exactly **one** node kind today — [`SCCM_Site`](#node-reference) — and **no edges**. The derived-edge tables are already computed during `preprocess`, but the convert-time consumers that would turn them into graph edges haven't been wired up yet.
+> - **`convert`** emits four node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), and [`SCCM_Site`](#sccm_site) — and one edge kind: [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto).
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -24,12 +24,17 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
 - [Quick Start](#quick-start)
 - [Collection Overview](#collection-overview)
 - [System Requirements](#system-requirements)
+- [Assumptions](#assumptions)
 - [Limitations](#limitations)
 - [Command Line Options](#command-line-options)
 - [Graph Model](#graph-model)
 - [Node Reference](#node-reference)
+  - [Computer](#computer)
+  - [User](#user)
+  - [Group](#group)
   - [SCCM_Site](#sccm_site)
 - [Edge Reference](#edge-reference)
+  - [SCCM_AdminsReplicatedTo](#sccm_adminsreplicatedto)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -137,7 +142,7 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 |---|---|---|
 | **RemoteRegistry** ([collectors/registry.py](src/openhound_sccm/collectors/registry.py)) | Binds the remote registry over SMB (impacket `rrp`) to read SCCM keys under `HKLM\SOFTWARE\Microsoft\SMS` — site codes, component servers/roles, current users, and SQL/MSSQL settings. Retries the initial bind to absorb the RemoteRegistry trigger-start race. | ✅ Implemented |
 | **MSSQL** ([collectors/mssql.py](src/openhound_sccm/collectors/mssql.py)) | Connects to the host's SQL Server (TCP/1433) and probes its **Extended Protection for Authentication (EPA)** enforcement using [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py). | ✅ Implemented |
-| **AdminService** ([collectors/privileged.py](src/openhound_sccm/collectors/privileged.py)) | Queries the SCCM AdminService REST API (`https://<provider>/AdminService/wmi/...`) over Negotiate and collects the site hierarchy, site definitions, reserved accounts, devices, users, collections, security roles, admins, and site-system roles into raw `adminservice_*` tables. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
+| **AdminService** ([collectors/privileged.py](src/openhound_sccm/collectors/privileged.py)) | Queries the SCCM AdminService REST API (`https://<provider>/AdminService/wmi/...`) over Negotiate and collects the site hierarchy, site definitions, reserved accounts, devices, users, **security groups** (`SMS_R_UserGroup` — each group's name *and* SID, used to resolve `SecurityGroupName` memberships to Group nodes offline), collections, security roles, admins, and site-system roles into raw `adminservice_*` tables. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **WMI** ([collectors/privileged.py](src/openhound_sccm/collectors/privileged.py)) | **Fallback for AdminService.** Shares the *same* collection helpers as the AdminService phase (one set, parameterized per transport in `privileged.py`); when AdminService is unreachable on a host, it reads the same SMS Provider classes directly in the `root\SMS\site_<code>` WMI namespace (over DCOM via impacket, or pywin32 for the current Windows user) and writes the matching `wmi_*` tables. Runs only on hosts AdminService did **not** already collect — gated by `should_run_phase` reading `TargetEntry.completed_phases`. | ✅ Implemented (collect-only) |
 | **HTTP** ([collectors/http.py](src/openhound_sccm/collectors/http.py)) | **Unauthenticated** probing of the SCCM web endpoints over http then https — `SMS_MP/.sms_aut` (`MPKEYINFORMATION`/`MPLIST`/`SMSTRC`/`MPLIST1`), `SMS_DP_SMSPKG$`, `AdminService/wmi/SMS_Identification`, and the site-signing certificate — to identify **Management Point**, **Distribution Point**, **SMS Provider**, and **Site Server** roles from the 401/403/200 status codes. Enumerates and registers sibling MPs and the site server as new probe targets; writes raw `http_*` role tables. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **SMB** ([collectors/smb.py](src/openhound_sccm/collectors/smb.py)) | An **unauthenticated** SMB2-negotiate **signing-required** check (via [clients/smb.py](src/openhound_sccm/clients/smb.py)), then **authenticated** share enumeration (`NetShareEnum`) that classifies SCCM-specific shares — `SMS_SITE`/`SMS_<code>` (Site Server), `SMS_DP$` (Distribution Point), `REMINST` (PXE), `SCCMContentLib$`/`SMSPKG` (content library) — into site-system roles and a site code. Writes raw `smb_computers` / `smb_sites` tables. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
@@ -173,9 +178,20 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 
 ---
 
+# Assumptions
+
+The collector relies on these assumptions about the target environment and how its output is consumed. They hold for the overwhelming majority of real deployments, but violating one can corrupt the graph (see [Limitations](#limitations)).
+
+- **Site codes are unique within an organization.** A site code is only three characters and SCCM provides no globally unique hierarchy identifier, so the collector uses the (hierarchy-root) **site code as the `environmentid`** for SCCM-native nodes — those with no AD-domain home (`SCCM_Site` today, and the other SCCM-specific kinds as the port adds them). If two distinct hierarchies in the same organization reuse a site code, their SCCM environments collide and merge. Microsoft likewise recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
+- **One organization per graph.** Do not load data collected from two different organizations into the same BloodHound graph. Because site codes are not globally unique across organizations, a shared site code would merge the two organizations' SCCM environments. Collect and ingest each organization into its own graph.
+
+> AD-native nodes (`Computer`, `User`, `Group`) are unaffected by the above: they use their AD **domain SID** as `environmentid`, so they merge with existing SharpHound data by SID rather than by site code.
+
+---
+
 # Limitations
 
-- **Graph output is minimal today.** `convert` emits only the [`SCCM_Site`](#node-reference) node and **no edges**. See the [WIP banner](#-work-in-progress) and the [Edge Reference](#edge-reference).
+- **Graph output covers the base identity layer.** `convert` emits [`Computer`](#computer), [`User`](#user), [`Group`](#group), and [`SCCM_Site`](#sccm_site) nodes plus the [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto) site-replication edge. Richer edges (role assignments, `contains`, coerce-and-relay paths) are planned for later stages. See the [WIP banner](#-work-in-progress) and the [Edge Reference](#edge-reference).
 - **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, no graph yet); DHCP is a placeholder.
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
@@ -304,68 +320,126 @@ The collector follows OpenHound's standard three-phase pipeline:
 | **preprocess** | `openhound preprocess sccm` | Load the JSONL into DuckDB and build lookup + derived tables ([transforms.py](src/openhound_sccm/transforms.py), [lookup.py](src/openhound_sccm/lookup.py)). |
 | **convert** | `openhound convert sccm` | Read the JSONL + DuckDB lookup and emit OpenGraph nodes/edges. |
 
-**Node identity.** Every node carries a stable string id (`node_id`) and an `environmentid` tying it to its collected environment. For `SCCM_Site`, both are the **site code** (e.g. `PS1`). The common property/ID base classes live in [graph.py](src/openhound_sccm/graph.py) (`SCCMNode`, `SCCMNodeProperties`, `SCCMEdgeProperties`); node and edge kind strings live in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py) and [kinds/edges.py](src/openhound_sccm/kinds/edges.py).
+**Node identity.** Every node carries a stable string id and an `environmentid` tying it to its collected environment. AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the id and the **AD domain SID** (the `S-1-5-21-X-Y-Z` prefix stripped of the trailing RID) as `environmentid`, so they merge with SharpHound data by SID. `SCCM_Site` uses the **site code** as both id and `environmentid` (scoped to the hierarchy root site code). The common node/property base classes live in [graph.py](src/openhound_sccm/graph.py) (`SCCMNode`, property dataclasses); node and edge kind strings live in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py) and [kinds/edges.py](src/openhound_sccm/kinds/edges.py).
 
-**Kinds declared** (in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)) — note these are the kind *constants* the project intends to use; only `SCCM_Site` is actually emitted today:
+**Kinds declared** (in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)) — the following are the kind *constants* the project intends to use; `Computer`, `User`, `Group`, and `SCCM_Site` are emitted today:
 
 - AD-native: `Computer`, `User`, `Group`, `Base`
 - SCCM: `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`
 - MSSQL: `MSSQL_Server`, `MSSQL_Login`, `MSSQL_Database`, `MSSQL_DatabaseUser`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`
 
-**Convert-time enrichment.** `SCCM_Site` is discovered from LDAP (`ldap_sites`), but many of its properties (display name, site server, SQL host/database/service account, version, hierarchy root, site-system roles, admin users, stored accounts) are filled in at convert time by joining against the DuckDB lookup tables — so a node's richness grows as more collection phases come online, without changing the model.
+**Convert-time enrichment.** Nodes are built from coalesced DuckDB tables (`node_computer`, `node_user`, `node_group`, `node_site`) computed by `preprocess`. Each table unions multiple raw collected sources (AdminService, WMI, LDAP, RemoteRegistry, SMB, HTTP) into one row per identity, so a node's richness grows as more collection phases come online, without changing the model.
 
 ---
 
 # Node Reference
 
-> **Currently emitted: 1 node kind.** A `Computer` model exists in the tree ([models/computer.py](src/openhound_sccm/models/computer.py)) but is not yet registered for emission, so it is intentionally omitted here.
+> **Currently emitted: 4 node kinds** — `Computer`, `User`, `Group`, and `SCCM_Site`.
 
-## SCCM_Site
+All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. All property keys are lowercase with underscores.
 
-A Configuration Manager **site**, discovered from the `mSSMSSite` objects in the AD System Management container and enriched at convert time. Model: [models/sccm_site.py](src/openhound_sccm/models/sccm_site.py).
+## Computer
 
-- **Node id / `environmentid`:** the site code (e.g. `PS1`).
-- **`name` / `displayname`:** the site code, or the human-readable display name when available.
+An AD computer account observed in SCCM — collected from AdminService/WMI resource tables, LDAP, RemoteRegistry, SMB, and HTTP sources and coalesced into one row per SID. Model: [models/computer.py](src/openhound_sccm/models/computer.py).
+
+- **Node id:** the AD SID (uppercased, e.g. `S-1-5-21-11-22-33-1104`).
+- **`environmentid`:** the AD domain SID (`S-1-5-21-11-22-33`).
+- **Kinds:** `["Computer", "Base"]`.
+- **`name` / `displayname`:** the SAM account name, DNS hostname, or SID (whichever is available first).
 
 | Property | Type | Description |
 |---|---|---|
-| `siteCode` | string | The site code (e.g. `PS1`). |
-| `parentSiteCode` | string | Parent site in the hierarchy; the literal `"None"` for a root (CAS) site. |
-| `rootSiteCode` | string | Hierarchy root site code (resolved from the lookup tables). |
-| `siteType` | string | `Primary Site`, `Central Administration Site`, or `Secondary Site`. |
-| `displayName` | string | Human-readable site name. |
-| `distinguishedName` | string | LDAP DN of the `mSSMSSite` object. |
-| `siteGuid` / `siteGUID` | string | Site GUID parsed from `mSSMSHealthState` (lowercase + CMBP uppercase spellings). |
-| `sourceForest` | string | Source forest from `mSSMSSourceForest`. |
-| `siteServerName` / `siteServerFQDN` | string | FQDN of the primary site server. |
-| `siteServerDomainSID` | string | AD SID of the site server's computer account. |
-| `SQLServerName` / `SQLServerFQDN` | string | FQDN of the MSSQL server hosting the site database. |
-| `SQLDatabaseName` | string | Site database name (e.g. `CM_PS1`). |
-| `SQLServerDomainSID` | string | AD SID of the SQL server's computer account. |
-| `SQLServicePort` | string | SQL service port (emitted as `"1433"`). |
-| `SQLServiceAccountName` | string | Bare sAMAccountName of the SQL service account (Secondary-site `LocalSystem` is mapped to the site server's `<HOST>$`). |
-| `SQLServiceAccountDomainSID` | string | AD SID of the SQL service account. |
-| `version` | string | Site version (e.g. `5.00.9106.1000`). |
-| `buildNumber` | int | Build number parsed from `version` (e.g. `9106`). |
-| `versionCVEs` | list\<string\> | Known CVEs for the version, from [cve_table.py](src/openhound_sccm/cve_table.py). |
-| `installDir` | string | Site server install directory. |
-| `siteSystemRoles` | list\<string\> | `RoleName@hostname` entries for site systems serving this site. |
-| `adminUsers` | list\<string\> | Admin-user logon names assigned to this site. |
-| `storedAccounts` | list\<string\> | Stored-account labels (`SMS_SCI_Reserved`) for this site. |
-| `collectionSource` | list\<string\> | Collection sources that contributed to this node (e.g. `LDAP-mSSMSSite`). |
-| `SCCMInfra` | bool | Always `true` for a site. |
+| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
+| `sccm_site_system_roles` | list\<string\> | SCCM site-system roles observed on this host (e.g. `SMS Provider`, `SMS Distribution Point`). |
+| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format, one per site that enrolled this device. |
+| `sccm_infra` | bool | `true` if this computer is an SCCM infrastructure host (site system, server). |
+| `sccm_client_device_identifier` | string | The SCCM client GUID (`sms_unique_identifier` / `GUID:…`). |
+| `smb_signing_required` | bool | `true` if SMB signing is required on this host (from RemoteRegistry or SMB signing-check). |
+| `sccm_has_client_remote_control_spn` | bool | `true` if the host has a `CmRcService` SPN in AD (LDAP-discovered). |
+| `network_boot_server` | bool | `true` if the host was discovered as a network boot server in AD. |
+| `disable_loopback_check` | bool | `true` if the loopback check is disabled (RemoteRegistry). |
+| `restrict_receiving_ntlm_traffic` | string | NTLM restriction policy value (e.g. `Off`, `Deny_All`) from RemoteRegistry. |
+| `sccm_client_certificate_required` | bool | `true` if the host's SCCM site systems require a client certificate (from HTTP probing). |
+| `sccm_hosts_content_library` | bool | `true` if an SCCM content library share was found on this host (SMB). |
+| `sccm_is_pxe_support_enabled` | bool | `true` if PXE support was found on this host (SMB `REMINST` share). |
+
+## User
+
+An AD user account observed in SCCM — collected from AdminService/WMI user resource tables, admin tables, reserved-account tables, and RemoteRegistry. Model: [models/user.py](src/openhound_sccm/models/user.py).
+
+- **Node id:** the AD SID (uppercased).
+- **`environmentid`:** the AD domain SID.
+- **Kinds:** `["User", "Base"]`.
+- **`name` / `displayname`:** the account name or SID.
+
+| Property | Type | Description |
+|---|---|---|
+| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
+| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
+| `sccm_infra` | bool | `true` if this account appears in the SCCM admins tables (an SCCM admin user). |
+| `stored_in_sccm_site` | string | Site code of the SCCM site that stores this account as a reserved/stored credential (`SMS_SCI_Reserved`). |
+
+> **Not yet emitted:** `is_sccm_network_access_account` — this property is set only when NAA secrets are decrypted, which requires the `--enable-bad-opsec` flag and the NAA-secret collector, neither of which is implemented yet.
+
+## Group
+
+An AD group observed in SCCM — either named in a device's or user's `security_group_name` list or present directly in the SCCM admins tables. Model: [models/group.py](src/openhound_sccm/models/group.py).
+
+`security_group_name` carries only group **names**; the SIDs come from the `SMS_R_UserGroup` resource (AD Security Group Discovery mirrors each group, with its SID, into `adminservice_user_group` / `wmi_user_group`). `preproc` folds those `(name, SID)` pairs into the `principal_by_name` lookup, so a name→SID join resolves each membership **offline** — replacing ConfigManBearPig's live per-name Active Directory lookup. (A name shared by two distinct groups can't be disambiguated from the name alone, so both resolve.)
+
+- **Node id:** the AD SID (uppercased).
+- **`environmentid`:** the AD domain SID; builtin SIDs use a co-occurring domain SID as a fallback.
+- **Kinds:** `["Group", "Base"]`.
+- **`name` / `displayname`:** the group name or SID.
+
+| Property | Type | Description |
+|---|---|---|
+| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
+| `sccm_infra` | bool | `true` if this group appears in the SCCM admins tables. |
+| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
+
+## SCCM_Site
+
+A Configuration Manager **site**, coalesced from AdminService/WMI site tables, site-definition tables, and LDAP `mSSMSSite` objects. Model: [models/sccm_site.py](src/openhound_sccm/models/sccm_site.py).
+
+- **Node id:** the site code (e.g. `PS1`).
+- **`environmentid`:** the hierarchy root site code (e.g. `CAS`); falls back to the site's own code for standalone deployments with no CAS.
+- **Kinds:** `["SCCM_Site"]`.
+- **`name` / `displayname`:** the human-readable site name, or the site code when no name is available.
+
+| Property | Type | Description |
+|---|---|---|
+| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
+| `site_code` | string | The site code (e.g. `PS1`). |
+| `parent_site_code` | string | Parent site in the hierarchy; `null` for the root (CAS) site. |
+| `root_site_code` | string | Hierarchy root site code (CAS if present, else the parentless Primary). |
+| `site_type` | string | `Primary Site`, `Central Administration Site`, or `Secondary Site`. |
+| `site_guid` | string | Site GUID from the site definitions or LDAP `mSSMSHealthState`. |
+| `site_server_name` | string | Hostname of the primary site server. |
+| `sql_server_name` | string | Hostname of the SQL Server hosting the site database. |
+| `sql_database_name` | string | Site database name (e.g. `CM_PS1`). |
+| `version` | string | Site version string (e.g. `5.00.9106.1000`). |
+| `build_number` | string | Build number (e.g. `9106`). |
+| `install_dir` | string | Site server install directory. |
+| `sccm_infra` | bool | Always `true` for a site. |
 
 ---
 
 # Edge Reference
 
-> **Currently emitted: 0 edges.**
+> **Currently emitted: 1 edge kind** — `SCCM_AdminsReplicatedTo`.
 
-No edges are produced by `convert` yet. The only edge-kind constant declared today is `EX_MemberOf` ([kinds/edges.py](src/openhound_sccm/kinds/edges.py)), and nothing emits it.
+## SCCM_AdminsReplicatedTo
 
-This is a deliberate, visible gap in the port. The `preprocess` stage **already computes** derived-edge tables in DuckDB ([transforms.py](src/openhound_sccm/transforms.py) — e.g. site-hierarchy replication, `contains`, role assignments, coerce-and-relay, same-host-as), but the `convert`-time `models/derived/*` asset classes that would read those tables and yield graph edges have not been written yet. Until they are, the derived rows are materialized and then left unconsumed.
+Represents the SCCM site replication topology — which sites replicate administrative data to which other sites. Built from the site hierarchy computed by `preprocess` (the `graph_edges` table). Edge model: [models/replication_edge.py](src/openhound_sccm/models/replication_edge.py).
 
-When edge emission lands, this section will document each edge kind, its source/target node kinds, and its properties — grounded in the asset classes that emit it.
+- **Source:** `SCCM_Site`
+- **Target:** `SCCM_Site`
+- **Direction:**
+  - CAS ↔ Primary Site: **bidirectional** (two edges, one in each direction)
+  - Primary Site → Secondary Site: **one-way**
+
+No edge properties beyond the start and end site-code ids are emitted in Stage 1.
 
 ---
 

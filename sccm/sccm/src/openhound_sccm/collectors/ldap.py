@@ -123,7 +123,7 @@ _SITE_ATTRS = [
     "name",
 ]
 
-@app.resource(name="ldap_sites", parallelized=False, columns=SCCMSite)
+@app.resource(name="ldap_sites", parallelized=False, columns=raw_table_asset("ldap_sites"))
 @with_log_context(phase="LDAP", target_from_ctx_domain=True)
 def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     """
@@ -171,7 +171,7 @@ def ldap_sites(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
             yield {
                 "collection_source": ["LDAP-mSSMSSite"],
-                "distinguished_name": entry.get("distinguishedName"),
+                "distinguished_name": entry.get("distinguished_name"),
                 "parent_site_code": "Undetermined", # Will be determined by mSSMSManagementPoint
                 "sccm_infra": True,
                 "site_code": site_code,
@@ -317,7 +317,7 @@ def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
         try:
             sid = entry.get("object_sid")
-            dns_host_name = entry.get("dNSHostName")
+            dns_host_name = entry.get("dns_host_name")
 
             logger.verbose("Found computer with Remote Control SPN: %s (%s)", dns_host_name, sid)
 
@@ -325,14 +325,14 @@ def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
             yield {
                 "object_sid": sid,
-                "sam_account_name": entry.get("sAMAccountName"),
+                "sam_account_name": entry.get("sam_account_name"),
                 "name": entry.get("name"),
                 "dns_host_name": dns_host_name,
                 "domain": ctx.domain,
                 "site_code": site_code,
             }
         except Exception as ex:
-            logger.error("Failed to process computer with Remote Control SPN %s: %s", entry.get("dNSHostName"), ex)
+            logger.error("Failed to process computer with Remote Control SPN %s: %s", entry.get("dns_host_name"), ex)
             logger.debug(f"Search result: {entry}")
 
 
@@ -376,20 +376,20 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
     # Uniquify and combine results from both searches because there may be some overlap
     # They are list[dict[str, Any]] with key distinguishedName
-    all_results = {entry["distinguishedName"]: entry for entry in (netbootserver_rows + intellimirror_rows)}.values()
+    all_results = {entry["distinguished_name"]: entry for entry in (netbootserver_rows + intellimirror_rows)}.values()
 
     if not all_results:
         logger.info("No network boot server objects found in %s", ctx.domain)
         return
 
-    for entry in all_results: 
-        dn = entry.get("distinguishedName")
-        obj_class = entry.get("objectClass", [])
+    for entry in all_results:
+        dn = entry.get("distinguished_name")
+        obj_class = entry.get("object_class", [])
         if isinstance(obj_class, str):
             obj_class = [obj_class]
 
         if not dn:
-            logger.warning(f"Network boot server entry missing distinguishedName: {entry}")
+            logger.warning(f"Network boot server entry missing distinguished_name: {entry}")
             logger.debug(f"Search result: {entry}")
             continue
 
@@ -405,7 +405,7 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             )
 
             if target:
-                logger.info(f"Found network boot server: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                logger.info(f"Found network boot server: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
             # No else: register_target logs why it skipped (filtered host or
             # empty name), so a None return isn't a failure here.
@@ -474,7 +474,7 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             )
 
             if target:
-                logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dNSHostName')} ({target.ad_object.get('object_sid')})")
+                logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
             # No else: register_target logs why it skipped (filtered host or
             # empty name), so a None return isn't a failure here.
@@ -547,9 +547,9 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 logger.warning(f"Could not resolve GenericAll principal '{sid_str}' to domain object")
                 continue
 
-            sam = ad_obj.get("sAMAccountName")
+            sam = ad_obj.get("sam_account_name")
 
-            obj_class = ad_obj.get("objectClass", [])
+            obj_class = ad_obj.get("object_class", [])
             if isinstance(obj_class, str):
                 obj_class = [obj_class]
 
@@ -561,7 +561,7 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 # Add as collection target. register_target logs why it skipped
                 # (filtered host or empty name), so we don't inspect the result.
                 ctx.register_target(
-                    identifier=ad_obj.get("dNSHostName"),
+                    identifier=ad_obj.get("dns_host_name"),
                     source="LDAP-GenericAllSystemManagement",
                     ad_object=ad_obj,
                 )

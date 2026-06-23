@@ -877,14 +877,37 @@ class ADClient:
     # UTF-8-decoded (doing so corrupts them via errors="replace" substitution).
     _BINARY_ATTRS = frozenset({"ntsecuritydescriptor", "dnsrecord"})
 
+    # Map from the real LDAP wire-protocol attribute name (case-insensitive
+    # lowercase) to the clean snake_case key we store in the output dict.
+    # objectSid and objectGuid are handled separately (binary decoding), so
+    # they are intentionally absent here.  All other camelCase LDAP names that
+    # callers read must appear in this table.
+    _ATTR_KEY_MAP: dict[str, str] = {
+        "distinguishedname":    "distinguished_name",
+        "dnshostname":          "dns_host_name",
+        "samaccountname":       "sam_account_name",
+        "userprincipalname":    "user_principal_name",
+        "objectclass":          "object_class",
+    }
+
     @staticmethod
     def _entry_to_dict(entry) -> dict[str, Any]:
-        """Convert an ldap3 Entry into a plain dict, decoding binary SIDs/GUIDs."""
-        out: dict[str, Any] = {"distinguishedName": str(entry.entry_dn)}
+        """Convert an ldap3 Entry into a plain dict, decoding binary SIDs/GUIDs.
+
+        All output dict keys are clean snake_case so that dlt's table-loading
+        step does not mangle them (e.g. ``dNSHostName`` → ``d_ns_host_name``).
+        LDAP query attribute names (the wire protocol) are left unchanged
+        everywhere they appear in search calls.
+        """
+        # distinguishedName always comes from entry.entry_dn; normalise the key
+        # right here so every other attribute goes through the same mapping path.
+        out: dict[str, Any] = {"distinguished_name": str(entry.entry_dn)}
         for attr_name in entry.entry_attributes:
             raw = entry[attr_name].raw_values
             if not raw:
-                out[attr_name] = None
+                # Use the mapped key if available, else fall back to the raw name
+                out_key = ADClient._ATTR_KEY_MAP.get(attr_name.lower(), attr_name)
+                out[out_key] = None
                 continue
             if attr_name.lower() == "objectsid":
                 out["object_sid"] = bytes_to_sid(raw[0])
@@ -896,6 +919,8 @@ class ADClient:
                 v = raw[0]
                 if isinstance(v, str):
                     v = v.encode("latin-1")
+                # Binary attrs like ntsecuritydescriptor have no camelCase
+                # alias, so the raw attr_name is already acceptable here.
                 out[attr_name] = v
                 continue
             values = []
@@ -907,7 +932,8 @@ class ADClient:
                         values.append(v.hex())
                 else:
                     values.append(v)
-            out[attr_name] = values if len(values) > 1 else values[0]
+            out_key = ADClient._ATTR_KEY_MAP.get(attr_name.lower(), attr_name)
+            out[out_key] = values if len(values) > 1 else values[0]
         return out
     
 

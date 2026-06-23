@@ -41,6 +41,7 @@ Every section follows the same spine:
 - [7. Enhanced logging and diagnostics for blind remote environments](#7-enhanced-logging-and-diagnostics-for-blind-remote-environments)
 - [8. Windows-isms: the platform fights back](#8-windows-isms-the-platform-fights-back)
 - [9. Convert can't iterate DuckDB rows: the unified Computer-node problem](#9-convert-cant-iterate-duckdb-rows-the-unified-computer-node-problem)
+- [10. dlt loads whatever the data contains; our SQL expects fixed columns](#10-dlt-loads-whatever-the-data-contains-our-sql-expects-fixed-columns)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 
@@ -502,6 +503,22 @@ A stock REST collector on Linux CI never meets any of these.
   with [`_copytruncate_rollover`](src/openhound_sccm/main.py#L356-L379) — *copy the file to a dated sibling,
   then truncate in place* — so rotation never needs exclusive access to the open handle. It's a no-op off
   Windows, where rename-based rotation works.
+- **dlt's pipeline storage gets locked under the user profile (WinError 32, again).** A *second* WinError 32,
+  unrelated to logging. dlt keeps each pipeline's working state under `~/.dlt/pipelines/<name>/` and moves
+  files with **atomic rename/remove** (`os.replace` during `extract`, `os.remove` during `load`). On Windows
+  a file freshly written under the **user profile** is briefly held open by the **Search Indexer** (which
+  indexes `C:\Users\<you>` by default) or an endpoint-security agent — so dlt's rename/remove
+  **intermittently fails with WinError 32**, and worse, leaves a **stuck "pending package"** that re-trips
+  the next run. (Seen at convert time at both `extract` and `load`; Defender real-time protection was *off*,
+  which rules out its scanner and points at the indexer/agent.) Unlike the log handler above, this isn't a
+  core handler instance we can mutate at runtime — it's dlt's own storage — so the fix is dlt's built-in
+  knob: **relocate the pipeline dir off the indexed profile via the `DLT_DATA_DIR` environment variable**
+  (dlt reads it in its run-context resolver and places pipelines under `<DLT_DATA_DIR>/pipelines`). The
+  Stage-1 code tour sets it **in-process to a fresh per-run temp dir** before importing dlt
+  ([`tour_driver_stage1.py`](tour_driver_stage1.py)); the real CLI sets it to a stable off-profile path
+  (`C:\dlt-home`) via the `Debug: openhound collect sccm` launch profile's `env` block and/or a user-level
+  `setx DLT_DATA_DIR`. A fresh, un-indexed location both dodges the lock and avoids inheriting a stuck
+  pending package. `~/.dlt` is fine on Linux CI, so this is Windows-only.
 - **uv-managed Python aborts every TLS handshake.** [`pyproject.toml`](pyproject.toml#L47-L52) sets
   `python-preference = "only-system"` because the `python-build-standalone` builds uv installs ship a
   `libcrypto` without the `OPENSSL_Applink` cross-CRT shim — which aborts the process mid-handshake on
@@ -586,6 +603,37 @@ Two alternatives were considered and **rejected**, recorded so the mechanism isn
   learn the bucket path and write into it (coupling the preproc/convert path args), and it doubles IO.
   Held in reserve if Convert2-Read-DB hits a wall.
 
+### Group identity: a collected `SMS_R_UserGroup` class replaces CMBP's live AD lookup *(shipped)*
+
+CMBP turned each `SecurityGroupName` membership on an `SMS_R_System` / `SMS_R_User` record into a Group
+node by calling `Resolve-PrincipalInDomain` — a **live Active Directory lookup, per group name, at
+collection time** (`ConfigManBearPig.ps1:459`, `:7368`, `:7462`). An offline coalesce can make no AD
+calls, and the membership strings carry only names, so a naive port produced **zero Group nodes** on real
+lab data: `SMS_R_System` / `SMS_R_User` list groups by *name* only, and the offline `principal_by_name`
+table (built from user/computer/admin records) has no entry for an ordinary AD group such as
+`DOMAIN\Domain Users`.
+
+The divergence: we collect **`SMS_R_UserGroup`** (`collectors/privileged.py::_user_group` →
+`adminservice_user_group` / `wmi_user_group` tables) — a class CMBP never queried. AD Security Group
+Discovery mirrors each security group into that class **with its own SID** and a `UniqueUsergroupName` in
+the exact `DOMAIN\name` form the membership strings use. `preproc` folds `(unique_usergroup_name, sid)`
+into `principal_by_name`, so `transforms._node_group`'s case-insensitive name→SID join resolves every
+membership **offline and set-based**, instead of one AD round-trip per name. This is strictly more
+scalable than CMBP and needs no live AD at convert time. (Inherent limit: a `SecurityGroupName` string
+can't disambiguate two groups that share a name — both resolve — exactly the ambiguity CMBP's by-name AD
+lookup also had.)
+
+### Role columns arrive in heterogeneous shapes; preproc normalises them *(shipped)*
+
+`sccm_site_system_roles` is contributed by several collectors that disagree on wire shape: AdminService
+`system_roles` is a JSON array; `site_definitions_computers` / HTTP emit a bare `role@site` scalar; SMB /
+RemoteRegistry emit a list that dlt + DuckDB's `read_json` can surface as JSON-array *text inside a
+VARCHAR*. `transforms._arr` normalises all four shapes (NULL / JSON-array-text / scalar / native array) to
+`VARCHAR[]` before the array-union, so a JSON-array string is *parsed* rather than comma-split into
+bracket/quote garbage. The collectors were also made internally consistent (RemoteRegistry now always
+emits a list via `_roles(...)`, matching SMB) so the source data is well-typed going forward — the preproc
+normaliser is the belt, the collector fix the braces.
+
 ### Trade-offs
 
 Convert2-Read-DB keeps each entity to a single emission — no duplicate-node disk cost and no dependence on BloodHound's
@@ -594,6 +642,101 @@ nodes itself instead of using the stock JSONL reader. The exact DuckDB read-impl
 `@dlt.resource` over the open lookup connection vs. DLT's `sql_database` source) is **deferred to the
 implementation plan**, where both are prototyped against the real `lookup.duckdb`. If Convert2-Read-DB proves
 unworkable, the JSONL-writeback fallback above is the documented escape hatch.
+
+---
+
+## 10. dlt loads whatever the data contains; our SQL expects fixed columns
+
+### The framework baseline
+
+In `preproc`, **dlt** is the piece that turns the collected JSONL files into DuckDB tables. It does this
+by **looking at the data and guessing the shape** — a "figure it out from whatever showed up" approach:
+
+- It creates **only the columns it actually sees** in the rows.
+- If a column is **empty (NULL) in every row** of a load, dlt **drops that column entirely**.
+- It stores list-like fields (a list of group names, a list of roles) as **JSON**, not as a real list.
+
+For a normal OpenHound collector — one tidy API where every row has the same shape — this is fine. The
+data is uniform, so what dlt infers is exactly what you expect, every time.
+
+### Why it breaks for SCCM
+
+SCCM data is the opposite of uniform. It is **sparse and irregular**:
+
+- Many source tables are **optional** — run LDAP only, or skip WMI, and whole tables simply don't exist on
+  a given run.
+- Many **columns are optional** — a registry flag like `disable_loopback_check` is often NULL on every host,
+  so dlt drops the column.
+- The **same kind of host seen over different protocols reports different columns** — an SMB-discovered
+  computer and an LDAP-discovered computer don't carry the same fields.
+- **List fields** (group memberships, site-system roles) come back as JSON — sometimes even as JSON *text
+  sitting inside a plain-text column*.
+
+Meanwhile our `preproc` coalesce SQL (the queries that merge many source tables into one
+`node_*` row) is written the **opposite way**: it asks for a **fixed, known list of columns by name**
+(`SELECT sid, sccm_site_system_roles, disable_loopback_check, …`). When the real data is missing one of
+those columns, the SQL **can't even compile** — it fails before reading a single row. And because every
+source-load is wrapped in `_safe` (which logs the error and moves on), one missing column **silently drops
+the entire source**, so the finished graph is quietly incomplete.
+
+Put simply: **dlt hands us "whatever the data happened to contain," but our SQL demands "exactly this set
+of columns."** On real SCCM data those two expectations collide constantly.
+
+### The add-on: three small defenses that make the SQL tolerant
+
+All three live in [`transforms.py`](src/openhound_sccm/transforms.py) and run during `preproc`, *after* dlt
+has loaded the tables. The easy way to remember them: **`_safe` keeps the pipeline alive, `_ensure_columns`
+makes the columns exist, `_arr` makes the values the right shape.**
+
+1. **`_safe` — the safety net** ([transforms.py:16](src/openhound_sccm/transforms.py#L16)). Each "load
+   source X into table Y" step runs as its own statement. If it fails, `_safe` **logs it and keeps going**
+   instead of aborting the whole preproc. This is what lets a run that used only some collection methods
+   still build a graph from whatever *was* collected. It mainly catches the missing-*table* case (a table
+   that doesn't exist at all).
+
+2. **`_ensure_columns` — fill the gaps** ([transforms.py:27](src/openhound_sccm/transforms.py#L27)). Right
+   before each coalesce, it looks at the source table and **adds any missing columns the SQL needs as empty
+   (NULL) columns**. So whether a column vanished because dlt dropped it (all-NULL) or because that source
+   never had it, the column now exists and the SQL compiles. Adding a column the SQL doesn't actually read
+   is harmless; a column that's already there keeps its real values. This is the piece that stops `_safe`
+   from silently dropping a source just because one optional column went missing.
+
+3. **`_arr` (and `CAST(... AS VARCHAR[])`) — fix the shapes**
+   ([transforms.py:194](src/openhound_sccm/transforms.py#L194)). List-like columns arrive in several shapes:
+   a native list, a JSON array, JSON-array *text* inside a plain column, or a single scalar string. `_arr`
+   turns **all of them into a real list** so DuckDB operations like `UNNEST` and array-union work. Without
+   it, `UNNEST` on a JSON value errors out with "requires a single list as input." (The specific role-column
+   case is detailed in [§9](#9-convert-cant-iterate-duckdb-rows-the-unified-computer-node-problem).)
+
+### Why we defend in the SQL instead of pinning the schema at load
+
+dlt *can* be told the opposite: pin an **explicit, complete column list and types** for every table at load
+time, so nothing is ever missing or mis-typed. If we did that, `_ensure_columns` and most of `_arr` wouldn't
+be needed.
+
+We deliberately **didn't**, because pinning is **rigid**: the moment the real data drifts from the pinned
+shape, dlt **refuses the entire load**. That is exactly the failure we already hit — the `ldap_sites` table
+was pinned to a model, the real data's `site_code` came back slightly different (allowed to be empty), and
+dlt's "freeze" rule **crashed the whole collect** instead of adapting (the `ldap_sites` decoupling fix).
+
+So there is a real fork in the road, and we chose the tolerant side:
+
+- **Pin at load** → strict and tidy, but any unexpected real-world shape is a **hard crash**.
+- **Defend in the SQL** (our choice) → flexible; an unexpected shape becomes a **logged, survivable skip**
+  — or, with `_ensure_columns`, no problem at all.
+
+Given how much SCCM environments vary, the tolerant approach is the safer default.
+
+### Trade-offs
+
+- The defenses are **spread across every coalesce**. Each new node/edge stage must remember to list its
+  optional columns for `_ensure_columns` and route every list column through `_arr`. Forget one and a source
+  can silently drop on some future data. This is guarded by tests and by the log lines below.
+- **`_safe` is a double-edged sword.** It keeps the run alive, but it can also *hide* a real problem by
+  dropping a source. `_ensure_columns` exists largely to stop `_safe` from catching things it shouldn't.
+- **Reading the log is the diagnostic.** `WARNING … skipped (missing source)` means a table that was never
+  collected — usually a method you simply didn't run, which is normal. `ERROR … failed` means a table that
+  *was* collected but still didn't load — that's the one worth chasing.
 
 ---
 
@@ -609,6 +752,7 @@ unworkable, the JSONL-writeback fallback above is the documented escape hatch.
 | Logging & diagnostics | Filters + extra handlers + runtime mutation of live handlers | A pluggable logging/formatting API |
 | Windows log-rollover fix | Runtime monkey-patch of core's handler instances | A Windows-safe `doRollover` in core |
 | Convert from DuckDB | `preproc` coalesced tables + a second `convert`-time `dlt.pipeline` (Convert2-Read-DB) | `read_from="duckdb"` on `@app.convert` (proposed) |
+| Tolerant coalesce vs. pinned load schema | `_safe` + `_ensure_columns` + `_arr` in the preproc transforms | Pinning full per-table schemas/types at load (rejected — brittle; it caused the `ldap_sites` freeze crash) |
 
 ---
 

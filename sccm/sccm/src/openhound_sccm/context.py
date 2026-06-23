@@ -249,7 +249,7 @@ class SourceContext:
         if "." in identifier:
             candidates.add(identifier.split(".")[0].lower())
         if ad_object:
-            for field_name in ("dNSHostName", "name", "sAMAccountName"):
+            for field_name in ("dns_host_name", "name", "sam_account_name"):
                 v = ad_object.get(field_name)
                 if isinstance(v, str):
                     candidates.add(v.lower().rstrip("$"))
@@ -288,7 +288,7 @@ class SourceContext:
                 logger.verbose("AD resolution failed for %r: %s", identifier, ex)
 
         if ad_object:
-            identifier = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
+            identifier = ad_object.get("dns_host_name") or ad_object.get("name") or identifier
         # else: unresolved — reported once by the Step 3 warning below, not here.
 
         # Step 2: Allowed-targets filter
@@ -299,7 +299,7 @@ class SourceContext:
         # Step 3: Canonical name and dedup key
         sid = ad_object.get("object_sid") if ad_object else None
         if sid:
-            canonical = ad_object.get("dNSHostName") or ad_object.get("name") or identifier
+            canonical = ad_object.get("dns_host_name") or ad_object.get("name") or identifier
         else:
             canonical = identifier
             logger.warning(
@@ -314,7 +314,7 @@ class SourceContext:
             ) or self.target_hosts_by_hostname.get(canonical_lower)
 
             if existing is not None:
-                logger.verbose(f"Already registered target: {existing.ad_object.get('dNSHostName') if existing.ad_object else existing.hostname}")
+                logger.verbose(f"Already registered target: {existing.ad_object.get('dns_host_name') if existing.ad_object else existing.hostname}")
                 # FQDN upgrade: re-key target_hosts_by_hostname
                 if "." in canonical_lower and "." not in existing.hostname.lower():
                     logger.verbose("Upgrading hostname %r -> %r", existing.hostname, canonical)

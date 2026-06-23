@@ -80,6 +80,13 @@ RSYSTEM_COLUMNS = ("Client", "Name", "Obsolete", "ResourceID", "SID", "SMSUnique
 RUSER_COLUMNS = ("AADTenantID", "AADUserID", "DistinguishedName", "FullDomainName", "FullUserName",
                  "Name", "ResourceID", "SecurityGroupName", "SID", "UniqueUserName", "UserName",
                  "UserPrincipalName")
+# SMS_R_UserGroup mirrors the security groups discovered by AD Security Group
+# Discovery, one resource row per group WITH its SID. SMS_R_System / SMS_R_User
+# only carry group *names* in SecurityGroupName, so this class is what turns those
+# names into SIDs offline (fed into principal_by_name during preproc). UniqueUsergroupName
+# is the DOMAIN\group form that matches the SecurityGroupName values exactly.
+# NB: this class exposes "ResourceId" (not "ResourceID" like SMS_R_System); match its casing.
+USERGROUP_COLUMNS = ("ResourceId", "SID", "UniqueUsergroupName", "UsergroupName")
 COLLECTION_COLUMNS = ("CollectionID", "CollectionType", "CollectionVariablesCount", "Comment",
                       "IsBuiltIn", "LastChangeTime", "LastMemberChangeTime", "LimitToCollectionID",
                       "LimitToCollectionName", "MemberCount", "Name")

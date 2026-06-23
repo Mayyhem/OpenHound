@@ -11,6 +11,20 @@ from ..log_context import with_log_context
 logger = logging.getLogger(__name__)
 
 
+def _roles(bases: list[str], site_code: Optional[str]) -> list[str]:
+    """Site-system role strings as a LIST, each suffixed ``@<site_code>`` when known.
+
+    Always returns a list (even for a single role) so dlt types
+    ``sccm_site_system_roles`` consistently across every RemoteRegistry row.
+    Previously some rows emitted a bare string and others a list for the same
+    column; under the freeze contract that collapsed the column to JSON-array text
+    inside a VARCHAR (which the preproc role normaliser then had to parse back out).
+    Mirrors smb.py's ``_role`` helper but list-valued.
+    """
+    suffix = f"@{site_code}" if site_code else ""
+    return [f"{base}{suffix}" for base in bases]
+
+
 # Registry key paths for SCCM
 SCCM_REG_KEYS = {
     # Readable by any authenticated AD user with SMB access to the host
@@ -355,7 +369,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                     **(target_entry.ad_object or {}),
                     "source": "RemoteRegistry-ComponentServers",
                     "sccm_infra": True,
-                    "sccm_site_system_roles": "SMS Site Server@" + site_code if site_code else "SMS Site Server",
+                    "sccm_site_system_roles": _roles(["SMS Site Server"], site_code),
                 }
                 row.setdefault("name", target)
                 yield "remoteregistry_computers", row
@@ -373,7 +387,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                             **(new_target.ad_object or {}),
                             "source": "RemoteRegistry-ComponentServers",
                             "sccm_infra": True,
-                            "sccm_site_system_roles": "SMS Component Server@" + site_code if site_code else "SMS Component Server",
+                            "sccm_site_system_roles": _roles(["SMS Component Server"], site_code),
                         }
                         row.setdefault("name", server)
                         yield "remoteregistry_computers", row
@@ -400,10 +414,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                     **(target_entry.ad_object or {}),
                     "source": "RemoteRegistry-MultisiteComponentServers",
                     "sccm_infra": True,
-                    "sccm_site_system_roles": [
-                        "SMS SQL Server@" + site_code if site_code else "SMS SQL Server",
-                        "SMS Site Server@" + site_code if site_code else "SMS Site Server",
-                    ],
+                    "sccm_site_system_roles": _roles(["SMS SQL Server", "SMS Site Server"], site_code),
                 }
                 row.setdefault("name", target)
                 yield "remoteregistry_computers", row
@@ -424,7 +435,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
                             **(new_target.ad_object or {}),
                             "source": "RemoteRegistry-MultisiteComponentServers",
                             "sccm_infra": True,
-                            "sccm_site_system_roles": ["SMS SQL Server@" + site_code if site_code else "SMS SQL Server"],
+                            "sccm_site_system_roles": _roles(["SMS SQL Server"], site_code),
                         }
                         row.setdefault("name", server)
                         yield "remoteregistry_computers", row
@@ -461,7 +472,7 @@ def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list
         logger.verbose("Found CurrentUser SID %s; resolving principal", current_user_sid)
         current_user_ad_object = ctx.resolve_principal(current_user_sid)
         if current_user_ad_object:
-            logger.info("Found current user: %s (%s)", current_user_ad_object.get("sAMAccountName"), current_user_sid)
+            logger.info("Found current user: %s (%s)", current_user_ad_object.get("sam_account_name"), current_user_sid)
             row = {
                 **(current_user_ad_object or {}),
                 "source": "RemoteRegistry-CurrentUser",
