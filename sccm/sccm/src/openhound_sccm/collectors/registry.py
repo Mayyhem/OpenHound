@@ -473,9 +473,15 @@ def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list
         current_user_ad_object = ctx.resolve_principal(current_user_sid)
         if current_user_ad_object:
             logger.info("Found current user: %s (%s)", current_user_ad_object.get("sam_account_name"), current_user_sid)
+            target_entry = ctx.target_hosts_by_hostname.get(probe.hostname)
+            host_sid = target_entry.ad_object.get("object_sid") if (target_entry and target_entry.ad_object) else None
+            if host_sid is None:
+                # No resolved host AD object — HasSession can't be built for this row downstream; keep the row but log.
+                logger.warning("Current-user row for %s has no host object_sid; HasSession will be dropped downstream", probe.hostname)
             row = {
                 **(current_user_ad_object or {}),
                 "source": "RemoteRegistry-CurrentUser",
+                "host_object_sid": host_sid,
             }
             row.setdefault("object_sid", current_user_sid)
             yield "remoteregistry_users", row

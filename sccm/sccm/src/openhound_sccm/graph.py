@@ -8,7 +8,7 @@ used as `environmentid` for Base AD nodes (spec §2 "Root/environment node").
 import re
 from dataclasses import dataclass, field
 
-from openhound.core.models.entries_dataclass import Node, NodeProperties
+from openhound.core.models.entries_dataclass import EdgeProperties, Node, NodeProperties
 
 # A domain SID is the `S-1-5-21-X-Y-Z` prefix; an account SID appends `-RID`.
 _DOMAIN_SID = re.compile(r"^(S-1-5-21(?:-\d+){3})-\d+$")
@@ -29,6 +29,25 @@ def domain_environment_id(sid: str, fallback_domain_sid: str | None = None) -> s
     if m:
         return m.group(1)
     return fallback_domain_sid
+
+
+# Edge kind -> the kind to give a synthesised stub when the edge's END id has no node.
+# Only edges whose end is a user/group SID (or a device smsid) appear here; ambiguous
+# ends (user OR group) get "Base". See Stage 2 graph-integrity decision (2026-06-23).
+BACKFILL_END_KIND: dict[str, str] = {
+    "SCCM_HasPrimaryUser": "User",
+    "SCCM_HasCurrentUser": "User",
+    "SCCM_HasADLastLogonUser": "User",
+    "HasSession": "User",
+    "MemberOf": "Group",
+    "SCCM_HasMember": "Base",
+    "SCCM_HasStoredAccount": "Base",
+}
+
+
+@dataclass
+class SCCMEdgeProperties(EdgeProperties):
+    collection_source: list[str] = field(default_factory=list, kw_only=True)
 
 
 @dataclass
@@ -88,3 +107,67 @@ class SCCMSiteProperties(NodeProperties):
     build_number: str | None = field(default=None, kw_only=True)
     install_dir: str | None = field(default=None, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
+
+
+@dataclass
+class SCCMCollectionProperties(NodeProperties):
+    collection_source: list[str] = field(default_factory=list, kw_only=True)
+    sccm_collection_id: str | None = field(default=None, kw_only=True)
+    sccm_collection_type: str | None = field(default=None, kw_only=True)   # "Other"/"User"/"Device"
+    member_count: int | None = field(default=None, kw_only=True)
+    comment: str | None = field(default=None, kw_only=True)
+    is_built_in: bool | None = field(default=None, kw_only=True)
+    limit_to_collection_id: str | None = field(default=None, kw_only=True)
+    limit_to_collection_name: str | None = field(default=None, kw_only=True)
+    collection_variables_count: int | None = field(default=None, kw_only=True)
+    root_site_code: str | None = field(default=None, kw_only=True)
+    sccm_infra: bool = field(default=True, kw_only=True)
+
+
+@dataclass
+class SCCMAdminUserProperties(NodeProperties):
+    collection_source: list[str] = field(default_factory=list, kw_only=True)
+    sccm_admin_id: str | None = field(default=None, kw_only=True)
+    admin_sid: str | None = field(default=None, kw_only=True)
+    distinguished_name: str | None = field(default=None, kw_only=True)
+    is_group: bool | None = field(default=None, kw_only=True)
+    account_type: int | None = field(default=None, kw_only=True)
+    root_site_code: str | None = field(default=None, kw_only=True)
+    sccm_infra: bool = field(default=True, kw_only=True)
+
+
+@dataclass
+class SCCMSecurityRoleProperties(NodeProperties):
+    collection_source: list[str] = field(default_factory=list, kw_only=True)
+    sccm_role_id: str | None = field(default=None, kw_only=True)
+    sccm_role_name: str | None = field(default=None, kw_only=True)
+    role_description: str | None = field(default=None, kw_only=True)
+    is_built_in: bool | None = field(default=None, kw_only=True)
+    is_sec_admin_role: bool | None = field(default=None, kw_only=True)
+    copied_from_id: str | None = field(default=None, kw_only=True)
+    number_of_admins: int | None = field(default=None, kw_only=True)
+    operations: list[str] = field(default_factory=list, kw_only=True)
+    root_site_code: str | None = field(default=None, kw_only=True)
+    sccm_infra: bool = field(default=True, kw_only=True)
+
+
+@dataclass
+class SCCMClientDeviceProperties(NodeProperties):
+    collection_source: list[str] = field(default_factory=list, kw_only=True)
+    smsid: str | None = field(default=None, kw_only=True)
+    sccm_resource_id: str | None = field(default=None, kw_only=True)
+    site_code: str | None = field(default=None, kw_only=True)
+    device_os: str | None = field(default=None, kw_only=True)
+    device_os_build: str | None = field(default=None, kw_only=True)
+    is_virtual_machine: bool | None = field(default=None, kw_only=True)
+    co_managed: bool | None = field(default=None, kw_only=True)
+    aad_device_id: str | None = field(default=None, kw_only=True)
+    aad_tenant_id: str | None = field(default=None, kw_only=True)
+    last_reported_mp_server_name: str | None = field(default=None, kw_only=True)
+    primary_user: str | None = field(default=None, kw_only=True)
+    current_logon_user: str | None = field(default=None, kw_only=True)
+    ad_last_logon_user: str | None = field(default=None, kw_only=True)
+    root_site_code: str | None = field(default=None, kw_only=True)
+    possible: bool = field(default=False, kw_only=True)
+    sccm_ad_domain_sid: str | None = field(default=None, kw_only=True)
+    sccm_infra: bool = field(default=False, kw_only=True)

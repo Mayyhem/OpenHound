@@ -1,0 +1,113 @@
+# Task E2 review package
+diff --git a/sccm/sccm/src/openhound_sccm/node_client_device_possible_test.py b/sccm/sccm/src/openhound_sccm/node_client_device_possible_test.py
+new file mode 100644
+index 0000000..176d04c
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/node_client_device_possible_test.py
+@@ -0,0 +1,30 @@
++# src/openhound_sccm/node_client_device_possible_test.py
++import duckdb
++from openhound_sccm.transforms import transforms
++
++
++def _seed(con, disable):
++    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
++    con.execute(f"CREATE TABLE sccm.collection_settings AS "
++                f"SELECT {str(disable).lower()} AS disable_possible_edges, false AS enable_bad_opsec")
++    con.execute("CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
++                "(VALUES ('CAS', NULL, 4)) AS t(site_code,parent_site_code,site_type)")
++    con.execute("CREATE TABLE sccm.ldap_cmrc_devices AS SELECT "
++                "'S-1-5-21-1-2-3-1104' AS object_sid, 'WS09' AS name")
++
++
++def test_possible_client_emitted_when_enabled():
++    con = duckdb.connect(":memory:"); _seed(con, disable=False); transforms(con)
++    rows = con.execute("SELECT smsid, possible, ad_domain_sid, root_site_code "
++                       "FROM sccm.node_client_device WHERE possible").fetchall()
++    assert rows == [("S-1-5-21-1-2-3-1104@CAS", True, "S-1-5-21-1-2-3-1104", "CAS")]
++    # C2's HasClient picks it up automatically (start = root site)
++    hc = con.execute("SELECT start_id, end_id FROM sccm.graph_edges "
++                     "WHERE kind='SCCM_HasClient' AND end_id='S-1-5-21-1-2-3-1104@CAS'").fetchall()
++    assert hc == [("CAS", "S-1-5-21-1-2-3-1104@CAS")]
++
++
++def test_possible_client_suppressed_when_disabled():
++    con = duckdb.connect(":memory:"); _seed(con, disable=True); transforms(con)
++    cnt = con.execute("SELECT count(*) FROM sccm.node_client_device WHERE possible").fetchone()[0]
++    assert cnt == 0
+diff --git a/sccm/sccm/src/openhound_sccm/transforms.py b/sccm/sccm/src/openhound_sccm/transforms.py
+index ec0e907..cda28b6 100644
+--- a/sccm/sccm/src/openhound_sccm/transforms.py
++++ b/sccm/sccm/src/openhound_sccm/transforms.py
+@@ -1273,20 +1273,48 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+         f"bool_or(co_managed) AS co_managed, any_value(aad_device_id) AS aad_device_id, "
+         f"any_value(aad_tenant_id) AS aad_tenant_id, any_value(last_mp_server_name) AS last_mp_server_name, "
+         f"any_value(primary_user_name) AS primary_user_name, "
+         f"any_value(current_logon_user_name) AS current_logon_user_name, "
+         f"any_value(ad_last_logon_user_name) AS ad_last_logon_user_name, "
+         f"bool_or(possible) AS possible, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
+         f"FROM {schema}.node_client_device GROUP BY smsid", [root])
+     logger.info("node_client_device built in schema %r", schema)
+ 
+ 
++def _node_client_device_possible(
++    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
++) -> None:
++    """Append inferred possible-client SCCM_ClientDevice rows from ldap_cmrc_devices
++    (CMBP ps1:3272, fixed to a deterministic id). id = upper(object_sid)@root — its own
++    namespace, so it never merges with the Computer node (raw SID) and Stage 4 SameHostAs
++    can later dedup it against a real client via ad_domain_sid. Gated by
++    --disable-possible-edges and on a present root_site_code."""
++    if disable_possible:
++        # --disable-possible-edges was set at collection time; skip all possible-client rows.
++        logger.info("possible-client nodes disabled (--disable-possible-edges); skipping")
++        return
++    root = _root_code(con, schema)
++    if not root:
++        # Without a hierarchy root the id would collapse to the bare SID and collide
++        # with the Computer node; a possible-client only makes sense inside a hierarchy.
++        logger.warning("no root_site_code resolved; skipping possible-client nodes")
++        return
++    _ensure_columns(con, schema, "ldap_cmrc_devices", {"object_sid": "VARCHAR", "name": "VARCHAR"})
++    # root is a 3-character alphanumeric site code so inlining it as a literal is safe.
++    _safe(con, "node_client_device_possible<-ldap_cmrc_devices",
++          f"INSERT INTO {schema}.node_client_device BY NAME "
++          f"SELECT upper(object_sid) || '@{root}' AS smsid, name, '{root}' AS site_code, "
++          f"true AS possible, upper(object_sid) AS ad_domain_sid, '{root}' AS root_site_code "
++          f"FROM {schema}.ldap_cmrc_devices WHERE object_sid IS NOT NULL")
++    logger.info("node_client_device_possible built in schema %r", schema)
++
++
+ def _resource_to_sid(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+     """Build resource_key '<resource_id>@<site>' -> SID lookup.
+ 
+     Covers r_system (computers), r_user (users), and user_group (groups). The
+     r_system source filters out obsolete rows; the others do not carry that flag.
+     SIDs are uppercased for consistent joins. Used by Stage 2 edge builders that
+     receive resource_id fields and need to resolve them to a SID.
+     """
+     con.execute(f"CREATE OR REPLACE TABLE {schema}.resource_to_sid (resource_key VARCHAR, sid VARCHAR)")
+ 
+@@ -1653,20 +1681,22 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
+     _principal_by_name(con, schema)
+     _site_hierarchy(con, schema)
+     _node_computer(con, schema)
+     _node_user(con, schema)
+     _node_group(con, schema)
+     _node_site(con, schema)
+     _node_collection(con, schema)
+     _node_security_role(con, schema)
+     _node_admin_user(con, schema)
+     _node_client_device(con, schema)
++    disable_possible = _read_disable_possible(con, schema)
++    _node_client_device_possible(con, schema, disable_possible)
+     # Stage 2 lookup tables: name/id -> id maps that edge builders join against.
+     # These read from the raw source tables (not the node_* coalesces) and must
+     # run after all _node_* builders (which may add columns via _ensure_columns)
+     # and before _graph_edges_init so edge builders can reference them.
+     _resource_to_sid(con, schema)
+     _device_by_resourceid(con, schema)
+     _collection_by_name(con, schema)
+     _role_by_name(con, schema)
+     # _graph_edges_init must run before all edge builders; _edge_replication and future
+     # edge builders all INSERT into the table created here.

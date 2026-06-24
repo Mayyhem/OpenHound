@@ -180,6 +180,23 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
         logger.error("Error querying CCM_Client: %s", ex)
 
 
+def collection_settings_rows(ctx):
+    """One row capturing the collect-time behaviour flags, so preproc/convert can
+    gate possible nodes/edges without re-reading the CLI (the flags are collect-time)."""
+    yield {
+        "disable_possible_edges": bool(getattr(ctx, "disable_possible_edges", False)),
+        "enable_bad_opsec": bool(getattr(ctx, "enable_bad_opsec", False)),
+    }
+
+
+@app.resource(name="collection_settings", parallelized=False, columns=raw_table_asset("collection_settings"))
+def collection_settings(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
+    """Persist collect-time behaviour flags as a one-row table so the separate
+    preproc/convert runs can gate possible nodes/edges without re-reading the CLI."""
+    # ctx is injected the same way sibling local resources receive it; emit exactly one row.
+    yield from collection_settings_rows(ctx)
+
+
 @app.resource(name="local_client_logs_targets", parallelized=False, columns=raw_table_asset("local_client_logs_targets"))
 @with_log_context(phase="Local", target_from_ctx_domain=True)
 def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:

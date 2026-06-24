@@ -28,6 +28,7 @@ from .collectors.local import (
     local_wmi_sms_lookupmp,
     local_wmi_ccm_client,
     local_client_logs_targets,
+    collection_settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ DISCOVERY_RESOURCE_NAMES: tuple[str, ...] = (
     "local_wmi_sms_lookupmp",
     "local_wmi_ccm_client",
     "local_client_logs_targets",
+    "collection_settings",
 )
 
 
@@ -270,6 +272,8 @@ def source(
         discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
         site_codes=_parse_csv_option(site_codes) or None,
         dns_resolver=dns_resolver,
+        disable_possible_edges=disable_possible_edges,
+        enable_bad_opsec=enable_bad_opsec,
     )
 
     # Stash so collect_sccm can reuse this exact context for the per-host stage.
@@ -292,5 +296,6 @@ def source(
         local_wmi_sms_lookupmp(ctx),
         local_wmi_ccm_client(ctx),
         local_client_logs_targets(ctx),
+        collection_settings(ctx),
         *build_emit_resources(),
     )

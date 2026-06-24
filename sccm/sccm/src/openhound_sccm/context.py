@@ -29,6 +29,11 @@ class SourceContext:
     # Collection (-m / --collection-methods)
     collection_methods: str = "All"
 
+    # Behaviour flags persisted at collect time so preproc/convert can gate
+    # "possible" nodes/edges without re-reading the CLI (separate runs).
+    disable_possible_edges: bool = False
+    enable_bad_opsec: bool = False
+
     # Public, injectable — shared across the run via the module-level _shared_*
     # pattern in source.py. ``work_queue`` is the phased_pipeline.WorkQueue that
     # the per-host engine drains; register_target submits newly-discovered,

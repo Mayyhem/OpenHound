@@ -1,0 +1,102 @@
+# Task C3 review package
+diff --git a/sccm/sccm/src/openhound_sccm/edge_has_member_test.py b/sccm/sccm/src/openhound_sccm/edge_has_member_test.py
+new file mode 100644
+index 0000000..3de0ff4
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/edge_has_member_test.py
+@@ -0,0 +1,24 @@
++# src/openhound_sccm/edge_has_member_test.py
++import duckdb
++from openhound_sccm.transforms import transforms
++
++
++def test_edge_has_member_device_and_user_skip_builtin():
++    con = duckdb.connect(":memory:")
++    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
++    # single primary PS1 -> root resolves to PS1
++    con.execute("CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
++                "(VALUES ('PS1', NULL, 2)) AS t(site_code,parent_site_code,site_type)")
++    # a device resource (-> ClientDevice smsid) and a user resource (-> user SID)
++    con.execute("CREATE TABLE sccm.adminservice_client_devices AS SELECT 'GUID-1' AS smsid, 'WS01' AS name, "
++                "7 AS resource_id, 'PS1' AS site_code, true AS is_client, false AS is_obsolete")
++    con.execute("CREATE TABLE sccm.adminservice_r_user AS SELECT 'alice' AS name, "
++                "'S-1-5-21-1-2-3-1106' AS sid, 9 AS resource_id, 'PS1' AS source_site_code")
++    # memberships: device (7), user (9), and a built-in pseudo-resource (skipped)
++    con.execute("CREATE TABLE sccm.adminservice_collection_members AS SELECT * FROM (VALUES "
++                "('PS100016', 7, 'PS1'), ('PS100016', 9, 'PS1'), ('PS100016', 2046820352, 'PS1')) "
++                "AS t(collection_id, resource_id, site_code)")
++    transforms(con)
++    rows = con.execute("SELECT start_id, end_id FROM sccm.graph_edges "
++                       "WHERE kind='SCCM_HasMember' ORDER BY end_id").fetchall()
++    assert rows == [("PS100016@PS1", "GUID-1"), ("PS100016@PS1", "S-1-5-21-1-2-3-1106")]
+diff --git a/sccm/sccm/src/openhound_sccm/transforms.py b/sccm/sccm/src/openhound_sccm/transforms.py
+index e8b347e..0f86b7d 100644
+--- a/sccm/sccm/src/openhound_sccm/transforms.py
++++ b/sccm/sccm/src/openhound_sccm/transforms.py
+@@ -1404,20 +1404,54 @@ def _edge_replication(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+         f"  ON child.parent_site_code = parent.site_code "
+         f"WHERE child.site_type = 2 AND parent.site_type = 4 "
+         f"UNION ALL "
+         f"SELECT parent.site_code, child.site_code, '{SCCM_ADMINS_REPLICATED_TO}' "
+         f"FROM {schema}.site_hierarchy child JOIN {schema}.site_hierarchy parent "
+         f"  ON child.parent_site_code = parent.site_code "
+         f"WHERE child.site_type = 1 AND parent.site_type = 2"
+     )
+ 
+ 
++def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
++    """Append SCCM_HasMember edges: Collection -> member (CMBP ps1:7617-7647).
++
++    Device member -> ClientDevice smsid (via device_by_resourceid); user/group
++    member -> SID (via resource_to_sid). coalesce prefers the device lookup so
++    device members point at the ClientDevice node rather than the Computer node,
++    matching CMBP behaviour. Built-in pseudo-resources are skipped.
++
++    Collection start id is upper(collection_id)@root (matches the SCCMCollection
++    node id built in _node_collection). Because _safe() does not accept SQL params,
++    the root literal is inlined into the SQL string — site codes are 3 alphanumerics
++    so this is safe.
++    """
++    from .kinds.edges import SCCM_HAS_MEMBER
++    root_lit = _root_code(con, schema) or ""
++    start_expr = (f"upper(cm.collection_id) || '@{root_lit}'" if root_lit
++                  else "upper(cm.collection_id)")
++    for _src in ("adminservice_collection_members", "wmi_collection_members"):
++        _ensure_columns(con, schema, _src, {"collection_id": "VARCHAR", "resource_id": "BIGINT", "site_code": "VARCHAR"})
++        _safe(con, f"edge_has_member<-{_src}",
++              f"INSERT INTO {schema}.graph_edges BY NAME "
++              f"SELECT {start_expr} AS start_id, coalesce(d.smsid, r.sid) AS end_id, "
++              f"'{SCCM_HAS_MEMBER}' AS kind "
++              f"FROM {schema}.{_src} cm "
++              f"LEFT JOIN {schema}.device_by_resourceid d "
++              f"  ON d.resource_key = CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR) "
++              f"LEFT JOIN {schema}.resource_to_sid r "
++              f"  ON r.resource_key = CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR) "
++              f"WHERE cm.collection_id IS NOT NULL "
++              f"  AND coalesce(d.smsid, r.sid) IS NOT NULL "
++              f"  AND CAST(cm.resource_id AS VARCHAR) NOT IN ('2046820352', '2046820353') "
++              f"  AND CAST(cm.resource_id AS VARCHAR) NOT LIKE '203004%'")
++
++
+ def _edge_has_client(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+     """Append SCCM_HasClient edges: Site -> ClientDevice (CMBP ps1:7257/7394).
+     start = device.site_code (the site that owns the client), end = smsid.
+     Possible-client rows (added in Task E2) carry site_code='root' so they also
+     get a HasClient edge automatically once E2 runs. _safe() skips+logs if
+     node_client_device is missing."""
+     from .kinds.edges import SCCM_HAS_CLIENT
+     _safe(
+         con, "edge_has_client",
+         f"INSERT INTO {schema}.graph_edges BY NAME "
+@@ -1446,10 +1480,11 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
+     # and before _graph_edges_init so edge builders can reference them.
+     _resource_to_sid(con, schema)
+     _device_by_resourceid(con, schema)
+     _collection_by_name(con, schema)
+     _role_by_name(con, schema)
+     # _graph_edges_init must run before all edge builders; _edge_replication and future
+     # edge builders all INSERT into the table created here.
+     _graph_edges_init(con, schema)
+     _edge_replication(con, schema)
+     _edge_has_client(con, schema)
++    _edge_has_member(con, schema)

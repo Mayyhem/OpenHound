@@ -34,8 +34,13 @@ from .convert_pipeline import emit_graph_from_duckdb
 from .lookup import SCCMLookup
 from .models.computer import ComputerNode
 from .models.group import GroupNode
-from .models.replication_edge import ReplicationEdge
+from .models.graph_edge import GraphEdge
+from .models.sccm_admin_user import SCCMAdminUser
+from .models.sccm_client_device import SCCMClientDevice
+from .models.sccm_collection import SCCMCollection
+from .models.sccm_security_role import SCCMSecurityRole
 from .models.sccm_site import SCCMSite
+from .models.stub_node import StubNode
 from .models.user import UserNode
 from .transforms import transforms
 
@@ -1097,6 +1102,7 @@ def _preproc_table_map() -> dict[str, str]:
         "local_wmi_sms_lookupmp",
         "local_wmi_ccm_client",
         "local_client_logs_targets",
+        "collection_settings",
         # RemoteRegistry per-host phase (registry.py yield "table", row)
         "remoteregistry_sites",
         "remoteregistry_computers",
@@ -1174,10 +1180,17 @@ NODE_SPECS: list[tuple[str, type]] = [
     ("node_user", UserNode),
     ("node_group", GroupNode),
     ("node_site", SCCMSite),
+    ("node_collection", SCCMCollection),
+    ("node_security_role", SCCMSecurityRole),
+    ("node_admin_user", SCCMAdminUser),
+    ("node_client_device", SCCMClientDevice),
+    # node_backfill is LAST: stubs are only emitted for endpoint ids that have no
+    # real node in any table above. Real nodes win any id overlap via append semantics.
+    ("node_backfill", StubNode),
 ]
 
 EDGE_SPECS: list[tuple[str, type]] = [
-    ("graph_edges", ReplicationEdge),
+    ("graph_edges", GraphEdge),
 ]
 
 

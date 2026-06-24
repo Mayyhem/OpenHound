@@ -1,0 +1,346 @@
+# Task B4 review package (code only)
+## files
+ sccm/sccm/src/openhound_sccm/graph.py              | 22 ++++++
+ sccm/sccm/src/openhound_sccm/main.py               |  2 +
+ sccm/sccm/src/openhound_sccm/models/__init__.py    |  3 +-
+ .../openhound_sccm/models/sccm_client_device.py    | 89 ++++++++++++++++++++++
+ .../models/sccm_client_device_test.py              | 15 ++++
+ .../src/openhound_sccm/node_client_device_test.py  | 18 +++++
+ sccm/sccm/src/openhound_sccm/transforms.py         | 48 ++++++++++++
+ 7 files changed, 196 insertions(+), 1 deletion(-)
+
+## diff (-U10)
+diff --git a/sccm/sccm/src/openhound_sccm/graph.py b/sccm/sccm/src/openhound_sccm/graph.py
+index 1e8ffee..05b5164 100644
+--- a/sccm/sccm/src/openhound_sccm/graph.py
++++ b/sccm/sccm/src/openhound_sccm/graph.py
+@@ -123,10 +123,32 @@ class SCCMSecurityRoleProperties(NodeProperties):
+     sccm_role_id: str | None = field(default=None, kw_only=True)
+     sccm_role_name: str | None = field(default=None, kw_only=True)
+     role_description: str | None = field(default=None, kw_only=True)
+     is_built_in: bool | None = field(default=None, kw_only=True)
+     is_sec_admin_role: bool | None = field(default=None, kw_only=True)
+     copied_from_id: str | None = field(default=None, kw_only=True)
+     number_of_admins: int | None = field(default=None, kw_only=True)
+     operations: list[str] = field(default_factory=list, kw_only=True)
+     root_site_code: str | None = field(default=None, kw_only=True)
+     sccm_infra: bool = field(default=True, kw_only=True)
++
++
++@dataclass
++class SCCMClientDeviceProperties(NodeProperties):
++    collection_source: list[str] = field(default_factory=list, kw_only=True)
++    smsid: str | None = field(default=None, kw_only=True)
++    sccm_resource_id: str | None = field(default=None, kw_only=True)
++    site_code: str | None = field(default=None, kw_only=True)
++    device_os: str | None = field(default=None, kw_only=True)
++    device_os_build: str | None = field(default=None, kw_only=True)
++    is_virtual_machine: bool | None = field(default=None, kw_only=True)
++    co_managed: bool | None = field(default=None, kw_only=True)
++    aad_device_id: str | None = field(default=None, kw_only=True)
++    aad_tenant_id: str | None = field(default=None, kw_only=True)
++    last_reported_mp_server_name: str | None = field(default=None, kw_only=True)
++    primary_user: str | None = field(default=None, kw_only=True)
++    current_logon_user: str | None = field(default=None, kw_only=True)
++    ad_last_logon_user: str | None = field(default=None, kw_only=True)
++    root_site_code: str | None = field(default=None, kw_only=True)
++    possible: bool = field(default=False, kw_only=True)
++    sccm_ad_domain_sid: str | None = field(default=None, kw_only=True)
++    sccm_infra: bool = field(default=False, kw_only=True)
+diff --git a/sccm/sccm/src/openhound_sccm/main.py b/sccm/sccm/src/openhound_sccm/main.py
+index 20fc5a6..0a07914 100644
+--- a/sccm/sccm/src/openhound_sccm/main.py
++++ b/sccm/sccm/src/openhound_sccm/main.py
+@@ -29,20 +29,21 @@ from openhound.core.preproc import PreProcContext
+ from openhound.core.progress import Progress
+ from dlt.common.pipeline import LoadInfo
+ from dlt.extract.source import DltSource
+ import dlt
+ from .convert_pipeline import emit_graph_from_duckdb
+ from .lookup import SCCMLookup
+ from .models.computer import ComputerNode
+ from .models.group import GroupNode
+ from .models.replication_edge import ReplicationEdge
+ from .models.sccm_admin_user import SCCMAdminUser
++from .models.sccm_client_device import SCCMClientDevice
+ from .models.sccm_collection import SCCMCollection
+ from .models.sccm_security_role import SCCMSecurityRole
+ from .models.sccm_site import SCCMSite
+ from .models.user import UserNode
+ from .transforms import transforms
+ 
+ logger = logging.getLogger(__name__)
+ 
+ # ---------------------------------------------------------------------------
+ # OpenHound app instance. Still owns `source_kind` (flows into the OpenGraph
+@@ -1174,20 +1175,21 @@ def _noop_convert_source():
+ # Grows by one entry per task: Task 3 = Computer, Task 4 = User, Task 5 = Group,
+ # Task 6 = SCCM_Site, Task 7 = graph_edges (via EDGE_SPECS).
+ NODE_SPECS: list[tuple[str, type]] = [
+     ("node_computer", ComputerNode),
+     ("node_user", UserNode),
+     ("node_group", GroupNode),
+     ("node_site", SCCMSite),
+     ("node_collection", SCCMCollection),
+     ("node_security_role", SCCMSecurityRole),
+     ("node_admin_user", SCCMAdminUser),
++    ("node_client_device", SCCMClientDevice),
+ ]
+ 
+ EDGE_SPECS: list[tuple[str, type]] = [
+     ("graph_edges", ReplicationEdge),
+ ]
+ 
+ 
+ @app.convert(lookup=SCCMLookup)
+ def convert(ctx: ConvertContext):
+     """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), then hand the
+diff --git a/sccm/sccm/src/openhound_sccm/models/__init__.py b/sccm/sccm/src/openhound_sccm/models/__init__.py
+index 4319c4f..2dd1835 100644
+--- a/sccm/sccm/src/openhound_sccm/models/__init__.py
++++ b/sccm/sccm/src/openhound_sccm/models/__init__.py
+@@ -1,16 +1,17 @@
+ """SCCM extension model registry.
+ 
+ Each module here defines `BaseAsset` subclasses the convert phase uses to produce
+ OpenGraph nodes/edges. Models are imported here so the convert pipeline can resolve
+ them by name and so callers can do `from openhound_sccm.models import ComputerNode`.
+ """
+ from .computer import ComputerNode
+ from .group import GroupNode
+ from .replication_edge import ReplicationEdge
+ from .sccm_admin_user import SCCMAdminUser
++from .sccm_client_device import SCCMClientDevice
+ from .sccm_collection import SCCMCollection
+ from .sccm_security_role import SCCMSecurityRole
+ from .sccm_site import SCCMSite
+ from .user import UserNode
+ 
+-__all__ = ["ComputerNode", "GroupNode", "ReplicationEdge", "SCCMAdminUser", "SCCMCollection", "SCCMSecurityRole", "SCCMSite", "UserNode"]
++__all__ = ["ComputerNode", "GroupNode", "ReplicationEdge", "SCCMAdminUser", "SCCMClientDevice", "SCCMCollection", "SCCMSecurityRole", "SCCMSite", "UserNode"]
+diff --git a/sccm/sccm/src/openhound_sccm/models/sccm_client_device.py b/sccm/sccm/src/openhound_sccm/models/sccm_client_device.py
+new file mode 100644
+index 0000000..799181e
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/models/sccm_client_device.py
+@@ -0,0 +1,89 @@
++# src/openhound_sccm/models/sccm_client_device.py
++"""SCCMClientDevice: converts a node_client_device coalesced row into an SCCMNode.
++
++Each row in node_client_device represents one real SCCM-managed client device
++(AdminService or WMI source; is_client=True AND NOT is_obsolete), keyed by
++upper(smsid). The `possible` and `ad_domain_sid` columns exist on the row now
++but are placeholder values (False/NULL); inferred "possible-client" rows are
++added in Task E2.
++"""
++import logging
++
++from openhound.core.asset import BaseAsset
++from pydantic import ConfigDict
++
++from ..graph import SCCMNode, SCCMClientDeviceProperties
++from ..kinds import nodes as nk
++
++logger = logging.getLogger(__name__)
++
++
++class SCCMClientDevice(BaseAsset):
++    """One coalesced client device row -> one OpenGraph SCCM_ClientDevice node.
++
++    Fields map directly to the node_client_device columns produced by
++    transforms._node_client_device(). Extra columns from the DB are silently
++    ignored (extra="ignore") so schema drift doesn't crash convert.
++    """
++
++    model_config = ConfigDict(populate_by_name=True, extra="ignore")
++
++    smsid: str | None = None
++    name: str | None = None
++    site_code: str | None = None
++    resource_id_str: str | None = None
++    device_os: str | None = None
++    device_os_build: str | None = None
++    is_virtual_machine: bool | None = None
++    co_managed: bool | None = None
++    aad_device_id: str | None = None
++    aad_tenant_id: str | None = None
++    last_mp_server_name: str | None = None
++    primary_user_name: str | None = None
++    current_logon_user_name: str | None = None
++    ad_last_logon_user_name: str | None = None
++    root_site_code: str | None = None
++    possible: bool = False
++    ad_domain_sid: str | None = None
++
++    @property
++    def as_node(self) -> SCCMNode | None:
++        """Build the SCCMNode, or return None if the row has no usable smsid."""
++        sid = (self.smsid or "").upper() or None
++        if not sid:
++            logger.warning("SCCMClientDevice: dropping row with no smsid")
++            return None
++
++        root = self.root_site_code or ""
++        display = f"{self.name}@{self.site_code}" if (self.name and self.site_code) else (self.name or sid)
++
++        return SCCMNode(
++            id=sid,
++            kinds=[nk.SCCM_CLIENT_DEVICE],
++            properties=SCCMClientDeviceProperties(
++                name=self.name or sid,
++                displayname=display,
++                environmentid=root or sid,
++                smsid=sid,
++                sccm_resource_id=self.resource_id_str,
++                site_code=self.site_code,
++                device_os=self.device_os,
++                device_os_build=self.device_os_build,
++                is_virtual_machine=self.is_virtual_machine,
++                co_managed=self.co_managed,
++                aad_device_id=self.aad_device_id,
++                aad_tenant_id=self.aad_tenant_id,
++                last_reported_mp_server_name=self.last_mp_server_name,
++                primary_user=self.primary_user_name,
++                current_logon_user=self.current_logon_user_name,
++                ad_last_logon_user=self.ad_last_logon_user_name,
++                root_site_code=self.root_site_code,
++                possible=self.possible,
++                sccm_ad_domain_sid=self.ad_domain_sid,
++            ),
++        )
++
++    @property
++    def edges(self):
++        """Client device edges are built in later tasks (D1: HasPrimaryUser, etc.)."""
++        return iter(())
+diff --git a/sccm/sccm/src/openhound_sccm/models/sccm_client_device_test.py b/sccm/sccm/src/openhound_sccm/models/sccm_client_device_test.py
+new file mode 100644
+index 0000000..6c0cc2f
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/models/sccm_client_device_test.py
+@@ -0,0 +1,15 @@
++# src/openhound_sccm/models/sccm_client_device_test.py
++from openhound_sccm.models.sccm_client_device import SCCMClientDevice
++
++
++def test_client_device_as_node():
++    n = SCCMClientDevice(smsid="GUID-1", name="WS01", site_code="PS1", root_site_code="CAS",
++                         resource_id_str="7@PS1").as_node
++    assert n.id == "GUID-1"
++    assert n.kinds == ["SCCM_ClientDevice"]
++    assert n.properties.environmentid == "CAS"
++    assert n.properties.smsid == "GUID-1"
++
++
++def test_client_device_no_smsid_returns_none():
++    assert SCCMClientDevice(smsid=None, name="x").as_node is None
+diff --git a/sccm/sccm/src/openhound_sccm/node_client_device_test.py b/sccm/sccm/src/openhound_sccm/node_client_device_test.py
+new file mode 100644
+index 0000000..b369140
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/node_client_device_test.py
+@@ -0,0 +1,18 @@
++# src/openhound_sccm/node_client_device_test.py
++import duckdb
++from openhound_sccm.transforms import transforms
++
++
++def test_node_client_device_filters_and_keys_on_smsid():
++    con = duckdb.connect(":memory:")
++    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
++    con.execute("CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
++                "(VALUES ('PS1', NULL, 2)) AS t(site_code,parent_site_code,site_type)")
++    con.execute("CREATE TABLE sccm.adminservice_client_devices AS SELECT * FROM (VALUES "
++                "('GUID-1','WS01', 7, 'PS1', true,  false, 'MAYYHEM\\\\alice','MAYYHEM\\\\bob','MAYYHEM\\\\carol'), "
++                "('GUID-2','WS02', 8, 'PS1', false, false, NULL, NULL, NULL), "       # not a client -> dropped
++                "('GUID-3','WS03', 9, 'PS1', true,  true,  NULL, NULL, NULL)) "        # obsolete -> dropped
++                "AS t(smsid, name, resource_id, site_code, is_client, is_obsolete, primary_user, current_logon_user, user_name)")
++    transforms(con)
++    rows = con.execute("SELECT smsid, name, resource_id_str, possible FROM sccm.node_client_device ORDER BY smsid").fetchall()
++    assert rows == [("GUID-1", "WS01", "7@PS1", False)]
+diff --git a/sccm/sccm/src/openhound_sccm/transforms.py b/sccm/sccm/src/openhound_sccm/transforms.py
+index 9a77042..23cbdb8 100644
+--- a/sccm/sccm/src/openhound_sccm/transforms.py
++++ b/sccm/sccm/src/openhound_sccm/transforms.py
+@@ -1194,20 +1194,67 @@ def _node_admin_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+     con.execute(
+         f"CREATE OR REPLACE TABLE {schema}.node_admin_user AS SELECT "
+         f"any_value(logon_name) AS logon_name, any_value(admin_id) AS admin_id, "
+         f"any_value(admin_sid) AS admin_sid, any_value(display_name) AS display_name, "
+         f"any_value(distinguished_name) AS distinguished_name, bool_or(is_group) AS is_group, "
+         f"max(account_type) AS account_type, ? AS root_site_code "
+         f"FROM {schema}.node_admin_user GROUP BY upper(logon_name)", [root])
+     logger.info("node_admin_user built in schema %r", schema)
+ 
+ 
++def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
++    """One row per smsid from adminservice/wmi client_devices (real clients only:
++    is_client AND NOT is_obsolete). possible/ad_domain_sid are placeholders for the
++    possible-client rows added in Task E2."""
++    con.execute(
++        f"CREATE OR REPLACE TABLE {schema}.node_client_device ("
++        "smsid VARCHAR, name VARCHAR, site_code VARCHAR, resource_id_str VARCHAR, "
++        "device_os VARCHAR, device_os_build VARCHAR, is_virtual_machine BOOLEAN, co_managed BOOLEAN, "
++        "aad_device_id VARCHAR, aad_tenant_id VARCHAR, last_mp_server_name VARCHAR, "
++        "primary_user_name VARCHAR, current_logon_user_name VARCHAR, ad_last_logon_user_name VARCHAR, "
++        "possible BOOLEAN, ad_domain_sid VARCHAR)"
++    )
++    _optional = {"name": "VARCHAR", "site_code": "VARCHAR", "resource_id": "BIGINT",
++                 "device_os": "VARCHAR", "device_os_build": "VARCHAR", "is_virtual_machine": "BOOLEAN",
++                 "co_managed": "BOOLEAN", "aad_device_id": "VARCHAR", "aad_tenant_id": "VARCHAR",
++                 "last_mp_server_name": "VARCHAR", "primary_user": "VARCHAR",
++                 "current_logon_user": "VARCHAR", "user_name": "VARCHAR",
++                 "is_client": "BOOLEAN", "is_obsolete": "BOOLEAN"}
++    for _src in ("adminservice_client_devices", "wmi_client_devices"):
++        _ensure_columns(con, schema, _src, _optional)
++        _safe(con, f"node_client_device<-{_src}",
++              f"INSERT INTO {schema}.node_client_device BY NAME "
++              f"SELECT upper(smsid) AS smsid, name, site_code, "
++              f"CASE WHEN resource_id IS NULL THEN NULL "
++              f"     ELSE CAST(resource_id AS VARCHAR) || '@' || CAST(site_code AS VARCHAR) END AS resource_id_str, "
++              f"device_os, device_os_build, is_virtual_machine, co_managed, aad_device_id, aad_tenant_id, "
++              f"last_mp_server_name, primary_user AS primary_user_name, "
++              f"current_logon_user AS current_logon_user_name, user_name AS ad_last_logon_user_name, "
++              f"false AS possible, NULL AS ad_domain_sid "
++              f"FROM {schema}.{_src} "
++              f"WHERE smsid IS NOT NULL AND coalesce(is_client, false) AND NOT coalesce(is_obsolete, false)")
++    root = _root_code(con, schema)
++    con.execute(
++        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS SELECT smsid, "
++        f"any_value(name) AS name, any_value(site_code) AS site_code, "
++        f"any_value(resource_id_str) AS resource_id_str, any_value(device_os) AS device_os, "
++        f"any_value(device_os_build) AS device_os_build, bool_or(is_virtual_machine) AS is_virtual_machine, "
++        f"bool_or(co_managed) AS co_managed, any_value(aad_device_id) AS aad_device_id, "
++        f"any_value(aad_tenant_id) AS aad_tenant_id, any_value(last_mp_server_name) AS last_mp_server_name, "
++        f"any_value(primary_user_name) AS primary_user_name, "
++        f"any_value(current_logon_user_name) AS current_logon_user_name, "
++        f"any_value(ad_last_logon_user_name) AS ad_last_logon_user_name, "
++        f"bool_or(possible) AS possible, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
++        f"FROM {schema}.node_client_device GROUP BY smsid", [root])
++    logger.info("node_client_device built in schema %r", schema)
++
++
+ def _graph_edges(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+     """Build graph_edges(start_id, end_id, kind) from a self-join of site_hierarchy.
+ 
+     The CMBP type matrix (ps1:1604-1624) defines which site-type pairs get edges
+     and how many:
+ 
+     * CAS (4) <-> Primary (2): TWO rows (bidirectional — both directions)
+     * Primary (2) -> Secondary (1): ONE row (parent -> child only)
+ 
+     No other site-type pair receives a replication edge. Endpoints are site codes.
+@@ -1275,12 +1322,13 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
+     con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+     _principal_by_name(con, schema)
+     _site_hierarchy(con, schema)
+     _node_computer(con, schema)
+     _node_user(con, schema)
+     _node_group(con, schema)
+     _node_site(con, schema)
+     _node_collection(con, schema)
+     _node_security_role(con, schema)
+     _node_admin_user(con, schema)
++    _node_client_device(con, schema)
+     # _graph_edges must run last — it reads site_hierarchy (built by _site_hierarchy above).
+     _graph_edges(con, schema)

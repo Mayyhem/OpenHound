@@ -1,0 +1,207 @@
+# Task A2 review package
+## files
+ .../collectors/collection_settings_test.py              |  8 ++++++++
+ sccm/sccm/src/openhound_sccm/collectors/local.py        | 17 +++++++++++++++++
+ sccm/sccm/src/openhound_sccm/context.py                 |  5 +++++
+ sccm/sccm/src/openhound_sccm/main.py                    |  1 +
+ sccm/sccm/src/openhound_sccm/source.py                  |  5 +++++
+ 5 files changed, 36 insertions(+)
+
+## diff (-U10)
+diff --git a/sccm/sccm/src/openhound_sccm/collectors/collection_settings_test.py b/sccm/sccm/src/openhound_sccm/collectors/collection_settings_test.py
+new file mode 100644
+index 0000000..a7d0c01
+--- /dev/null
++++ b/sccm/sccm/src/openhound_sccm/collectors/collection_settings_test.py
+@@ -0,0 +1,8 @@
++import types
++from openhound_sccm.collectors.local import collection_settings_rows
++
++
++def test_collection_settings_single_row():
++    ctx = types.SimpleNamespace(disable_possible_edges=True, enable_bad_opsec=False)
++    rows = list(collection_settings_rows(ctx))
++    assert rows == [{"disable_possible_edges": True, "enable_bad_opsec": False}]
+diff --git a/sccm/sccm/src/openhound_sccm/collectors/local.py b/sccm/sccm/src/openhound_sccm/collectors/local.py
+index 9527a24..16ce891 100644
+--- a/sccm/sccm/src/openhound_sccm/collectors/local.py
++++ b/sccm/sccm/src/openhound_sccm/collectors/local.py
+@@ -173,20 +173,37 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
+                     "previous_smsid_change_date": client_id_change_date,
+                     "previous_smsid": previous_client_id,
+                     "site_code": site_code if site_code else None,
+                     "smsid": client_id,
+                     "source": "Local-CCM_Client",
+                 }
+     except Exception as ex:
+         logger.error("Error querying CCM_Client: %s", ex)
+ 
+ 
++def collection_settings_rows(ctx):
++    """One row capturing the collect-time behaviour flags, so preproc/convert can
++    gate possible nodes/edges without re-reading the CLI (the flags are collect-time)."""
++    yield {
++        "disable_possible_edges": bool(getattr(ctx, "disable_possible_edges", False)),
++        "enable_bad_opsec": bool(getattr(ctx, "enable_bad_opsec", False)),
++    }
++
++
++@app.resource(name="collection_settings", parallelized=False, columns=raw_table_asset("collection_settings"))
++def collection_settings(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
++    """Persist collect-time behaviour flags as a one-row table so the separate
++    preproc/convert runs can gate possible nodes/edges without re-reading the CLI."""
++    # ctx is injected the same way sibling local resources receive it; emit exactly one row.
++    yield from collection_settings_rows(ctx)
++
++
+ @app.resource(name="local_client_logs_targets", parallelized=False, columns=raw_table_asset("local_client_logs_targets"))
+ @with_log_context(phase="Local", target_from_ctx_domain=True)
+ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
+     """Yield rows for management points and distribution points discovered via 
+     local SCCM client log scrape.
+ 
+     SCCM client logs (``CCM\\Logs\\*.log``, ``CCMSetup\\Logs\\*.log``) frequently
+     reference MP and DP UNC and HTTP endpoints.
+     """
+     if not ctx.method_enabled("Local"):
+diff --git a/sccm/sccm/src/openhound_sccm/context.py b/sccm/sccm/src/openhound_sccm/context.py
+index c02b72b..c98d741 100644
+--- a/sccm/sccm/src/openhound_sccm/context.py
++++ b/sccm/sccm/src/openhound_sccm/context.py
+@@ -22,20 +22,25 @@ class SourceContext:
+     ad: ADClient
+     domain: str
+     username: str | None = None
+     password: str | None = None
+     nt_hash: str | None = None
+     kerberos_ticket: str | None = None  # base64-encoded KRB-CRED (.kirbi) for pass-the-ticket
+     dns_resolver: str | None = None
+     # Collection (-m / --collection-methods)
+     collection_methods: str = "All"
+ 
++    # Behaviour flags persisted at collect time so preproc/convert can gate
++    # "possible" nodes/edges without re-reading the CLI (separate runs).
++    disable_possible_edges: bool = False
++    enable_bad_opsec: bool = False
++
+     # Public, injectable — shared across the run via the module-level _shared_*
+     # pattern in source.py. ``work_queue`` is the phased_pipeline.WorkQueue that
+     # the per-host engine drains; register_target submits newly-discovered,
+     # allow-listed targets onto it.
+     allowed_targets: frozenset = field(default_factory=frozenset)
+     work_queue: Any = field(default=None)
+     ad_resolution_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
+     discovered_domains: set = field(default_factory=set)
+ 
+     # Site codes emitted into the sited DLT table during the preproc stage
+diff --git a/sccm/sccm/src/openhound_sccm/main.py b/sccm/sccm/src/openhound_sccm/main.py
+index 38357f3..c902311 100644
+--- a/sccm/sccm/src/openhound_sccm/main.py
++++ b/sccm/sccm/src/openhound_sccm/main.py
+@@ -1090,20 +1090,21 @@ def _preproc_table_map() -> dict[str, str]:
+         "ldap_network_boot_servers",
+         "ldap_pattern_matches",
+         "ldap_system_management_dacl",
+         # DNS discovery phase (dns.py @app.resource name=...)
+         "dns_management_points",
+         # Local discovery phase (local.py @app.resource name=...)
+         "local_wmi_sms_authority",
+         "local_wmi_sms_lookupmp",
+         "local_wmi_ccm_client",
+         "local_client_logs_targets",
++        "collection_settings",
+         # RemoteRegistry per-host phase (registry.py yield "table", row)
+         "remoteregistry_sites",
+         "remoteregistry_computers",
+         "remoteregistry_users",
+         "remoteregistry_mssql_servers",
+         # MSSQL per-host phase (mssql.py yield "table", row)
+         "mssql_server_instances",
+         # AdminService per-host phase (privileged.py run.table("suffix"))
+         "adminservice_sites",
+         "adminservice_site_definitions",
+diff --git a/sccm/sccm/src/openhound_sccm/source.py b/sccm/sccm/src/openhound_sccm/source.py
+index 8a41d1f..74a766d 100644
+--- a/sccm/sccm/src/openhound_sccm/source.py
++++ b/sccm/sccm/src/openhound_sccm/source.py
+@@ -21,20 +21,21 @@ from .collectors.ldap import (
+     ldap_system_management_dacl,
+ )
+ 
+ from .collectors.dns import dns_management_points
+ 
+ from .collectors.local import (
+     local_wmi_sms_authority,
+     local_wmi_sms_lookupmp,
+     local_wmi_ccm_client,
+     local_client_logs_targets,
++    collection_settings,
+ )
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
+ def _parse_csv_option(value: str | None) -> set[str]:
+     """Return a stripped set of tokens from a comma-separated CLI value."""
+     return {token for raw in (value or "").split(",") if (token := raw.strip())}
+ 
+ 
+@@ -105,20 +106,21 @@ DISCOVERY_RESOURCE_NAMES: tuple[str, ...] = (
+     "ldap_management_points_raw",
+     "ldap_cmrc_devices",
+     "ldap_network_boot_servers",
+     "ldap_pattern_matches",
+     "ldap_system_management_dacl",
+     "dns_management_points",
+     "local_wmi_sms_authority",
+     "local_wmi_sms_lookupmp",
+     "local_wmi_ccm_client",
+     "local_client_logs_targets",
++    "collection_settings",
+ )
+ 
+ 
+ # ---------------------------------------------------------------------------
+ # Per-table stream registry. The per-host engine (run by collect_sccm on a
+ # background thread) pushes rows onto these bounded queues; the emit resources
+ # below drain them. collect_sccm installs the mapping via set_table_queues()
+ # just before running the emit pass, mirroring the _shared_* pattern above.
+ # ---------------------------------------------------------------------------
+ _table_queues: dict[str, _queue.Queue] | None = None
+@@ -263,20 +265,22 @@ def source(
+         password=password,
+         nt_hash=nt_hash,
+         kerberos_ticket=kerberos_ticket,
+         collection_methods=collection_methods or "All",
+         allowed_targets=frozenset(allowed),
+         work_queue=_shared_queue,
+         ad_resolution_cache=_shared_ad_cache if _shared_ad_cache is not None else {},
+         discovered_domains=_shared_discovered_domains if _shared_discovered_domains is not None else set(),
+         site_codes=_parse_csv_option(site_codes) or None,
+         dns_resolver=dns_resolver,
++        disable_possible_edges=disable_possible_edges,
++        enable_bad_opsec=enable_bad_opsec,
+     )
+ 
+     # Stash so collect_sccm can reuse this exact context for the per-host stage.
+     global _last_ctx
+     _last_ctx = ctx
+ 
+     # Discovery (once) resources seed the work queue via register_target. The
+     # per-host phases are NOT DLT-scheduled here; they run in collect_sccm's
+     # worker pool and stream their rows through the emit resources below. Both
+     # sets are returned; collect_sccm selects each stage with with_resources().
+@@ -285,12 +289,13 @@ def source(
+         ldap_management_points_raw(ctx),
+         ldap_cmrc_devices(ctx),
+         ldap_network_boot_servers(ctx),
+         ldap_pattern_matches(ctx),
+         ldap_system_management_dacl(ctx),
+         dns_management_points(ctx),
+         local_wmi_sms_authority(ctx),
+         local_wmi_sms_lookupmp(ctx),
+         local_wmi_ccm_client(ctx),
+         local_client_logs_targets(ctx),
++        collection_settings(ctx),
+         *build_emit_resources(),
+     )

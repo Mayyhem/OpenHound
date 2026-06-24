@@ -42,8 +42,14 @@ Every section follows the same spine:
 - [8. Windows-isms: the platform fights back](#8-windows-isms-the-platform-fights-back)
 - [9. Convert can't iterate DuckDB rows: the unified Computer-node problem](#9-convert-cant-iterate-duckdb-rows-the-unified-computer-node-problem)
 - [10. dlt loads whatever the data contains; our SQL expects fixed columns](#10-dlt-loads-whatever-the-data-contains-our-sql-expects-fixed-columns)
+- [11. Stage 2 preproc/convert add-ons](#11-stage-2-preprocconvert-add-ons)
+  - [11a. Collect-side additions](#11a-collect-side-additions)
+  - [11b. Persist-at-collect / gate-in-preproc for "possible" nodes](#11b-persist-at-collect--gate-in-preproc-for-possible-nodes)
+  - [11c. Traversable allow-list and the generic GraphEdge model](#11c-traversable-allow-list-and-the-generic-graphedge-model)
+  - [11d. Edge-endpoint stub-node backfill (new divergence category)](#11d-edge-endpoint-stub-node-backfill-new-divergence-category)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
+- [Changelog](#changelog)
 
 ---
 
@@ -536,12 +542,12 @@ A stock REST collector on Linux CI never meets any of these.
 
 ## 9. Convert can't iterate DuckDB rows: the unified Computer-node problem
 
-> **Status — design stage.** The previous preproc/convert layer (`graph.py`, `lookup.py`, `transforms.py`,
+> **Status — Stages 1–2 shipped.** The previous preproc/convert layer (`graph.py`, `lookup.py`, `transforms.py`,
 > `models/computer.py`, `models/sccm_site.py`) was **deleted** in commit `6af5cc0 "Delete preproc/convert
 > data"` pending a rebuild. The chosen design is recorded in
 > [`docs/superpowers/specs/2026-06-16-sccm-preproc-convert-design.md`](docs/superpowers/specs/2026-06-16-sccm-preproc-convert-design.md)
-> (authoritative) with rationale in the two proposals cited below. This section documents the
-> **divergence and the design direction**, not yet-shipped code.
+> (authoritative) with rationale in the two proposals cited below. Stages 1 and 2 of the Convert2-Read-DB
+> pipeline are now implemented; this section describes the divergence and the shipped design.
 
 ### The framework baseline
 
@@ -740,6 +746,67 @@ Given how much SCCM environments vary, the tolerant approach is the safer defaul
 
 ---
 
+## 11. Stage 2 preproc/convert add-ons
+
+Stage 2 of the Convert2-Read-DB pipeline ships four design additions beyond the Stage 1 baseline. Three of them extend the collect → preproc → convert contract; one is a new category of divergence that gets its own subsection below.
+
+### 11a. Collect-side additions
+
+Two small additions land in the `collect` phase to carry information forward to the decoupled `preprocess` and `convert` runs.
+
+**`host_object_sid` on the RemoteRegistry current-user row** ([collectors/registry.py](src/openhound_sccm/collectors/registry.py)). The `remoteregistry_users` row for the current logged-on user now includes the host machine's own AD SID (`host_object_sid`). This gives the `graph_edges` builder a stable start-node id for the `HasSession` edge — without it, the edge could not connect the computer to the session user because the raw row carries only the user's SID. The field is `None` when the target's AD object could not be resolved; downstream, the edge builder drops the row with a warning rather than emitting a malformed edge.
+
+**`collection_settings` table — one-row flag persistence** ([collectors/local.py](src/openhound_sccm/collectors/local.py)). A discovery-phase resource called `collection_settings` writes a single row carrying `disable_possible_edges` and `enable_bad_opsec` — the two CLI flags whose effects are decided at collect time but must be respected by the separate `preprocess` run. The `preprocess` step reads this row via `_read_disable_possible` ([transforms.py](src/openhound_sccm/transforms.py)) and uses it to gate possible-client rows and future Stage 6 relay edges. If the table is absent (older collection without the row), `_read_disable_possible` defaults to `False` — possible nodes are emitted.
+
+### 11b. Persist-at-collect / gate-in-preproc for "possible" nodes
+
+CMBP emits "possible" client nodes for devices that have a `CmRcService` SPN in AD (indicating the Remote Control client) but no confirmed SCCM enrollment (`SMS_R_System is_client = True`). The flag that gates this behaviour (`--disable-possible-edges`) is a CLI argument on `openhound collect sccm`, but the separate `openhound preprocess sccm` run has no access to the CLI that produced the raw data.
+
+The solution is the `collection_settings` table described above. `_read_disable_possible` in [transforms.py](src/openhound_sccm/transforms.py) reads `bool_or(disable_possible_edges)` from that table and passes the result to `_node_client_device_possible`, which appends inferred possible-client rows to `node_client_device` only when the flag is `False`. The possible-client node id is `upper(object_sid)@root_site_code` — a deterministic, namespaced id that avoids merging with the `Computer` node (raw SID) yet allows a future Stage 4 `SameHostAs` edge to deduplicate them.
+
+CMBP used a random GUID as the id for possible-client nodes; we use `object_sid@root_site_code` instead so id assignment is stable across repeated collections.
+
+### 11c. Traversable allow-list and the generic GraphEdge model
+
+CMBP maintains a hard-coded list of edge kinds whose `traversable` property is `True` — the set that BloodHound's attack-path engine follows when building attack paths (`ConfigManBearPig.ps1:2216-2249`). Kinds outside the list are stored but not traversed (e.g. `SCCM_HasMember`).
+
+In OpenHound the list lives in `TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py). It is a `frozenset` covering current and future (Stage 3–6) kinds so later stages can add edges without updating the traversability logic.
+
+All edges — regardless of kind — are emitted by the single generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. It reads the `graph_edges` preproc table (three columns: `start_id`, `end_id`, `kind`) and sets `SCCMEdgeProperties.traversable = kind in TRAVERSABLE_EDGE_KINDS`. This keeps the edge model trivially thin and `graph_edges` a uniform table — new edge kinds only require rows in the table plus an entry in the allow-list if they should be traversable.
+
+A final dedup pass in the `graph_edges` preproc query removes duplicate `(start_id, end_id, kind)` triples before convert reads the table.
+
+### 11d. Edge-endpoint stub-node backfill (new divergence category)
+
+*This is a new category of divergence from a stock OpenHound collector.*
+
+#### The framework baseline
+
+In a stock collector, every node is produced by an explicit `@app.asset` model whose driver file contains a row for each entity. Edges reference nodes that are guaranteed to exist because both sides are collected from the same API. There is no provision for "an edge references a node that has no row in any driver table."
+
+#### Why it breaks for SCCM
+
+SCCM's data is inherently cross-referencing: an `SMS_R_System` record names the primary user's SID, but that SID may not appear in any `SMS_R_User` record — the user exists in AD but has never logged on interactively via SCCM. An `SMS_CollectionMember` names a device that was enrolled but later removed. CMBP handles this with `Upsert-Node` — an in-memory call that creates a bare node on the fly whenever an edge references an id with no existing node. OpenHound has no equivalent: if a `HasPrimaryUser` edge's end SID has no User node in the `node_user` table, the edge will silently point to a missing node in the OpenGraph output.
+
+#### The add-on: node_backfill + StubNode
+
+After all `node_*` tables are built and `graph_edges` is finalised, `preprocess` runs `transforms._node_backfill` ([transforms.py](src/openhound_sccm/transforms.py)). This function:
+
+1. Collects every `end_id` from `graph_edges` whose kind is in `BACKFILL_END_KIND` (the edges whose end must be a resolvable node).
+2. LEFT JOINs against every `node_*` table to find ids with no matching node.
+3. Infers the kind for each missing end from `BACKFILL_END_KIND` (defined in [graph.py](src/openhound_sccm/graph.py)): `HasSession`→`User`, `MemberOf`→`Group`, `SCCM_HasMember`/`SCCM_HasStoredAccount`→`Base` (ambiguous principal). Writes the results to a `node_backfill` table.
+
+The `node_backfill` table is read by the [`StubNode`](src/openhound_sccm/models/stub_node.py) convert model. `StubNode` emits a minimal node — just `id`, `kinds` (with `Base` appended for AD-principal kinds), and `environmentid` (domain SID for SID-keyed ids, else the id itself). It never carries SCCM-specific properties; those are populated if a future collection brings in the matching row.
+
+This mirrors CMBP's `Upsert-Node` semantics: **every edge endpoint gets a node**, even if only a stub. The stub is later enriched or deduplicated if the real node arrives from SharpHound or a subsequent collection.
+
+#### Trade-offs
+
+- `BACKFILL_END_KIND` must be updated whenever a new edge kind is added whose end may lack a full node. Forgetting to add an entry leaves orphan edge endpoints in the graph. This is guarded by the `graph_edges_dedup_test.py` and `graph_edge_test.py` test files.
+- `Base`-kind stubs (for `SCCM_HasMember` / `SCCM_HasStoredAccount` ends) have no `User` or `Group` label — they merge with a SharpHound node if the SID is ever resolved, but until then they appear as plain `Base` nodes in the graph.
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -753,6 +820,9 @@ Given how much SCCM environments vary, the tolerant approach is the safer defaul
 | Windows log-rollover fix | Runtime monkey-patch of core's handler instances | A Windows-safe `doRollover` in core |
 | Convert from DuckDB | `preproc` coalesced tables + a second `convert`-time `dlt.pipeline` (Convert2-Read-DB) | `read_from="duckdb"` on `@app.convert` (proposed) |
 | Tolerant coalesce vs. pinned load schema | `_safe` + `_ensure_columns` + `_arr` in the preproc transforms | Pinning full per-table schemas/types at load (rejected — brittle; it caused the `ldap_sites` freeze crash) |
+| Persist-at-collect / gate-in-preproc (`disable_possible_edges`) | `collection_settings` one-row table written at collect; `_read_disable_possible` reads it in preproc | A first-class CLI flag shared across pipeline phases |
+| Traversable allow-list | `TRAVERSABLE_EDGE_KINDS` frozenset in `kinds/edges.py`; `GraphEdge` sets `traversable` from it | A graph-model-level traversability attribute |
+| Edge-endpoint stub-node backfill | `_node_backfill` + `StubNode` synthesise bare nodes for unresolved edge endpoints | An `Upsert-Node`-equivalent that creates nodes on demand |
 
 ---
 
@@ -770,3 +840,11 @@ framework workaround, a new platform fix), add a section for it following the sa
 This document is required reading per [`AGENTS.md`](AGENTS.md) and the project
 [`CLAUDE.md`](../../CLAUDE.md): read it before working on any cross-cutting collector subsystem, and update
 it as part of that work.
+
+---
+
+## Changelog
+
+| Date | Change |
+|---|---|
+| 2026-06-23 | Stage 2 preproc/convert shipped. Added §11 documenting the four Stage 2 add-ons: `host_object_sid` on RemoteRegistry current-user rows; `collection_settings` one-row flag persistence; `_read_disable_possible` persist-at-collect/gate-in-preproc mechanism; `TRAVERSABLE_EDGE_KINDS` + generic `GraphEdge`; and the new divergence category **edge-endpoint stub-node backfill** (`node_backfill` + `StubNode`). Updated §9 status from "design stage" to "Stages 1–2 shipped". Updated quick-reference table. |

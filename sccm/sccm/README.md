@@ -8,10 +8,10 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 
 > ## 🚧 Work in progress
 >
-> This port is **mid-migration**. The collection side is broad, but the graph-emission side is just getting started. As of today:
+> This port is **mid-migration**. The collection side is broad, and Stages 1–2 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits four node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), and [`SCCM_Site`](#sccm_site) — and one edge kind: [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto).
+> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and ten edge kinds: [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), and [`HasSession`](#hassession).
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -33,8 +33,20 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [User](#user)
   - [Group](#group)
   - [SCCM_Site](#sccm_site)
+  - [SCCM_ClientDevice](#sccm_clientdevice)
+  - [SCCM_Collection](#sccm_collection)
+  - [SCCM_AdminUser](#sccm_adminuser)
+  - [SCCM_SecurityRole](#sccm_securityrole)
 - [Edge Reference](#edge-reference)
   - [SCCM_AdminsReplicatedTo](#sccm_adminsreplicatedto)
+  - [SCCM_HasClient](#sccm_hasclient)
+  - [SCCM_HasMember](#sccm_hasmember)
+  - [SCCM_IsMappedTo](#sccm_ismappedto)
+  - [SCCM_IsAssigned](#sccm_isassigned)
+  - [SCCM_HasPrimaryUser / SCCM_HasCurrentUser / SCCM_HasADLastLogonUser](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser)
+  - [MemberOf](#memberof)
+  - [HasSession](#hassession)
+  - [SCCM_HasStoredAccount](#sccm_hasstoredaccount)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -191,8 +203,10 @@ The collector relies on these assumptions about the target environment and how i
 
 # Limitations
 
-- **Graph output covers the base identity layer.** `convert` emits [`Computer`](#computer), [`User`](#user), [`Group`](#group), and [`SCCM_Site`](#sccm_site) nodes plus the [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto) site-replication edge. Richer edges (role assignments, `contains`, coerce-and-relay paths) are planned for later stages. See the [WIP banner](#-work-in-progress) and the [Edge Reference](#edge-reference).
-- **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, no graph yet); DHCP is a placeholder.
+- **Graph output covers Stages 1 and 2.** `convert` now emits eight node kinds and ten edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, `SameHostAs` dedup, NAA secrets) are planned for later stages.
+- **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, some graph now); DHCP is a placeholder.
+- **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `possible = true`. Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
+- **`MemberOf` covers direct memberships only.** SCCM's `security_group_name` field carries the direct groups a principal belongs to; group-to-group nesting is not captured. Merge with a SharpHound collection for full nested-group paths (the Group nodes key on AD SID, so the two datasets join cleanly).
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
@@ -276,7 +290,7 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 
 | Option | Description |
 |---|---|
-| `--disable-possible-edges` | Suppress uncertain/"possible" edges *(no effect yet — no edges are emitted)*. |
+| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and future Stage 6 relay edges. The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
 | `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 | `-t`, `--threads` | Per-host worker-pool size. Default `10`. |
 | `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
@@ -322,7 +336,7 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 **Node identity.** Every node carries a stable string id and an `environmentid` tying it to its collected environment. AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the id and the **AD domain SID** (the `S-1-5-21-X-Y-Z` prefix stripped of the trailing RID) as `environmentid`, so they merge with SharpHound data by SID. `SCCM_Site` uses the **site code** as both id and `environmentid` (scoped to the hierarchy root site code). The common node/property base classes live in [graph.py](src/openhound_sccm/graph.py) (`SCCMNode`, property dataclasses); node and edge kind strings live in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py) and [kinds/edges.py](src/openhound_sccm/kinds/edges.py).
 
-**Kinds declared** (in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)) — the following are the kind *constants* the project intends to use; `Computer`, `User`, `Group`, and `SCCM_Site` are emitted today:
+**Kinds declared** (in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)) — the following are the kind *constants* the project intends to use; `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, and `SCCM_SecurityRole` are emitted today:
 
 - AD-native: `Computer`, `User`, `Group`, `Base`
 - SCCM: `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`
@@ -334,7 +348,7 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 # Node Reference
 
-> **Currently emitted: 4 node kinds** — `Computer`, `User`, `Group`, and `SCCM_Site`.
+> **Currently emitted: 8 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, and `SCCM_SecurityRole`.
 
 All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. All property keys are lowercase with underscores.
 
@@ -423,23 +437,178 @@ A Configuration Manager **site**, coalesced from AdminService/WMI site tables, s
 | `install_dir` | string | Site server install directory. |
 | `sccm_infra` | bool | Always `true` for a site. |
 
+## SCCM_ClientDevice
+
+An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_System` resource with `is_client = True` and `is_obsolete = False`. Coalesced into `node_client_device` by `preprocess`. Devices that have a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as **possible** clients (inferred from `ldap_cmrc_devices`), unless `--disable-possible-edges` was set at collection time. Model: [models/sccm_client_device.py](src/openhound_sccm/models/sccm_client_device.py).
+
+- **Node id:** the SMSID (uppercased, e.g. `GUID:3F8A...`) for confirmed clients; `<UPPER_OBJECT_SID>@<root_site_code>` for inferred possible clients.
+- **`environmentid`:** the hierarchy root site code.
+- **Kinds:** `["SCCM_ClientDevice"]`.
+- **`name` / `displayname`:** the device name qualified with site code (e.g. `WORKSTATION1@PS1`).
+
+| Property | Type | Description |
+|---|---|---|
+| `smsid` | string | The SCCM unique identifier (e.g. `GUID:3F8A…`). |
+| `sccm_resource_id` | string | SCCM resource ID in `"<id>@<site_code>"` format. |
+| `site_code` | string | The enrolling site code. |
+| `device_os` | string | Operating system string reported by SCCM. |
+| `device_os_build` | string | OS build string. |
+| `is_virtual_machine` | bool | `true` if SCCM reports this device as a virtual machine. |
+| `co_managed` | bool | `true` if the device is co-managed with Intune. |
+| `aad_device_id` | string | Azure AD device ID (if known). |
+| `aad_tenant_id` | string | Azure AD tenant ID (if known). |
+| `last_reported_mp_server_name` | string | Hostname of the management point last reported by this client. |
+| `primary_user` | string | Primary user name (from SCCM user-device affinity). |
+| `current_logon_user` | string | Name of the user currently logged on. |
+| `ad_last_logon_user` | string | Name of the last AD-logged-on user. |
+| `possible` | bool | `true` for inferred possible-client nodes (not confirmed enrolled). |
+| `sccm_ad_domain_sid` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
+
+## SCCM_Collection
+
+An SCCM collection — a named set of devices or users used to scope deployments and security assignments. Sourced from `SMS_Collection` via AdminService/WMI. Model: [models/sccm_collection.py](src/openhound_sccm/models/sccm_collection.py).
+
+- **Node id:** `<COLLECTION_ID>@<root_site_code>` (e.g. `SMS00001@PS1`).
+- **`environmentid`:** the hierarchy root site code.
+- **Kinds:** `["SCCM_Collection"]`.
+- **`name` / `displayname`:** the collection name qualified with root site code.
+
+| Property | Type | Description |
+|---|---|---|
+| `sccm_collection_id` | string | The collection ID (e.g. `SMS00001`). |
+| `sccm_collection_type` | string | `Other`, `User`, or `Device` (from the integer type field). |
+| `member_count` | int | Number of members in the collection. |
+| `comment` | string | Collection description. |
+| `is_built_in` | bool | `true` for SCCM built-in collections (e.g. All Systems). |
+| `limit_to_collection_id` | string | Collection ID that limits membership for this collection. |
+| `limit_to_collection_name` | string | Name of the limiting collection. |
+| `collection_variables_count` | int | Number of collection variables defined on this collection. |
+
+## SCCM_AdminUser
+
+An SCCM RBAC administrator — an AD user or group that has been granted SCCM administrative rights. Sourced from `SMS_Admin` via AdminService/WMI. Model: [models/sccm_admin_user.py](src/openhound_sccm/models/sccm_admin_user.py).
+
+- **Node id:** `<UPPER_LOGON_NAME>@<root_site_code>` (e.g. `MAYYHEM\SCCMADMIN@PS1`).
+- **`environmentid`:** the hierarchy root site code.
+- **Kinds:** `["SCCM_AdminUser"]`.
+- **`name` / `displayname`:** the logon name / display name from the SCCM admin record.
+
+| Property | Type | Description |
+|---|---|---|
+| `sccm_admin_id` | string | SCCM internal admin ID. |
+| `admin_sid` | string | AD SID of this admin account or group. |
+| `distinguished_name` | string | AD distinguished name (if available). |
+| `is_group` | bool | `true` if this admin entry is an AD group rather than a user. |
+| `account_type` | int | SCCM account type integer. |
+
+## SCCM_SecurityRole
+
+An SCCM RBAC security role — defines the set of operations an admin is permitted to perform. Sourced from `SMS_Role` via AdminService/WMI. Model: [models/sccm_security_role.py](src/openhound_sccm/models/sccm_security_role.py).
+
+- **Node id:** `<UPPER_ROLE_ID>@<root_site_code>` (e.g. `SMS000AR@PS1`).
+- **`environmentid`:** the hierarchy root site code.
+- **Kinds:** `["SCCM_SecurityRole"]`.
+- **`name` / `displayname`:** the role name qualified with root site code.
+
+| Property | Type | Description |
+|---|---|---|
+| `sccm_role_id` | string | SCCM role ID (e.g. `SMS000AR`). |
+| `sccm_role_name` | string | Human-readable role name (e.g. `Full Administrator`). |
+| `role_description` | string | Description of the role's purpose. |
+| `is_built_in` | bool | `true` for SCCM built-in roles. |
+| `is_sec_admin_role` | bool | `true` if this role grants Security Administrator privileges. |
+| `copied_from_id` | string | Role ID this was cloned from (custom roles only). |
+| `number_of_admins` | int | Number of admins assigned to this role. |
+| `operations` | list\<string\> | List of SCCM operation strings granted by this role. |
+
 ---
 
 # Edge Reference
 
-> **Currently emitted: 1 edge kind** — `SCCM_AdminsReplicatedTo`.
+> **Currently emitted: 10 edge kinds** — `SCCM_AdminsReplicatedTo`, `SCCM_HasClient`, `SCCM_HasMember`, `SCCM_IsMappedTo`, `SCCM_IsAssigned`, `SCCM_HasPrimaryUser`, `SCCM_HasCurrentUser`, `SCCM_HasADLastLogonUser`, `SCCM_HasStoredAccount`, `MemberOf`, and `HasSession`.
+
+Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries a `traversable` property set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only the traversable edges are followed by BloodHound's attack-path engine when finding attack paths.
 
 ## SCCM_AdminsReplicatedTo
 
-Represents the SCCM site replication topology — which sites replicate administrative data to which other sites. Built from the site hierarchy computed by `preprocess` (the `graph_edges` table). Edge model: [models/replication_edge.py](src/openhound_sccm/models/replication_edge.py).
+Represents the SCCM site replication topology — which sites replicate administrative data to which other sites. Built from the site hierarchy computed by `preprocess` (the `graph_edges` table). Edge model: [models/graph_edge.py](src/openhound_sccm/models/graph_edge.py) (`GraphEdge`).
 
-- **Source:** `SCCM_Site`
-- **Target:** `SCCM_Site`
+- **Start:** `SCCM_Site`
+- **End:** `SCCM_Site`
+- **Traversable:** yes
 - **Direction:**
   - CAS ↔ Primary Site: **bidirectional** (two edges, one in each direction)
   - Primary Site → Secondary Site: **one-way**
 
-No edge properties beyond the start and end site-code ids are emitted in Stage 1.
+## SCCM_HasClient
+
+Links a site to each of its confirmed (and possible, if enabled) SCCM-managed clients.
+
+- **Start:** `SCCM_Site`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** yes
+
+## SCCM_HasMember
+
+Links a collection to each of its members (devices, users, or groups).
+
+- **Start:** `SCCM_Collection`
+- **End:** `Computer` / `User` / `Group` (resolved by SID or name lookup)
+- **Traversable:** no
+
+## SCCM_IsMappedTo
+
+Links an AD user or group to its corresponding `SCCM_AdminUser` object — the SCCM RBAC record that grants them administrative access.
+
+- **Start:** `User` or `Group`
+- **End:** `SCCM_AdminUser`
+- **Traversable:** yes
+
+## SCCM_IsAssigned
+
+Links an `SCCM_AdminUser` to each scope it is assigned — either a collection (defining *what* they manage) or a security role (defining *what they can do*).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_Collection` or `SCCM_SecurityRole`
+- **Traversable:** no
+
+## SCCM_HasPrimaryUser / SCCM_HasCurrentUser / SCCM_HasADLastLogonUser
+
+Link an `SCCM_ClientDevice` to a user based on SCCM's recorded affinity or logon data.
+
+| Kind | Start | End | Traversable | Source |
+|---|---|---|---|---|
+| `SCCM_HasPrimaryUser` | `SCCM_ClientDevice` | `User` | yes | SCCM user-device affinity (`primary_user_name`) |
+| `SCCM_HasCurrentUser` | `SCCM_ClientDevice` | `User` | yes | Currently logged-on user (`current_logon_user_name`) |
+| `SCCM_HasADLastLogonUser` | `SCCM_ClientDevice` | `User` | yes | Last AD-authenticated user (`ad_last_logon_user_name`) |
+
+## MemberOf
+
+Links an AD principal directly to an AD group, representing a direct group membership recorded in SCCM's `security_group_name` field.
+
+- **Start:** `Computer` or `User`
+- **End:** `Group`
+- **Traversable:** yes (BloodHound-native edge kind)
+
+> **Assumption/Limitation:** SCCM's `security_group_name` carries only **direct** memberships — a device or user belongs to the named group. Group-to-group nesting is **not** captured. To see full nested-group attack paths, merge this dataset with a SharpHound collection. Because Group nodes are keyed by AD SID and use the AD domain SID as `environmentid`, SharpHound's `MemberOf` edges attach on the same SID keys.
+
+## HasSession
+
+Links a computer to the user currently logged on, based on the current-user SID read from the remote registry.
+
+- **Start:** `Computer`
+- **End:** `User`
+- **Traversable:** yes (BloodHound-native edge kind)
+
+## SCCM_HasStoredAccount
+
+Links an SCCM site to any AD user or group stored as a reserved/NAA-style credential in `SMS_SCI_Reserved`.
+
+- **Start:** `SCCM_Site`
+- **End:** `User` or `Group`
+- **Traversable:** no
+
+> **Deferred:** `SCCM_HasNetworkAccessAccount` (NAA secret decryption) requires the `--enable-bad-opsec` flag and the NAA-secret collector, neither of which is implemented yet.
 
 ---
 
@@ -462,7 +631,7 @@ sccm/sccm/
     ├── transforms.py             # DuckDB SQL transforms run during preprocess
     ├── lookup.py                 # Cached LookupManager queries used during convert
     ├── kinds/                    # Node + edge kind string constants
-    ├── models/                   # @app.asset graph models (today: SCCMSite; plus raw-table placeholders)
+    ├── models/                   # @app.asset graph models: SCCMSite, SCCMClientDevice, SCCMCollection, SCCMAdminUser, SCCMSecurityRole, GraphEdge, StubNode
     ├── collectors/               # ldap.py · dns.py · local.py · registry.py · mssql.py · privileged.py · http.py · smb.py · stubs.py
     ├── clients/                  # ad.py (LDAP auth) · mssql_epa.py (EPA probe) · http.py/http_auth.py (Negotiate) · wmi.py · smb_sso.py (SMB SSPI) · smb.py (signing + shares)
     └── phased_pipeline/          # Reusable engine: work_queue.py · streams.py · engine.py
@@ -500,10 +669,10 @@ This extension follows the rules in [AGENTS.md](AGENTS.md) and the [`.agents/`](
    $env:UV_PROJECT_ENVIRONMENT = "$env:TEMP\openhound-venv"; uv run pytest
    ```
 
-3. **Run the checks.** The test suite lives in [tests/](tests/) (CLI parsing, AD auth warnings, the phased-pipeline engine/streams/work-queue, per-host wiring and log blocks, LDAP MP parsing, lookup/transform queries, SMB SSO, …), with one inline test beside the code it covers ([per_host_phases_test.py](src/openhound_sccm/per_host_phases_test.py)).
+3. **Run the checks.** All tests live in [tests/](tests/) (CLI parsing, AD auth warnings, the phased-pipeline engine/streams/work-queue, per-host wiring and log blocks, LDAP MP parsing, lookup/transform queries, SMB SSO, graph node/edge models, convert integration, …).
 
    ```powershell
-   uv run pytest                       # tests
+   uv run pytest tests                 # tests
    uv run ruff check src tests         # lint
    uv run mypy src/openhound_sccm      # type-check
    ```

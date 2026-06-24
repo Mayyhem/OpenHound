@@ -29,7 +29,7 @@ ALWAYS use the following plugins/skills for tasks, unless they conflict (listed 
 
 If they conflict or are unavailable, ask me what to do.
 
-Don't git commit anything. Just write the code and I will commit/push when ready after testing.
+Don't git commit anything. Just write the code and I will commit/push when ready after testing. Put tests into a separate /tests directory and keep them organized.
 
 Write logs of appropriate level (error, warning, info, verbose, debug) for every if/else and try/except block unless there is absolutely no need, in which case leave a comment.
 

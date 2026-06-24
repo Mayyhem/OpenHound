@@ -313,6 +313,7 @@ class SCCMCollectionProperties(NodeProperties):
     is_built_in: bool | None = field(default=None, kw_only=True)
     limit_to_collection_id: str | None = field(default=None, kw_only=True)
     limit_to_collection_name: str | None = field(default=None, kw_only=True)
+    collection_variables_count: int | None = field(default=None, kw_only=True)
     root_site_code: str | None = field(default=None, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
 ```
@@ -328,7 +329,8 @@ from ..graph import SCCMNode, SCCMCollectionProperties
 from ..kinds import nodes as nk
 
 logger = logging.getLogger(__name__)
-_COLLECTION_TYPE = {0: "Device", 1: "User"}
+# CMBP ConfigManBearPig.ps1:1741 is the source of truth: 0 = Other, 1 = User, 2 = Device.
+_COLLECTION_TYPE = {0: "Other", 1: "User", 2: "Device"}
 
 
 class SCCMCollection(BaseAsset):
@@ -341,6 +343,7 @@ class SCCMCollection(BaseAsset):
     is_built_in: bool | None = None
     limit_to_collection_id: str | None = None
     limit_to_collection_name: str | None = None
+    collection_variables_count: int | None = None
     root_site_code: str | None = None
 
     @property
@@ -361,6 +364,7 @@ class SCCMCollection(BaseAsset):
                 member_count=self.member_count, comment=self.comment, is_built_in=self.is_built_in,
                 limit_to_collection_id=self.limit_to_collection_id,
                 limit_to_collection_name=self.limit_to_collection_name,
+                collection_variables_count=self.collection_variables_count,
                 root_site_code=self.root_site_code,
             ),
         )
@@ -450,7 +454,7 @@ def test_admin_user_as_node():
 > Note: id uppercases `logon_name` (the coalesce keys on `upper(logon_name)`); keep that consistent between the coalesce and `as_node`.
 
 - [ ] **Step 2: Run — expect failure.**
-- [ ] **Step 3a: `_node_admin_user`** — UNION `adminservice_admins`/`wmi_admins`; `_ensure_columns` for `admin_id, admin_sid, display_name, distinguished_name, is_group, account_type`; `INSERT … BY NAME SELECT upper(logon_name) AS logon_name, admin_id, upper(admin_sid) AS admin_sid, …`; collapse `GROUP BY logon_name` (`any_value` scalars, `bool_or(is_group)`, `max(account_type)`); stamp root. Filter `WHERE logon_name IS NOT NULL`. Call from `transforms()`.
+- [ ] **Step 3a: `_node_admin_user`** — UNION `adminservice_admins`/`wmi_admins`; `_ensure_columns` for `admin_id, admin_sid, display_name, distinguished_name, is_group, account_type`; `INSERT … BY NAME SELECT logon_name` (**original case**)`, CAST(admin_id AS VARCHAR), upper(admin_sid) AS admin_sid, …`; collapse `GROUP BY upper(logon_name)` with `any_value(logon_name)` (stores original-case logon; the model uppercases for the id), `any_value` other scalars, `bool_or(is_group)`, `max(account_type)`; stamp root. Filter `WHERE logon_name IS NOT NULL`. Call from `transforms()`. (Edge tasks C4/C5 compute `upper(logon_name)@root` from the raw admins rows, matching the node id.)
 - [ ] **Step 3b: `SCCMAdminUserProperties`** in `graph.py` — fields: `collection_source[]`, `sccm_admin_id`, `admin_sid`, `distinguished_name`, `is_group bool|None`, `account_type int|None`, `root_site_code`, `sccm_infra=True`.
 - [ ] **Step 3c: `models/sccm_admin_user.py`** — `SCCMAdminUser(BaseAsset)`: id = `upper(logon_name)@root` (drop+warn if no logon_name), kinds `[nk.SCCM_ADMIN_USER]`, `name=logon_name`, `environmentid = root or upper(logon_name)`.
 - [ ] **Step 3d:** add `("node_admin_user", SCCMAdminUser)` to `NODE_SPECS`; re-export.
@@ -522,7 +526,9 @@ Collapse `GROUP BY smsid` (`any_value` scalars; `bool_or` flags); stamp `? AS ro
 
 # Phase C — Generic edge model + node-local edges
 
-## Task C0: Generalise the edge model (`GraphEdge` + properties + traversable)
+## Task C0: Generalise the edge model (`GraphEdge` + traversable)
+
+> **Implementation note (2026-06-23, applied):** the `properties JSON` column described below was **dropped** during execution. DuckDB returns a JSON column as a *string*, which breaks `GraphEdge.properties: dict` on read; and edge `collection_source` is unused for pathfinding. So `graph_edges` stays **3-col `(start_id, end_id, kind)`**, every edge builder (C0–E2) does `SELECT start_id, end_id, kind` (ignore the `NULL AS properties` shown in later tasks), and `GraphEdge` sets only `traversable` from `TRAVERSABLE_EDGE_KINDS` via `SCCMEdgeProperties(traversable=…)`. `_graph_edges` was split into `_graph_edges_init` (empty 3-col table) + `_edge_replication`.
 
 **Files:** Rename `models/replication_edge.py` → `models/graph_edge.py`; modify `kinds/edges.py`, `graph.py`, `transforms.py` (`_graph_edges` columns), `main.py` (`EDGE_SPECS`, import), `models/__init__.py`; rename `models/replication_edge_test.py` → `models/graph_edge_test.py`.
 
