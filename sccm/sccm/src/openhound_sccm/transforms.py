@@ -7,6 +7,7 @@ with `root_site_code`) and — added in later tasks — the coalesced `node_*` t
 skipped (early stages won't have collected everything).
 """
 import logging
+import re
 
 import duckdb
 
@@ -14,12 +15,72 @@ logger = logging.getLogger(__name__)
 
 
 def _safe(con: duckdb.DuckDBPyConnection, label: str, sql: str) -> None:
-    """Run one SQL statement; log and continue if a source table is missing."""
+    """Run one SQL statement; log and continue if a source table is missing.
+
+    WMI/AdminService fallback-mirror logic: the collector produces EITHER
+    wmi_<X> OR adminservice_<X> tables for each data type — whichever
+    transport was available. A CatalogException for wmi_<X> when
+    adminservice_<X> exists (or vice versa) is a normal, expected miss;
+    we log it at DEBUG to keep the log clean during routine operation.
+    Any other missing-table error still logs at WARNING.
+    """
     try:
         con.execute(sql)
     except duckdb.CatalogException as err:
-        # A missing source table is expected when not all collectors have run.
-        logger.warning("transform %r skipped (missing source): %s", label, err)
+        # Parse the missing table name from the DuckDB error message.
+        # Example: "Catalog Error: Table with name wmi_r_system does not exist!"
+        _match = re.search(r'with name "?([A-Za-z0-9_]+)"?', str(err))
+        _missing = _match.group(1) if _match else None
+
+        _log_as_debug = False
+        if _missing:
+            # Determine the sibling table name by swapping the wmi_/adminservice_ prefix.
+            if _missing.startswith("wmi_"):
+                _sibling = "adminservice_" + _missing[len("wmi_"):]
+            elif _missing.startswith("adminservice_"):
+                _sibling = "wmi_" + _missing[len("adminservice_"):]
+            else:
+                _sibling = None
+
+            if _sibling:
+                try:
+                    # Extract the schema from the failing sql (e.g. 'schema.missing_table').
+                    _schema_match = re.search(
+                        rf'([A-Za-z0-9_]+)\.{re.escape(_missing)}',
+                        sql,
+                    )
+                    _schema = _schema_match.group(1) if _schema_match else None
+
+                    if _schema:
+                        # Check sibling in the same schema.
+                        _found = con.execute(
+                            "SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = ? AND table_name = ?",
+                            [_schema, _sibling],
+                        ).fetchone()
+                    else:
+                        # Schema extraction failed; fall back to schema-agnostic query.
+                        _found = con.execute(
+                            "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
+                            [_sibling],
+                        ).fetchone()
+
+                    if _found:
+                        # The sibling (other transport) table exists; this is an expected
+                        # fallback miss — no need to warn.
+                        _log_as_debug = True
+                except duckdb.Error:
+                    # Unable to query information_schema; default to WARNING (safe).
+                    pass
+
+        if _log_as_debug:
+            logger.debug(
+                "transform %r skipped (expected fallback miss — sibling table present): %s",
+                label, err,
+            )
+        else:
+            # A missing source table is expected when not all collectors have run.
+            logger.warning("transform %r skipped (missing source): %s", label, err)
     except duckdb.Error as err:
         logger.error("transform %r failed: %s", label, err)
 
@@ -259,6 +320,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "name VARCHAR, "
         "dnshostname VARCHAR, "
         "sam_account_name VARCHAR, "
+        "distinguished_name VARCHAR, "
         "resource_id_str VARCHAR, "          # '<rid>@<site>' or NULL; aggregated later
         "roles VARCHAR[], "                  # normalised per-row list; array-union later
         "sccm_infra BOOLEAN, "
@@ -282,6 +344,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "name": "VARCHAR",
         "dns_host_name": "VARCHAR",
         "sam_account_name": "VARCHAR",
+        "distinguished_name": "VARCHAR",
         "sccm_site_system_roles": "VARCHAR",
         "sccm_infra": "BOOLEAN",
         "smb_signing_required": "BOOLEAN",
@@ -315,7 +378,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-adminservice_r_system",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(sid) AS sid, name, "
-        f"NULL AS dnshostname, NULL AS sam_account_name, "
+        f"NULL AS dnshostname, NULL AS sam_account_name, NULL AS distinguished_name, "
         f"CASE WHEN resource_id IS NULL THEN NULL "
         f"     ELSE CAST(resource_id AS VARCHAR) || '@' || CAST(source_site_code AS VARCHAR) END AS resource_id_str, "
         f"{_arr('system_roles')} AS roles, "
@@ -338,7 +401,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-wmi_r_system",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(sid) AS sid, name, "
-        f"NULL AS dnshostname, NULL AS sam_account_name, "
+        f"NULL AS dnshostname, NULL AS sam_account_name, NULL AS distinguished_name, "
         f"CASE WHEN resource_id IS NULL THEN NULL "
         f"     ELSE CAST(resource_id AS VARCHAR) || '@' || CAST(source_site_code AS VARCHAR) END AS resource_id_str, "
         f"{_arr('system_roles')} AS roles, "
@@ -356,12 +419,15 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- ldap_cmrc_devices: object_sid; synthesize sccm_has_client_remote_control_spn=TRUE ---
+    # Note: ldap_cmrc_devices does have distinguished_name (from entry.entry_dn via ad.py),
+    # but we prefer smb_computers / remoteregistry_computers as primary sources to keep
+    # the any_value coalesce consistent. NULL here; those arms fill it in.
     _safe(
         con,
         "node_computer<-ldap_cmrc_devices",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, sam_account_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -384,7 +450,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-ldap_network_boot_servers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, sam_account_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -402,13 +468,14 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- smb_computers: smb_signing_required; sccm_hosts_content_library; sccm_is_pxe_support_enabled ---
+    # smb_computers spreads **ad_object which includes distinguished_name (primary source).
     # sam_account_name is not emitted by the SMB collector — use NULL so the LDAP sources win via any_value.
     _safe(
         con,
         "node_computer<-smb_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, "
+        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -426,13 +493,14 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- remoteregistry_computers: disable_loopback_check; restrict_receiving_ntlm_traffic (string) ---
+    # remoteregistry_computers also spreads **ad_object, providing distinguished_name.
     # sam_account_name is not emitted by the RemoteRegistry collector — use NULL.
     _safe(
         con,
         "node_computer<-remoteregistry_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, "
+        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -450,12 +518,13 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- adminservice_site_definitions_computers: object_sid; sccm_site_system_roles ---
+    # This source also spreads **ad_object, providing distinguished_name.
     _safe(
         con,
         "node_computer<-adminservice_site_definitions_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, "
+        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -478,7 +547,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-wmi_site_definitions_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, "
+        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -501,7 +570,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-http_management_points",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, sam_account_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -524,7 +593,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-http_distribution_points",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, sam_account_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -547,7 +616,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-http_smsproviders",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, sam_account_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -573,6 +642,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  any_value(name) AS name, "
         f"  any_value(dnshostname) AS dnshostname, "
         f"  any_value(sam_account_name) AS sam_account_name, "
+        f"  any_value(distinguished_name) AS distinguished_name, "
         f"  list_distinct(list_filter(flatten(list(roles)), x -> x IS NOT NULL AND trim(x) != '')) AS site_system_roles, "
         f"  coalesce(list_distinct(array_agg(resource_id_str) FILTER (WHERE resource_id_str IS NOT NULL)), CAST([] AS VARCHAR[])) AS resource_ids, "
         f"  bool_or(sccm_infra) AS sccm_infra, "
@@ -613,7 +683,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "name VARCHAR, "
         "resource_id_str VARCHAR, "     # '<rid>@<site>' or NULL; aggregated below
         "sccm_infra BOOLEAN, "
-        "stored_in_sccm_site VARCHAR"   # site_code where the account is stored (reserved)
+        "stored_in_sccm_site VARCHAR, "   # site_code where the account is stored (reserved)
+        "distinguished_name VARCHAR, "
+        "user_principal_name VARCHAR"
         ")"
     )
 
@@ -626,6 +698,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "logon_name": "VARCHAR",
         "is_group": "BOOLEAN",
         "site_code": "VARCHAR",
+        "distinguished_name": "VARCHAR",
+        "user_principal_name": "VARCHAR",
     }
     for _src in (
         "adminservice_r_user", "wmi_r_user", "remoteregistry_users",
@@ -634,7 +708,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     ):
         _ensure_columns(con, schema, _src, _optional)
 
-    # --- adminservice_r_user: sid, name, resource_id@source_site_code ---
+    # --- adminservice_r_user: sid, name, resource_id@source_site_code, AD attributes ---
+    # RUSER_COLUMNS includes DistinguishedName and UserPrincipalName (dlt snake-cases them).
     _safe(
         con,
         "node_user<-adminservice_r_user",
@@ -643,7 +718,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"CASE WHEN resource_id IS NULL THEN NULL "
         f"     ELSE CAST(resource_id AS VARCHAR) || '@' || CAST(source_site_code AS VARCHAR) END AS resource_id_str, "
         f"false AS sccm_infra, "
-        f"NULL AS stored_in_sccm_site "
+        f"NULL AS stored_in_sccm_site, "
+        f"distinguished_name, "
+        f"user_principal_name "
         f"FROM {schema}.adminservice_r_user "
         f"WHERE sid IS NOT NULL",
     )
@@ -657,12 +734,14 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"CASE WHEN resource_id IS NULL THEN NULL "
         f"     ELSE CAST(resource_id AS VARCHAR) || '@' || CAST(source_site_code AS VARCHAR) END AS resource_id_str, "
         f"false AS sccm_infra, "
-        f"NULL AS stored_in_sccm_site "
+        f"NULL AS stored_in_sccm_site, "
+        f"distinguished_name, "
+        f"user_principal_name "
         f"FROM {schema}.wmi_r_user "
         f"WHERE sid IS NOT NULL",
     )
 
-    # --- remoteregistry_users: object_sid (clean snake_case); no resource_id ---
+    # --- remoteregistry_users: object_sid (clean snake_case); no resource_id or AD attrs ---
     _safe(
         con,
         "node_user<-remoteregistry_users",
@@ -670,7 +749,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT upper(object_sid) AS sid, sam_account_name AS name, "
         f"NULL AS resource_id_str, "
         f"false AS sccm_infra, "
-        f"NULL AS stored_in_sccm_site "
+        f"NULL AS stored_in_sccm_site, "
+        f"NULL AS distinguished_name, "
+        f"NULL AS user_principal_name "
         f"FROM {schema}.remoteregistry_users "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -683,7 +764,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT upper(admin_sid) AS sid, logon_name AS name, "
         f"NULL AS resource_id_str, "
         f"true AS sccm_infra, "
-        f"NULL AS stored_in_sccm_site "
+        f"NULL AS stored_in_sccm_site, "
+        f"NULL AS distinguished_name, "
+        f"NULL AS user_principal_name "
         f"FROM {schema}.adminservice_admins "
         f"WHERE admin_sid IS NOT NULL AND NOT coalesce(is_group, false)",
     )
@@ -696,7 +779,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT upper(admin_sid) AS sid, logon_name AS name, "
         f"NULL AS resource_id_str, "
         f"true AS sccm_infra, "
-        f"NULL AS stored_in_sccm_site "
+        f"NULL AS stored_in_sccm_site, "
+        f"NULL AS distinguished_name, "
+        f"NULL AS user_principal_name "
         f"FROM {schema}.wmi_admins "
         f"WHERE admin_sid IS NOT NULL AND NOT coalesce(is_group, false)",
     )
@@ -710,7 +795,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT upper(object_sid) AS sid, name, "
         f"NULL AS resource_id_str, "
         f"false AS sccm_infra, "
-        f"site_code AS stored_in_sccm_site "
+        f"site_code AS stored_in_sccm_site, "
+        f"NULL AS distinguished_name, "
+        f"NULL AS user_principal_name "
         f"FROM {schema}.adminservice_reserved_accounts "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -723,7 +810,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT upper(object_sid) AS sid, name, "
         f"NULL AS resource_id_str, "
         f"false AS sccm_infra, "
-        f"site_code AS stored_in_sccm_site "
+        f"site_code AS stored_in_sccm_site, "
+        f"NULL AS distinguished_name, "
+        f"NULL AS user_principal_name "
         f"FROM {schema}.wmi_reserved_accounts "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -731,7 +820,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # Collapse all staging rows into one row per SID.
     # resource_ids: array-union the non-null '<rid>@<site>' strings.
     # sccm_infra:   bool_or (true wins if any source set it true).
-    # stored_in_sccm_site / name: any_value (first non-null wins; scalar per CMBP).
+    # name / stored_in_sccm_site / distinguished_name / user_principal_name:
+    #   any_value (first non-null wins; scalar per CMBP).
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_user AS "
         f"SELECT "
@@ -739,7 +829,9 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  any_value(name) AS name, "
         f"  coalesce(list_distinct(array_agg(resource_id_str) FILTER (WHERE resource_id_str IS NOT NULL)), CAST([] AS VARCHAR[])) AS resource_ids, "
         f"  bool_or(sccm_infra) AS sccm_infra, "
-        f"  any_value(stored_in_sccm_site) AS stored_in_sccm_site "
+        f"  any_value(stored_in_sccm_site) AS stored_in_sccm_site, "
+        f"  any_value(distinguished_name) AS distinguished_name, "
+        f"  any_value(user_principal_name) AS user_principal_name "
         f"FROM {schema}.node_user "
         f"GROUP BY sid"
     )
@@ -911,11 +1003,17 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     * adminservice_site_definitions / wmi_site_definitions
                                              — site_code, parent_site_code, site_guid,
                                                sql_server_name, sql_database_name, site_type
-    * ldap_sites                             — site_code, site_guid, parent_site_code
+    * ldap_sites                             — site_code, site_guid, parent_site_code,
+                                               distinguished_name, source_forest
+    * adminservice_site_systems / wmi_site_systems (correlated subquery)
+                                             — sql_service_account_name (any non-null
+                                               sql_server_service_logon_account per site_code)
 
     After collapsing duplicates with GROUP BY upper(site_code), the result is
     LEFT JOINed to site_hierarchy (built by _site_hierarchy) to stamp each row
-    with root_site_code. site_hierarchy must already exist when this runs.
+    with root_site_code and sql_service_account_name. site_hierarchy must already
+    exist when this runs. admin_users and stored_accounts list columns are added
+    later by _enrich_site_lists.
     """
     # Staging table — one raw row per source record before collapsing.
     con.execute(
@@ -930,7 +1028,9 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "sql_database_name VARCHAR, "
         "version VARCHAR, "
         "build_number VARCHAR, "
-        "install_dir VARCHAR"
+        "install_dir VARCHAR, "
+        "distinguished_name VARCHAR, "
+        "source_forest VARCHAR"
         ")"
     )
 
@@ -953,6 +1053,8 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "site_guid": "VARCHAR",             # site_definitions / ldap_sites
         "sql_server_name": "VARCHAR",       # site_definitions
         "sql_database_name": "VARCHAR",     # site_definitions
+        "distinguished_name": "VARCHAR",    # ldap_sites (mSSMSSite DN)
+        "source_forest": "VARCHAR",         # ldap_sites (mSSMSSourceForest)
     }
     for _src in (
         "adminservice_sites", "wmi_sites",
@@ -1011,7 +1113,7 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.wmi_site_definitions WHERE site_code IS NOT NULL",
     )
 
-    # --- ldap_sites: site_code, site_guid, parent_site_code ---
+    # --- ldap_sites: site_code, site_guid, parent_site_code, distinguished_name, source_forest ---
     _safe(
         con,
         "node_site<-ldap_sites",
@@ -1019,7 +1121,8 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT site_code, NULL AS site_name, NULL AS server_name, "
         f"parent_site_code, NULL AS site_type, "
         f"site_guid, NULL AS sql_server_name, NULL AS sql_database_name, "
-        f"NULL AS version, NULL AS build_number, NULL AS install_dir "
+        f"NULL AS version, NULL AS build_number, NULL AS install_dir, "
+        f"distinguished_name, source_forest "
         f"FROM {schema}.ldap_sites WHERE site_code IS NOT NULL",
     )
 
@@ -1039,19 +1142,46 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  any_value(sql_database_name) AS sql_database_name, "
         f"  any_value(version) AS version, "
         f"  any_value(build_number) AS build_number, "
-        f"  any_value(install_dir) AS install_dir "
+        f"  any_value(install_dir) AS install_dir, "
+        f"  any_value(distinguished_name) AS distinguished_name, "
+        f"  any_value(source_forest) AS source_forest "
         f"FROM {schema}.node_site "
         f"WHERE site_code IS NOT NULL "
         f"GROUP BY upper(site_code)"
     )
 
-    # Stamp each row with root_site_code from the site_hierarchy table.
-    # LEFT JOIN so sites missing from site_hierarchy still appear (root = NULL).
+    # Aggregate sql_server_service_logon_account per site_code from both
+    # site_systems sources into a temp table so the final JOIN can reference a
+    # single table regardless of which sources are present (CMBP ps1:225 area).
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _site_sql_acct (site_code VARCHAR, acct VARCHAR)"
+    )
+    for _ss in ("adminservice_site_systems", "wmi_site_systems"):
+        _ensure_columns(con, schema, _ss, {
+            "site_code": "VARCHAR",
+            "sql_server_service_logon_account": "VARCHAR",
+        })
+        _safe(
+            con,
+            f"_site_sql_acct<-{_ss}",
+            f"INSERT INTO _site_sql_acct "
+            f"SELECT upper(site_code), any_value(sql_server_service_logon_account) "
+            f"FROM {schema}.{_ss} "
+            f"WHERE site_code IS NOT NULL AND sql_server_service_logon_account IS NOT NULL "
+            f"GROUP BY upper(site_code)",
+        )
+
+    # Stamp each row with root_site_code from the site_hierarchy table and
+    # sql_service_account_name from the aggregated temp table (any non-null
+    # sql_server_service_logon_account for that site_code; CMBP ps1:225 area).
+    # LEFT JOIN for root_site_code so sites absent from site_hierarchy still appear.
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_site AS "
-        f"SELECT ns.*, sh.root_site_code "
+        f"SELECT ns.*, sh.root_site_code, ssa.acct AS sql_service_account_name "
         f"FROM {schema}.node_site ns "
-        f"LEFT JOIN {schema}.site_hierarchy sh USING (site_code)"
+        f"LEFT JOIN {schema}.site_hierarchy sh USING (site_code) "
+        f"LEFT JOIN (SELECT site_code, any_value(acct) AS acct FROM _site_sql_acct GROUP BY site_code) ssa "
+        f"  USING (site_code)"
     )
     logger.info("node_site built in schema %r", schema)
 
@@ -1095,7 +1225,8 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     Sources and the columns they contribute:
 
-    * adminservice_collections — collection_id, name, collection_type, member_count, is_built_in
+    * adminservice_collections — collection_id, name, collection_type, member_count, is_built_in,
+                                 source_site_code, last_change_time, last_member_change_time
     * wmi_collections          — same shape
 
     The final GROUP BY collapses duplicates (same collection from multiple sources) with
@@ -1107,7 +1238,8 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"CREATE OR REPLACE TABLE {schema}.node_collection ("
         "collection_id VARCHAR, name VARCHAR, collection_type INTEGER, member_count BIGINT, "
         "comment VARCHAR, is_built_in BOOLEAN, limit_to_collection_id VARCHAR, "
-        "limit_to_collection_name VARCHAR, collection_variables_count BIGINT)"
+        "limit_to_collection_name VARCHAR, collection_variables_count BIGINT, "
+        "source_site_code VARCHAR, last_change_time VARCHAR, last_member_change_time VARCHAR)"
     )
 
     # Pre-create optional columns so a source missing one (never-emitted, or
@@ -1121,6 +1253,9 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "limit_to_collection_id": "VARCHAR",
         "limit_to_collection_name": "VARCHAR",
         "collection_variables_count": "BIGINT",
+        "source_site_code": "VARCHAR",
+        "last_change_time": "VARCHAR",
+        "last_member_change_time": "VARCHAR",
     }
     for _src in ("adminservice_collections", "wmi_collections"):
         _ensure_columns(con, schema, _src, _optional)
@@ -1132,7 +1267,8 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
             f"TRY_CAST(collection_type AS INTEGER) AS collection_type, "
             f"TRY_CAST(member_count AS BIGINT) AS member_count, comment, "
             f"is_built_in, limit_to_collection_id, limit_to_collection_name, "
-            f"TRY_CAST(collection_variables_count AS BIGINT) AS collection_variables_count "
+            f"TRY_CAST(collection_variables_count AS BIGINT) AS collection_variables_count, "
+            f"source_site_code, last_change_time, last_member_change_time "
             f"FROM {schema}.{_src} WHERE collection_id IS NOT NULL",
         )
 
@@ -1149,6 +1285,9 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(limit_to_collection_id) AS limit_to_collection_id, "
         f"any_value(limit_to_collection_name) AS limit_to_collection_name, "
         f"max(collection_variables_count) AS collection_variables_count, "
+        f"any_value(source_site_code) AS source_site_code, "
+        f"any_value(last_change_time) AS last_change_time, "
+        f"any_value(last_member_change_time) AS last_member_change_time, "
         f"? AS root_site_code "
         f"FROM {schema}.node_collection "
         f"GROUP BY collection_id",
@@ -1157,12 +1296,237 @@ def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     logger.info("node_collection built in schema %r", schema)
 
 
+def _enrich_collection_members(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add node_collection.members: the raw ResourceID@SiteCode keys per collection
+    (CMBP ps1:7605), faithful — built-in/unresolved members included. From the raw
+    collection_members tables, NOT from graph_edges (Stage 3 Decision #6)."""
+    con.execute("CREATE OR REPLACE TEMP TABLE _cmembers (collection_id VARCHAR, member_key VARCHAR)")
+    for _src in ("adminservice_collection_members", "wmi_collection_members"):
+        _ensure_columns(con, schema, _src, {"collection_id": "VARCHAR", "resource_id": "BIGINT", "site_code": "VARCHAR"})
+        _safe(con, f"_cmembers<-{_src}",
+              f"INSERT INTO _cmembers SELECT upper(collection_id), "
+              f"CAST(resource_id AS VARCHAR) || '@' || CAST(site_code AS VARCHAR) "
+              f"FROM {schema}.{_src} WHERE collection_id IS NOT NULL AND resource_id IS NOT NULL")
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_collection AS "
+        f"SELECT c.*, coalesce(m.members, CAST([] AS VARCHAR[])) AS members "
+        f"FROM {schema}.node_collection c "
+        f"LEFT JOIN (SELECT collection_id, list_distinct(array_agg(member_key)) AS members "
+        f"           FROM _cmembers GROUP BY collection_id) m ON m.collection_id = c.collection_id")
+    logger.info("node_collection.members enriched in schema %r", schema)
+
+
+def _enrich_role_members(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add node_security_role.members: the admin node ids assigned to each role
+    (CMBP ps1:7854/7880). Resolved from raw admins (roles id list + role_names
+    fallback via role_by_name when roles is empty), NOT from graph_edges (Decision #6).
+
+    Each member id is upper(logon_name)@root, matching the SCCM_AdminUser node id.
+    """
+    root = _root_code(con, schema) or ""
+    # Inline the @root suffix so the INSERT SQL needs no parameters (matches _safe convention).
+    suffix = f" || '@{root}'" if root else ""
+    con.execute("CREATE OR REPLACE TEMP TABLE _rmembers (role_id VARCHAR, admin_id VARCHAR)")
+    for _src in ("adminservice_admins", "wmi_admins"):
+        _ensure_columns(con, schema, _src, {"logon_name": "VARCHAR", "roles": "VARCHAR", "role_names": "VARCHAR"})
+
+        # Arm 1: role id list — unnest the roles JSON/CSV array via _arr().
+        _safe(con, f"_rmembers_roles<-{_src}",
+              f"INSERT INTO _rmembers SELECT upper(trim(t.rid)), upper(a.logon_name){suffix} "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.roles')}) AS t(rid) "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.rid) != ''")
+
+        # Arm 2: role_names fallback — ONLY when roles is empty; resolve name -> id via role_by_name.
+        _safe(con, f"_rmembers_names<-{_src}",
+              f"INSERT INTO _rmembers SELECT rbn.role_id, upper(a.logon_name){suffix} "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.role_names')}) AS t(rn) "
+              f"JOIN {schema}.role_by_name rbn ON upper(trim(t.rn)) = rbn.name "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.rn) != '' AND len({_arr('a.roles')}) = 0")
+
+    # Attach the aggregated member lists to node_security_role.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_security_role AS "
+        f"SELECT r.*, coalesce(m.members, CAST([] AS VARCHAR[])) AS members "
+        f"FROM {schema}.node_security_role r "
+        f"LEFT JOIN (SELECT role_id, list_distinct(array_agg(admin_id)) AS members "
+        f"           FROM _rmembers GROUP BY role_id) m ON m.role_id = r.role_id")
+    logger.info("node_security_role.members enriched in schema %r", schema)
+
+
+def _enrich_admin_assignments(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add node_admin_user.collection_ids / role_ids / member_of (CMBP ps1:7775/7783/7848).
+
+    role_ids = raw admin.roles list; member_of = resolved role node ids (roles list
+    primary, role_names fallback when roles is empty); collection_ids = collection node
+    ids resolved from collection_names via collection_by_name. Built from raw admins
+    rows + name lookups, NOT from graph_edges (Decision #6).
+    """
+    root = _root_code(con, schema) or ""
+    suffix = f" || '@{root}'" if root else ""
+    con.execute("CREATE OR REPLACE TEMP TABLE _aassign (logon_key VARCHAR, kind VARCHAR, val VARCHAR)")
+    for _src in ("adminservice_admins", "wmi_admins"):
+        _ensure_columns(con, schema, _src, {"logon_name": "VARCHAR", "roles": "VARCHAR",
+                                            "role_names": "VARCHAR", "collection_names": "VARCHAR"})
+
+        # Arm 1: role_ids — raw role id from the roles JSON/CSV array.
+        _safe(con, f"_aassign_roleid<-{_src}",
+              f"INSERT INTO _aassign SELECT upper(a.logon_name), 'role_id', upper(trim(t.rid)) "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.roles')}) AS t(rid) "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.rid) != ''")
+
+        # Arm 2: member_of — role node id from the roles list (upper(role_id)@root).
+        _safe(con, f"_aassign_memberof_id<-{_src}",
+              f"INSERT INTO _aassign SELECT upper(a.logon_name), 'member_of', upper(trim(t.rid)){suffix} "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.roles')}) AS t(rid) "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.rid) != ''")
+
+        # Arm 3: member_of fallback — role_names -> role_by_name -> role node id,
+        # only when the roles list is empty (no direct ids available).
+        _safe(con, f"_aassign_memberof_name<-{_src}",
+              f"INSERT INTO _aassign SELECT upper(a.logon_name), 'member_of', rbn.role_id{suffix} "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.role_names')}) AS t(rn) "
+              f"JOIN {schema}.role_by_name rbn ON upper(trim(t.rn)) = rbn.name "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.rn) != '' AND len({_arr('a.roles')}) = 0")
+
+        # Arm 4: collection_ids — collection_names -> collection_by_name -> collection node id.
+        _safe(con, f"_aassign_coll<-{_src}",
+              f"INSERT INTO _aassign SELECT upper(a.logon_name), 'collection_id', cbn.collection_id{suffix} "
+              f"FROM {schema}.{_src} a, unnest({_arr('a.collection_names')}) AS t(cn) "
+              f"JOIN {schema}.collection_by_name cbn ON upper(trim(t.cn)) = cbn.name "
+              f"WHERE a.logon_name IS NOT NULL AND trim(t.cn) != ''")
+
+    # Correlated-subquery aggregation: attach all three list columns to node_admin_user.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_admin_user AS SELECT a.*, "
+        f"coalesce((SELECT list_distinct(array_agg(val)) FROM _aassign x "
+        f"          WHERE x.logon_key = upper(a.logon_name) AND x.kind = 'collection_id'), "
+        f"         CAST([] AS VARCHAR[])) AS collection_ids, "
+        f"coalesce((SELECT list_distinct(array_agg(val)) FROM _aassign x "
+        f"          WHERE x.logon_key = upper(a.logon_name) AND x.kind = 'role_id'), "
+        f"         CAST([] AS VARCHAR[])) AS role_ids, "
+        f"coalesce((SELECT list_distinct(array_agg(val)) FROM _aassign x "
+        f"          WHERE x.logon_key = upper(a.logon_name) AND x.kind = 'member_of'), "
+        f"         CAST([] AS VARCHAR[])) AS member_of "
+        f"FROM {schema}.node_admin_user a")
+    logger.info("node_admin_user assignment lists enriched in schema %r", schema)
+
+
+def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add resolved *_sid fields and collection_ids/collection_names to node_client_device.
+
+    SID resolution (CMBP ps1:7227/7232/7245/7248): each name-only user field on the
+    device row (primary_user_name, current_logon_user_name, ad_last_logon_user_name,
+    last_mp_server_name) is looked up in principal_by_name via a correlated subquery.
+
+    Collection lists (CMBP ps1:7228-7229): built from collection_members JOIN collections
+    keyed on the device's resource_id_str (<resource_id>@<site>).
+    """
+    root = _root_code(con, schema) or ""
+    suffix = f" || '@{root}'" if root else ""
+
+    # Gather all collection memberships per device resource_id into a temp table.
+    con.execute("CREATE OR REPLACE TEMP TABLE _devcoll (rid_key VARCHAR, coll_id VARCHAR, coll_name VARCHAR)")
+    for _cm in ("adminservice_collection_members", "wmi_collection_members"):
+        _ensure_columns(con, schema, _cm, {"collection_id": "VARCHAR", "resource_id": "BIGINT", "site_code": "VARCHAR"})
+        for _c in ("adminservice_collections", "wmi_collections"):
+            _ensure_columns(con, schema, _c, {"collection_id": "VARCHAR", "name": "VARCHAR"})
+            _safe(con, f"_devcoll<-{_cm}+{_c}",
+                  f"INSERT INTO _devcoll "
+                  f"SELECT CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR), "
+                  f"upper(cm.collection_id){suffix}, c.name "
+                  f"FROM {schema}.{_cm} cm JOIN {schema}.{_c} c ON upper(c.collection_id) = upper(cm.collection_id) "
+                  f"WHERE cm.resource_id IS NOT NULL AND cm.collection_id IS NOT NULL")
+
+    # Rebuild node_client_device with SID columns and collection list columns appended.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS SELECT d.*, "
+        f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f" WHERE upper(pbn.name) = upper(trim(d.primary_user_name)) LIMIT 1) AS primary_user_sid, "
+        f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f" WHERE upper(pbn.name) = upper(trim(d.current_logon_user_name)) LIMIT 1) AS current_logon_user_sid, "
+        f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f" WHERE upper(pbn.name) = upper(trim(d.ad_last_logon_user_name)) LIMIT 1) AS ad_last_logon_user_sid, "
+        f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f" WHERE upper(pbn.name) = upper(trim(d.last_mp_server_name)) LIMIT 1) AS last_reported_mp_server_sid, "
+        f"coalesce((SELECT list_distinct(array_agg(coll_id)) FROM _devcoll x WHERE x.rid_key = d.resource_id_str), "
+        f"         CAST([] AS VARCHAR[])) AS collection_ids, "
+        f"coalesce((SELECT list_distinct(array_agg(coll_name)) FROM _devcoll x WHERE x.rid_key = d.resource_id_str), "
+        f"         CAST([] AS VARCHAR[])) AS collection_names "
+        f"FROM {schema}.node_client_device d"
+    )
+    logger.info("node_client_device resolved SIDs + collection lists enriched in schema %r", schema)
+
+
+def _enrich_site_lists(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add node_site.admin_users and node_site.stored_accounts list columns.
+
+    admin_users (CMBP ps1:1724): all SCCM admin logon names uppercased and scoped
+    to the hierarchy root (e.g. "DOMAIN\\USER@CAS"). Every admin in the single
+    hierarchy is contained by every non-secondary site, so the same list appears
+    on every site row.
+
+    stored_accounts (CMBP ps1:7141): the object_sid values from the reserved-
+    accounts table scoped to that specific site_code (uppercased).
+    """
+    root = _root_code(con, schema) or ""
+    suffix = f" || '@{root}'" if root else ""
+
+    # Collect all admin logon names into a temp table; upper() for consistency.
+    con.execute("CREATE OR REPLACE TEMP TABLE _alladmins (admin_id VARCHAR)")
+    for _src in ("adminservice_admins", "wmi_admins"):
+        _ensure_columns(con, schema, _src, {"logon_name": "VARCHAR"})
+        _safe(
+            con,
+            f"_alladmins<-{_src}",
+            f"INSERT INTO _alladmins "
+            f"SELECT DISTINCT upper(logon_name){suffix} "
+            f"FROM {schema}.{_src} WHERE logon_name IS NOT NULL",
+        )
+
+    # Collect all reserved-account SIDs per site_code into a temp table.
+    con.execute("CREATE OR REPLACE TEMP TABLE _stored (site_code VARCHAR, sid VARCHAR)")
+    for _src in ("adminservice_reserved_accounts", "wmi_reserved_accounts"):
+        _ensure_columns(con, schema, _src, {"site_code": "VARCHAR", "object_sid": "VARCHAR"})
+        _safe(
+            con,
+            f"_stored<-{_src}",
+            f"INSERT INTO _stored "
+            f"SELECT upper(site_code), upper(object_sid) "
+            f"FROM {schema}.{_src} "
+            f"WHERE site_code IS NOT NULL AND object_sid IS NOT NULL",
+        )
+
+    # Rebuild node_site with both list columns appended. The admin_users subquery
+    # has no site_code filter — all admins are contained by the single hierarchy.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_site AS "
+        f"SELECT s.*, "
+        f"coalesce("
+        f"  (SELECT list_distinct(array_agg(admin_id)) FROM _alladmins), "
+        f"  CAST([] AS VARCHAR[])"
+        f") AS admin_users, "
+        f"coalesce("
+        f"  (SELECT list_distinct(array_agg(st.sid)) FROM _stored st WHERE st.site_code = s.site_code), "
+        f"  CAST([] AS VARCHAR[])"
+        f") AS stored_accounts "
+        f"FROM {schema}.node_site s"
+    )
+    logger.info("node_site.admin_users + stored_accounts enriched in schema %r", schema)
+
+
 def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """One row per role_id, coalesced from adminservice/wmi security_roles."""
+    """One row per role_id, coalesced from adminservice/wmi security_roles.
+
+    Audit fields (site_code, created_by, created_date, last_modified_by,
+    last_modified_date) come from ROLE_COLUMNS in the source tables. site_code
+    is aliased from source_site (ROLE_COLUMNS.SourceSite -> dlt snake-case).
+    """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_security_role ("
         "role_id VARCHAR, role_name VARCHAR, role_description VARCHAR, is_built_in BOOLEAN, "
-        "is_sec_admin_role BOOLEAN, copied_from_id VARCHAR, number_of_admins BIGINT, operations VARCHAR[])"
+        "is_sec_admin_role BOOLEAN, copied_from_id VARCHAR, number_of_admins BIGINT, operations VARCHAR[], "
+        "site_code VARCHAR, created_by VARCHAR, created_date VARCHAR, "
+        "last_modified_by VARCHAR, last_modified_date VARCHAR)"
     )
     _optional = {
         "role_name": "VARCHAR",
@@ -1172,6 +1536,12 @@ def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "copied_from_id": "VARCHAR",
         "number_of_admins": "BIGINT",
         "operations": "VARCHAR",
+        # Audit fields (ROLE_COLUMNS; may be absent if dlt dropped all-NULL columns).
+        "source_site": "VARCHAR",
+        "created_by": "VARCHAR",
+        "created_date": "VARCHAR",
+        "last_modified_by": "VARCHAR",
+        "last_modified_date": "VARCHAR",
     }
     for _src in ("adminservice_security_roles", "wmi_security_roles"):
         _ensure_columns(con, schema, _src, _optional)
@@ -1181,7 +1551,8 @@ def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
             f"INSERT INTO {schema}.node_security_role BY NAME "
             f"SELECT upper(role_id) AS role_id, role_name, role_description, is_built_in, "
             f"is_sec_admin_role, copied_from_id, TRY_CAST(number_of_admins AS BIGINT) AS number_of_admins, "
-            f"{_arr('operations')} AS operations "
+            f"{_arr('operations')} AS operations, "
+            f"source_site AS site_code, created_by, created_date, last_modified_by, last_modified_date "
             f"FROM {schema}.{_src} WHERE role_id IS NOT NULL",
         )
 
@@ -1197,6 +1568,11 @@ def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(copied_from_id) AS copied_from_id, "
         f"max(number_of_admins) AS number_of_admins, "
         f"list_distinct(list_filter(flatten(list(operations)), x -> x IS NOT NULL AND trim(x) != '')) AS operations, "
+        f"any_value(site_code) AS site_code, "
+        f"any_value(created_by) AS created_by, "
+        f"any_value(created_date) AS created_date, "
+        f"any_value(last_modified_by) AS last_modified_by, "
+        f"any_value(last_modified_date) AS last_modified_date, "
         f"? AS root_site_code "
         f"FROM {schema}.node_security_role "
         f"GROUP BY role_id",
@@ -1207,20 +1583,40 @@ def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
 def _node_admin_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """One row per upper(logon_name), coalesced from adminservice/wmi admins.
-    logon_name stored original-case; dedup key is upper(logon_name)."""
+
+    Scalar audit fields (display_name, source_site_code, created_by, created_date,
+    last_modified_by, last_modified_date) come from ADMIN_COLUMNS in the source tables.
+    source_site_code is aliased from source_site (ADMIN_COLUMNS.SourceSite -> dlt snake-case).
+    logon_name stored original-case; dedup key is upper(logon_name).
+    """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_admin_user ("
         "logon_name VARCHAR, admin_id VARCHAR, admin_sid VARCHAR, display_name VARCHAR, "
-        "distinguished_name VARCHAR, is_group BOOLEAN, account_type INTEGER)"
+        "distinguished_name VARCHAR, is_group BOOLEAN, account_type INTEGER, "
+        "source_site_code VARCHAR, created_by VARCHAR, created_date VARCHAR, "
+        "last_modified_by VARCHAR, last_modified_date VARCHAR)"
     )
-    _optional = {"admin_id": "VARCHAR", "admin_sid": "VARCHAR", "display_name": "VARCHAR",
-                 "distinguished_name": "VARCHAR", "is_group": "BOOLEAN", "account_type": "INTEGER"}
+    _optional = {
+        "admin_id": "VARCHAR",
+        "admin_sid": "VARCHAR",
+        "display_name": "VARCHAR",
+        "distinguished_name": "VARCHAR",
+        "is_group": "BOOLEAN",
+        "account_type": "INTEGER",
+        # Audit fields (ADMIN_COLUMNS; may be absent if dlt dropped all-NULL columns).
+        "source_site": "VARCHAR",
+        "created_by": "VARCHAR",
+        "created_date": "VARCHAR",
+        "last_modified_by": "VARCHAR",
+        "last_modified_date": "VARCHAR",
+    }
     for _src in ("adminservice_admins", "wmi_admins"):
         _ensure_columns(con, schema, _src, _optional)
         _safe(con, f"node_admin_user<-{_src}",
               f"INSERT INTO {schema}.node_admin_user BY NAME "
               f"SELECT logon_name, CAST(admin_id AS VARCHAR) AS admin_id, upper(admin_sid) AS admin_sid, "
-              f"display_name, distinguished_name, is_group, TRY_CAST(account_type AS INTEGER) AS account_type "
+              f"display_name, distinguished_name, is_group, TRY_CAST(account_type AS INTEGER) AS account_type, "
+              f"source_site AS source_site_code, created_by, created_date, last_modified_by, last_modified_date "
               f"FROM {schema}.{_src} WHERE logon_name IS NOT NULL")
     root = _root_code(con, schema)
     con.execute(
@@ -1228,7 +1624,13 @@ def _node_admin_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(logon_name) AS logon_name, any_value(admin_id) AS admin_id, "
         f"any_value(admin_sid) AS admin_sid, any_value(display_name) AS display_name, "
         f"any_value(distinguished_name) AS distinguished_name, bool_or(is_group) AS is_group, "
-        f"max(account_type) AS account_type, ? AS root_site_code "
+        f"max(account_type) AS account_type, "
+        f"any_value(source_site_code) AS source_site_code, "
+        f"any_value(created_by) AS created_by, "
+        f"any_value(created_date) AS created_date, "
+        f"any_value(last_modified_by) AS last_modified_by, "
+        f"any_value(last_modified_date) AS last_modified_date, "
+        f"? AS root_site_code "
         f"FROM {schema}.node_admin_user GROUP BY upper(logon_name)", [root])
     logger.info("node_admin_user built in schema %r", schema)
 
@@ -1236,21 +1638,40 @@ def _node_admin_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """One row per smsid from adminservice/wmi client_devices (real clients only:
     is_client AND NOT is_obsolete). possible/ad_domain_sid are placeholders for the
-    possible-client rows added in Task E2."""
+    possible-client rows added in Task E2.
+
+    Telemetry scalars added in Stage 3 C4 (CMBP parity):
+      ad_last_logon_time, ad_last_logon_user_domain, source_site_code (from brief)
+      last_active_time, last_online_time, last_offline_time (reclassified PORT-NOW by matrix)
+    SID resolution and collection lists are added by _enrich_client_device.
+    """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_client_device ("
         "smsid VARCHAR, name VARCHAR, site_code VARCHAR, resource_id_str VARCHAR, "
         "device_os VARCHAR, device_os_build VARCHAR, is_virtual_machine BOOLEAN, co_managed BOOLEAN, "
         "aad_device_id VARCHAR, aad_tenant_id VARCHAR, last_mp_server_name VARCHAR, "
         "primary_user_name VARCHAR, current_logon_user_name VARCHAR, ad_last_logon_user_name VARCHAR, "
+        "ad_last_logon_time VARCHAR, ad_last_logon_user_domain VARCHAR, source_site_code VARCHAR, "
+        "last_active_time VARCHAR, last_online_time VARCHAR, last_offline_time VARCHAR, "
         "possible BOOLEAN, ad_domain_sid VARCHAR)"
     )
-    _optional = {"name": "VARCHAR", "site_code": "VARCHAR", "resource_id": "BIGINT",
-                 "device_os": "VARCHAR", "device_os_build": "VARCHAR", "is_virtual_machine": "BOOLEAN",
-                 "co_managed": "BOOLEAN", "aad_device_id": "VARCHAR", "aad_tenant_id": "VARCHAR",
-                 "last_mp_server_name": "VARCHAR", "primary_user": "VARCHAR",
-                 "current_logon_user": "VARCHAR", "user_name": "VARCHAR",
-                 "is_client": "BOOLEAN", "is_obsolete": "BOOLEAN"}
+    _optional = {
+        "name": "VARCHAR", "site_code": "VARCHAR", "resource_id": "BIGINT",
+        "device_os": "VARCHAR", "device_os_build": "VARCHAR", "is_virtual_machine": "BOOLEAN",
+        "co_managed": "BOOLEAN", "aad_device_id": "VARCHAR", "aad_tenant_id": "VARCHAR",
+        "last_mp_server_name": "VARCHAR", "primary_user": "VARCHAR",
+        "current_logon_user": "VARCHAR", "user_name": "VARCHAR",
+        "is_client": "BOOLEAN", "is_obsolete": "BOOLEAN",
+        # Telemetry scalars (Stage 3 C4).
+        "ad_last_logon_time": "VARCHAR", "user_domain_name": "VARCHAR",
+        "source_site_code": "VARCHAR",
+        # dlt snake-cases ADLastLogonTime -> a_d_last_logon_time (collector fixes this
+        # back to ad_last_logon_time); CNLastOnlineTime -> c_n_last_online_time;
+        # CNLastOfflineTime -> c_n_last_offline_time; LastActiveTime -> last_active_time.
+        "last_active_time": "VARCHAR",
+        "c_n_last_online_time": "VARCHAR",
+        "c_n_last_offline_time": "VARCHAR",
+    }
     for _src in ("adminservice_client_devices", "wmi_client_devices"):
         _ensure_columns(con, schema, _src, _optional)
         _safe(con, f"node_client_device<-{_src}",
@@ -1261,6 +1682,9 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"device_os, device_os_build, is_virtual_machine, co_managed, aad_device_id, aad_tenant_id, "
               f"last_mp_server_name, primary_user AS primary_user_name, "
               f"current_logon_user AS current_logon_user_name, user_name AS ad_last_logon_user_name, "
+              f"ad_last_logon_time, user_domain_name AS ad_last_logon_user_domain, source_site_code, "
+              f"last_active_time, c_n_last_online_time AS last_online_time, "
+              f"c_n_last_offline_time AS last_offline_time, "
               f"false AS possible, NULL AS ad_domain_sid "
               f"FROM {schema}.{_src} "
               f"WHERE smsid IS NOT NULL AND coalesce(is_client, false) AND NOT coalesce(is_obsolete, false)")
@@ -1275,6 +1699,12 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(primary_user_name) AS primary_user_name, "
         f"any_value(current_logon_user_name) AS current_logon_user_name, "
         f"any_value(ad_last_logon_user_name) AS ad_last_logon_user_name, "
+        f"any_value(ad_last_logon_time) AS ad_last_logon_time, "
+        f"any_value(ad_last_logon_user_domain) AS ad_last_logon_user_domain, "
+        f"any_value(source_site_code) AS source_site_code, "
+        f"any_value(last_active_time) AS last_active_time, "
+        f"any_value(last_online_time) AS last_online_time, "
+        f"any_value(last_offline_time) AS last_offline_time, "
         f"bool_or(possible) AS possible, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
         f"FROM {schema}.node_client_device GROUP BY smsid", [root])
     logger.info("node_client_device built in schema %r", schema)
@@ -1427,7 +1857,7 @@ def _graph_edges_init(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     Always runs (even with no site/edge data) so convert can read the table."""
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges "
-        f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR)"
+        f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[])"
     )
 
 
@@ -1440,17 +1870,17 @@ def _edge_replication(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         con, "edge_replication",
         f"INSERT INTO {schema}.graph_edges BY NAME "
         f"SELECT child.site_code AS start_id, parent.site_code AS end_id, "
-        f"'{SCCM_ADMINS_REPLICATED_TO}' AS kind "
+        f"'{SCCM_ADMINS_REPLICATED_TO}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
         f"FROM {schema}.site_hierarchy child JOIN {schema}.site_hierarchy parent "
         f"  ON child.parent_site_code = parent.site_code "
         f"WHERE child.site_type = 2 AND parent.site_type = 4 "
         f"UNION ALL "
-        f"SELECT parent.site_code, child.site_code, '{SCCM_ADMINS_REPLICATED_TO}' "
+        f"SELECT parent.site_code, child.site_code, '{SCCM_ADMINS_REPLICATED_TO}', ['SCCM_Invoke-PostProcessing'] "
         f"FROM {schema}.site_hierarchy child JOIN {schema}.site_hierarchy parent "
         f"  ON child.parent_site_code = parent.site_code "
         f"WHERE child.site_type = 2 AND parent.site_type = 4 "
         f"UNION ALL "
-        f"SELECT parent.site_code, child.site_code, '{SCCM_ADMINS_REPLICATED_TO}' "
+        f"SELECT parent.site_code, child.site_code, '{SCCM_ADMINS_REPLICATED_TO}', ['SCCM_Invoke-PostProcessing'] "
         f"FROM {schema}.site_hierarchy child JOIN {schema}.site_hierarchy parent "
         f"  ON child.parent_site_code = parent.site_code "
         f"WHERE child.site_type = 1 AND parent.site_type = 2"
@@ -1474,12 +1904,17 @@ def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     root_lit = _root_code(con, schema) or ""
     start_expr = (f"upper(cm.collection_id) || '@{root_lit}'" if root_lit
                   else "upper(cm.collection_id)")
+    _src_tags = {
+        "adminservice_collection_members": "AdminService-SMS_FullCollectionMembership",
+        "wmi_collection_members": "WMI-SMS_FullCollectionMembership",
+    }
     for _src in ("adminservice_collection_members", "wmi_collection_members"):
         _ensure_columns(con, schema, _src, {"collection_id": "VARCHAR", "resource_id": "BIGINT", "site_code": "VARCHAR"})
+        _tag = _src_tags[_src]
         _safe(con, f"edge_has_member<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT {start_expr} AS start_id, coalesce(d.smsid, r.sid) AS end_id, "
-              f"'{SCCM_HAS_MEMBER}' AS kind "
+              f"'{SCCM_HAS_MEMBER}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} cm "
               f"LEFT JOIN {schema}.device_by_resourceid d "
               f"  ON d.resource_key = CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR) "
@@ -1497,12 +1932,17 @@ def _edge_is_mapped_to(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     from .kinds.edges import SCCM_IS_MAPPED_TO
     root_lit = _root_code(con, schema) or ""
     end_expr = (f"upper(a.logon_name) || '@{root_lit}'" if root_lit else "upper(a.logon_name)")
+    _src_tags = {
+        "adminservice_admins": "AdminService-SMS_Admin",
+        "wmi_admins": "WMI-SMS_Admin",
+    }
     for _src in ("adminservice_admins", "wmi_admins"):
         _ensure_columns(con, schema, _src, {"admin_sid": "VARCHAR", "logon_name": "VARCHAR"})
+        _tag = _src_tags[_src]
         _safe(con, f"edge_is_mapped_to<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT coalesce(upper(a.admin_sid), pbn.sid) AS start_id, {end_expr} AS end_id, "
-              f"'{SCCM_IS_MAPPED_TO}' AS kind "
+              f"'{SCCM_IS_MAPPED_TO}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} a "
               f"LEFT JOIN {schema}.principal_by_name pbn ON upper(trim(a.logon_name)) = upper(pbn.name) "
               f"WHERE a.logon_name IS NOT NULL AND coalesce(upper(a.admin_sid), pbn.sid) IS NOT NULL")
@@ -1526,10 +1966,15 @@ def _edge_is_assigned(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         return f"upper({col}) || '@{root_lit}'" if root_lit else f"upper({col})"
 
     start_expr = _id("a.logon_name")
+    _src_tags = {
+        "adminservice_admins": "AdminService-SMS_Admin",
+        "wmi_admins": "WMI-SMS_Admin",
+    }
     for _src in ("adminservice_admins", "wmi_admins"):
         _ensure_columns(con, schema, _src,
                         {"logon_name": "VARCHAR", "collection_names": "VARCHAR",
                          "role_names": "VARCHAR", "roles": "VARCHAR"})
+        _tag = _src_tags[_src]
 
         # --- Arm 1: AdminUser -> Collection (by name) ---
         # collection_names arrives as JSON-array text (e.g. '["All Systems","All Users"]')
@@ -1538,7 +1983,7 @@ def _edge_is_assigned(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _safe(con, f"edge_is_assigned_collection<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT {start_expr} AS start_id, {_id('cbn.collection_id')} AS end_id, "
-              f"'{SCCM_IS_ASSIGNED}' AS kind "
+              f"'{SCCM_IS_ASSIGNED}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} a, unnest({_arr('a.collection_names')}) AS t(cname) "
               f"JOIN {schema}.collection_by_name cbn ON upper(trim(t.cname)) = cbn.name "
               f"WHERE a.logon_name IS NOT NULL AND a.collection_names IS NOT NULL AND trim(t.cname) != ''")
@@ -1547,7 +1992,7 @@ def _edge_is_assigned(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _safe(con, f"edge_is_assigned_role_id<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT {start_expr} AS start_id, {_id('t.rid')} AS end_id, "
-              f"'{SCCM_IS_ASSIGNED}' AS kind "
+              f"'{SCCM_IS_ASSIGNED}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} a, unnest({_arr('a.roles')}) AS t(rid) "
               f"WHERE a.logon_name IS NOT NULL AND t.rid IS NOT NULL AND trim(t.rid) != ''")
 
@@ -1556,7 +2001,7 @@ def _edge_is_assigned(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _safe(con, f"edge_is_assigned_role_name<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT {start_expr} AS start_id, {_id('rbn.role_id')} AS end_id, "
-              f"'{SCCM_IS_ASSIGNED}' AS kind "
+              f"'{SCCM_IS_ASSIGNED}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} a, unnest({_arr('a.role_names')}) AS t(rname) "
               f"JOIN {schema}.role_by_name rbn ON upper(trim(t.rname)) = rbn.name "
               f"WHERE a.logon_name IS NOT NULL AND a.role_names IS NOT NULL AND trim(t.rname) != '' "
@@ -1581,7 +2026,8 @@ def _edge_has_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     ):
         _safe(con, f"edge_has_user<-{kind}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
-              f"SELECT cd.smsid AS start_id, pbn.sid AS end_id, '{kind}' AS kind "
+              f"SELECT cd.smsid AS start_id, pbn.sid AS end_id, '{kind}' AS kind, "
+              f"['AdminService-ClientDevices'] AS collection_source "
               f"FROM {schema}.node_client_device cd "
               f"JOIN {schema}.principal_by_name pbn ON upper(trim(cd.{col})) = upper(pbn.name) "
               f"WHERE cd.smsid IS NOT NULL AND cd.{col} IS NOT NULL AND trim(cd.{col}) != ''")
@@ -1592,7 +2038,13 @@ def _edge_member_of(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     unnest+resolve from _node_group; principal->group only (group->group nesting comes
     from a merged SharpHound collection, per the 2026-06-23 decision)."""
     from .kinds.edges import MEMBER_OF
-    # (source_table, apply_obsolete_filter): r_system rows carry obsolete; r_user does not.
+    # (source_table, apply_obsolete_filter, collection_source_tag)
+    _src_tags = {
+        "adminservice_r_system": "AdminService-SMS_R_System",
+        "wmi_r_system": "WMI-SMS_R_System",
+        "adminservice_r_user": "AdminService-SMS_R_User",
+        "wmi_r_user": "WMI-SMS_R_User",
+    }
     sources = (
         ("adminservice_r_system", True),
         ("wmi_r_system", True),
@@ -1603,9 +2055,11 @@ def _edge_member_of(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _ensure_columns(con, schema, _src, {"sid": "VARCHAR", "security_group_name": "VARCHAR", "obsolete": "BOOLEAN"})
         # Only r_system rows need the obsolete filter; r_user has no such column.
         obsolete_clause = " AND NOT coalesce(r.obsolete, false)" if drop_obsolete else ""
+        _tag = _src_tags[_src]
         _safe(con, f"edge_member_of<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
-              f"SELECT upper(r.sid) AS start_id, pbn.sid AS end_id, '{MEMBER_OF}' AS kind "
+              f"SELECT upper(r.sid) AS start_id, pbn.sid AS end_id, '{MEMBER_OF}' AS kind, "
+              f"['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} r, unnest({_arr('r.security_group_name')}) AS t(gname) "
               f"JOIN {schema}.principal_by_name pbn ON upper(trim(t.gname)) = upper(pbn.name) "
               f"WHERE r.sid IS NOT NULL AND t.gname IS NOT NULL AND trim(t.gname) != ''{obsolete_clause}")
@@ -1621,7 +2075,7 @@ def _edge_has_session(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     _safe(con, "edge_has_session<-remoteregistry_users",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"SELECT upper(host_object_sid) AS start_id, upper(object_sid) AS end_id, "
-          f"'{HAS_SESSION}' AS kind "
+          f"'{HAS_SESSION}' AS kind, ['RemoteRegistry-CurrentUser'] AS collection_source "
           f"FROM {schema}.remoteregistry_users "
           f"WHERE host_object_sid IS NOT NULL AND object_sid IS NOT NULL")
 
@@ -1629,13 +2083,19 @@ def _edge_has_session(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # network_os_path is like '\\SQL01.lab' -> strip leading backslashes, take the host
     # label before the first dot, lowercase; match node_computer by dnshostname or name.
     host_expr = "lower(split_part(ltrim(ss.network_os_path, '\\'), '.', 1))"
+    _src_tags = {
+        "adminservice_site_systems": "AdminService-SMS_SCI_SysResUse",
+        "wmi_site_systems": "WMI-SMS_SCI_SysResUse",
+    }
     for _src in ("adminservice_site_systems", "wmi_site_systems"):
         _ensure_columns(con, schema, _src, {"network_os_path": "VARCHAR", "sql_server_service_logon_account": "VARCHAR"})
+        _tag = _src_tags[_src]
         # Skip local accounts: anything without a backslash (no DOMAIN\ prefix),
         # plus the NT AUTHORITY\ virtual accounts that do contain a backslash.
         _safe(con, f"edge_has_session<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
-              f"SELECT nc.sid AS start_id, pbn.sid AS end_id, '{HAS_SESSION}' AS kind "
+              f"SELECT nc.sid AS start_id, pbn.sid AS end_id, '{HAS_SESSION}' AS kind, "
+              f"['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} ss "
               f"JOIN {schema}.node_computer nc "
               f"  ON lower(split_part(nc.dnshostname, '.', 1)) = {host_expr} "
@@ -1654,22 +2114,172 @@ def _edge_has_stored_account(con: duckdb.DuckDBPyConnection, schema: str) -> Non
     SCCM_Site node id); end = the reserved account's AD object_sid (resolved at
     collection). The User/Group node property stored_in_sccm_site is set in Stage 1."""
     from .kinds.edges import SCCM_HAS_STORED_ACCOUNT
+    _src_tags = {
+        "adminservice_reserved_accounts": "AdminService-SMS_SCI_Reserved",
+        "wmi_reserved_accounts": "WMI-SMS_SCI_Reserved",
+    }
     for _src in ("adminservice_reserved_accounts", "wmi_reserved_accounts"):
         _ensure_columns(con, schema, _src, {"site_code": "VARCHAR", "object_sid": "VARCHAR"})
+        _tag = _src_tags[_src]
         _safe(con, f"edge_has_stored_account<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT site_code AS start_id, upper(object_sid) AS end_id, "
-              f"'{SCCM_HAS_STORED_ACCOUNT}' AS kind "
+              f"'{SCCM_HAS_STORED_ACCOUNT}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} WHERE site_code IS NOT NULL AND object_sid IS NOT NULL")
 
 
+# Well-known security-role id -> the client-device edge kind it grants (CMBP ps1:1751-1797).
+_ROLE_EDGE_KIND = {
+    "SMS0001R": "SCCM_FullAdministrator",
+    "SMS0008R": "SCCM_ApplicationAuthor",
+    "SMS0009R": "SCCM_ApplicationAdministrator",
+    "SMS0006R": "SCCM_ComplianceSettingsManager",
+    "SMS000AR": "SCCM_OSDManager",
+    "SMS000ER": "SCCM_OperationsAdministrator",
+    "SMS000FR": "SCCM_SecurityAdministrator",
+}
+# Built-in roles CMBP knows but creates no client-device edge for (CMBP ps1:1803-1818).
+# Built-in roles CMBP knows but creates no client-device edge for (full built-in list
+# at CMBP ps1:1803-1810). NOTE the deliberate divergence: CMBP's runtime -notin array
+# (ps1:1811-1818) omits SMS0003R (Remote Tools Operator) — a CMBP oversight that makes it
+# spuriously log a "custom role" warning for that built-in. We include SMS0003R here (all 8
+# built-ins) so the custom-role skip warning fires only for genuinely custom roles.
+_ROLE_KNOWN_NO_EDGE = ("SMS0002R", "SMS0003R", "SMS0004R", "SMS0007R", "SMS000BR", "SMS000CR", "SMS000GR", "SMS000HR")
+
+
+def _edge_contains(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Site -> Collection/SecurityRole/AdminUser (CMBP ps1:1659-1690). Every
+    non-secondary site (site_type != 1) in the single hierarchy contains every
+    global object (all are @root). collection_source = SCCM_Invoke-PostProcessing."""
+    from .kinds.edges import SCCM_CONTAINS
+    nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
+              f"WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL)")
+    cs = "['SCCM_Invoke-PostProcessing']"
+    # -- Every non-secondary site contains every collection, security role, and admin user
+    # -- in the hierarchy (all @root).
+    _safe(con, "edge_contains",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT site.site_code AS start_id, collection.collection_id || '@' || collection.root_site_code AS end_id, "
+          f"'{SCCM_CONTAINS}' AS kind, {cs} AS collection_source "
+          f"FROM {nonsec} site JOIN {schema}.node_collection collection ON collection.root_site_code IS NOT NULL "
+          f"UNION ALL "
+          f"SELECT site.site_code, role.role_id || '@' || role.root_site_code, '{SCCM_CONTAINS}', {cs} "
+          f"FROM {nonsec} site JOIN {schema}.node_security_role role ON role.root_site_code IS NOT NULL "
+          f"UNION ALL "
+          f"SELECT site.site_code, upper(admin.logon_name) || '@' || admin.root_site_code, '{SCCM_CONTAINS}', {cs} "
+          f"FROM {nonsec} site JOIN {schema}.node_admin_user admin ON admin.root_site_code IS NOT NULL")
+
+
+def _edge_rbac_role_grants(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """The 7 RBAC role edges (AdminUser -> ClientDevice), reconstructed from graph_edges
+    (CMBP ps1:1714-1827). Path: IsAssigned(admin->role) JOIN IsAssigned(admin->Device-collection)
+    JOIN HasMember(collection->clientdevice). The role's well-known id picks the edge kind.
+    Custom (non-built-in) roles assigned to admins are counted and logged (CMBP ps1:1820)."""
+    role_map = ", ".join(f"('{rid}','{kind}')" for rid, kind in _ROLE_EDGE_KIND.items())
+    # -- Walk graph_edges: an admin --IsAssigned--> a security role, and the SAME admin
+    # -- --IsAssigned--> a Device-type collection, whose members --HasMember--> client devices.
+    # -- The role's well-known id selects the edge kind.
+    _safe(con, "edge_rbac_role_grants",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT admin_to_role.start_id AS start_id, collection_to_device.end_id AS end_id, role_edge_kind.edge_kind AS kind, "
+          f"['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM {schema}.graph_edges admin_to_role "
+          f"JOIN {schema}.node_security_role role "
+          f"  ON role.role_id || '@' || role.root_site_code = admin_to_role.end_id "
+          f"JOIN (VALUES {role_map}) AS role_edge_kind(role_id, edge_kind) ON upper(role.role_id) = role_edge_kind.role_id "
+          f"JOIN {schema}.graph_edges admin_to_collection "
+          f"  ON admin_to_collection.start_id = admin_to_role.start_id AND admin_to_collection.kind = 'SCCM_IsAssigned' "
+          f"JOIN {schema}.node_collection device_collection "
+          f"  ON device_collection.collection_id || '@' || device_collection.root_site_code = admin_to_collection.end_id AND device_collection.collection_type = 2 "
+          f"JOIN {schema}.graph_edges collection_to_device "
+          f"  ON collection_to_device.start_id = admin_to_collection.end_id AND collection_to_device.kind = 'SCCM_HasMember' "
+          f"JOIN {schema}.node_client_device client_device ON client_device.smsid = collection_to_device.end_id "
+          f"WHERE admin_to_role.kind = 'SCCM_IsAssigned'")
+    # Diagnostic: count custom roles assigned to admins that produce no device edge (CMBP warns per role).
+    skip_list = ", ".join(f"'{r}'" for r in (*_ROLE_EDGE_KIND, *_ROLE_KNOWN_NO_EDGE))
+    try:
+        cnt = con.execute(
+            f"SELECT count(DISTINCT role.role_id) FROM {schema}.graph_edges admin_to_role "
+            f"JOIN {schema}.node_security_role role ON role.role_id || '@' || role.root_site_code = admin_to_role.end_id "
+            f"WHERE admin_to_role.kind = 'SCCM_IsAssigned' AND upper(role.role_id) NOT IN ({skip_list})"
+        ).fetchone()[0]
+    except duckdb.Error as err:
+        logger.warning("edge_rbac_role_grants: custom-role audit query failed: %s", err)
+        cnt = 0
+    if cnt:
+        logger.warning("edge_rbac_role_grants: %d custom security role(s) assigned to admins have no "
+                       "traversable client-device edge (matches CMBP skip behaviour)", cnt)
+    else:
+        logger.debug("edge_rbac_role_grants: no custom roles to skip")
+
+
+def _edge_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """AdminUser -> Site SCCM_AllPermissions (CMBP ps1:1730-1837): Full Administrator
+    (SMS0001R) AND assigned BOTH SMS00001 (All Systems) and SMS00004 (All Users and User
+    Groups) -> every non-secondary site. Detection by well-known collection id (Decision #2;
+    CMBP matched display name 'All Systems'/'All Users and User Groups')."""
+    from .kinds.edges import SCCM_ALL_PERMISSIONS
+    nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
+              f"WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL)")
+    # -- An admin --IsAssigned--> the Full Administrator role (SMS0001R) AND
+    # -- --IsAssigned--> BOTH the All Systems (SMS00001) and All Users and User Groups
+    # -- (SMS00004) collections -> grant SCCM_AllPermissions to every non-secondary site.
+    _safe(con, "edge_all_permissions",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT admin_to_full_admin_role.start_id AS start_id, site.site_code AS end_id, "
+          f"'{SCCM_ALL_PERMISSIONS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM {schema}.graph_edges admin_to_full_admin_role "
+          f"JOIN {schema}.node_security_role full_admin_role "
+          f"  ON full_admin_role.role_id || '@' || full_admin_role.root_site_code = admin_to_full_admin_role.end_id AND upper(full_admin_role.role_id) = 'SMS0001R' "
+          f"JOIN {schema}.graph_edges admin_to_all_systems ON admin_to_all_systems.start_id = admin_to_full_admin_role.start_id AND admin_to_all_systems.kind = 'SCCM_IsAssigned' "
+          f"JOIN {schema}.node_collection all_systems_collection "
+          f"  ON all_systems_collection.collection_id || '@' || all_systems_collection.root_site_code = admin_to_all_systems.end_id AND upper(all_systems_collection.collection_id) = 'SMS00001' "
+          f"JOIN {schema}.graph_edges admin_to_all_users ON admin_to_all_users.start_id = admin_to_full_admin_role.start_id AND admin_to_all_users.kind = 'SCCM_IsAssigned' "
+          f"JOIN {schema}.node_collection all_users_collection "
+          f"  ON all_users_collection.collection_id || '@' || all_users_collection.root_site_code = admin_to_all_users.end_id AND upper(all_users_collection.collection_id) = 'SMS00004' "
+          f"CROSS JOIN {nonsec} site "
+          f"WHERE admin_to_full_admin_role.kind = 'SCCM_IsAssigned'")
+
+
+def _edge_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Computer(SMS Provider) -> Site SCCM_AssignAllPermissions (CMBP ps1:1932-1940).
+
+    Any computer whose site_system_roles contains an 'SMS Provider' entry gets an
+    SCCM_AssignAllPermissions edge to every non-secondary site in the single hierarchy.
+    start = computer SID (the Computer node id); end = non-secondary site_code.
+    """
+    from .kinds.edges import SCCM_ASSIGN_ALL_PERMISSIONS
+    nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
+              f"WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL)")
+    # -- Any computer whose site_system_roles include 'SMS Provider' ->
+    # -- SCCM_AssignAllPermissions to every non-secondary site.
+    _safe(con, "edge_assign_all_permissions",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT computer.sid AS start_id, site.site_code AS end_id, "
+          f"'{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM {schema}.node_computer computer "
+          f"CROSS JOIN {nonsec} site "
+          f"WHERE computer.sid IS NOT NULL "
+          f"  AND len(list_filter(computer.site_system_roles, x -> x LIKE '%SMS Provider%')) > 0")
+
+
 def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Collapse duplicate (start_id, end_id, kind) rows. They arise when both the
-    adminservice and wmi sources contribute the same edge, or when name fan-out matches
-    the same id twice. CMBP's Upsert-Edge dedupes; we do it once after all edge builders."""
+    """Collapse duplicate (start_id, end_id, kind) rows into one row per unique triple.
+
+    Duplicates arise when both the adminservice and wmi sources contribute the same
+    edge, or when name fan-out (collection_by_name, role_by_name) matches the same
+    id twice. CMBP's Upsert-Edge dedupes at insert time; we do it once here after all
+    edge builders have run.
+
+    collection_source tags from all duplicate rows are merged into one distinct list
+    (same array-union idiom as site_system_roles in _node_computer).
+    """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges AS "
-        f"SELECT DISTINCT start_id, end_id, kind FROM {schema}.graph_edges"
+        f"SELECT start_id, end_id, kind, "
+        f"  coalesce(list_distinct(flatten(list(collection_source))), CAST([] AS VARCHAR[])) AS collection_source "
+        f"FROM {schema}.graph_edges "
+        f"GROUP BY start_id, end_id, kind"
     )
     logger.info("graph_edges deduplicated in schema %r", schema)
 
@@ -1684,7 +2294,9 @@ def _edge_has_client(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     _safe(
         con, "edge_has_client",
         f"INSERT INTO {schema}.graph_edges BY NAME "
-        f"SELECT site_code AS start_id, smsid AS end_id, '{SCCM_HAS_CLIENT}' AS kind "
+        f"SELECT site_code AS start_id, smsid AS end_id, '{SCCM_HAS_CLIENT}' AS kind, "
+        f"CASE WHEN coalesce(possible, false) THEN ['LDAP-CmRcService'] "
+        f"     ELSE ['AdminService-ClientDevices'] END AS collection_source "
         f"FROM {schema}.node_client_device "
         f"WHERE site_code IS NOT NULL AND smsid IS NOT NULL"
     )
@@ -1745,6 +2357,14 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _device_by_resourceid(con, schema)
     _collection_by_name(con, schema)
     _role_by_name(con, schema)
+    # Relationship-list enrichment: add denormalised list columns to node_* tables.
+    # These run after all _node_* builders and lookup tables but before edge builders,
+    # so edge builders see the fully-enriched node tables.
+    _enrich_collection_members(con, schema)
+    _enrich_role_members(con, schema)
+    _enrich_admin_assignments(con, schema)
+    _enrich_client_device(con, schema)
+    _enrich_site_lists(con, schema)
     # _graph_edges_init must run before all edge builders; _edge_replication and future
     # edge builders all INSERT into the table created here.
     _graph_edges_init(con, schema)
@@ -1757,6 +2377,10 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _edge_member_of(con, schema)
     _edge_has_session(con, schema)
     _edge_has_stored_account(con, schema)
+    _edge_contains(con, schema)
+    _edge_rbac_role_grants(con, schema)
+    _edge_all_permissions(con, schema)
+    _edge_assign_all_permissions(con, schema)
     # Dedup after all edge builders: both adminservice and wmi sources can contribute the
     # same edge, and name fan-out (collection_by_name, role_by_name) can match the same
     # id twice. CMBP's Upsert-Edge dedupes at insert time; we do it once here.

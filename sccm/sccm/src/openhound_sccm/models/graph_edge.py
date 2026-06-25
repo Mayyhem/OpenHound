@@ -28,6 +28,7 @@ class GraphEdge(BaseAsset):
     start_id: str | None = None
     end_id: str | None = None
     kind: str | None = None
+    collection_source: list[str] | None = None
 
     @property
     def as_node(self) -> None:
@@ -51,5 +52,8 @@ class GraphEdge(BaseAsset):
             kind=self.kind,
             start=EdgePath(match_by="id", value=self.start_id),
             end=EdgePath(match_by="id", value=self.end_id),
-            properties=SCCMEdgeProperties(traversable=self.kind in TRAVERSABLE_EDGE_KINDS),
+            properties=SCCMEdgeProperties(
+                traversable=self.kind in TRAVERSABLE_EDGE_KINDS,
+                collection_source=self.collection_source or [],
+            ),
         )

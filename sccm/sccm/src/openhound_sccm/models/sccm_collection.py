@@ -8,7 +8,7 @@ SCCM_Collection node with id = '<COLLECTION_ID>@<root_site_code>'.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, SCCMCollectionProperties
 from ..kinds import nodes as nk
@@ -41,6 +41,10 @@ class SCCMCollection(BaseAsset):
     limit_to_collection_name: str | None = None
     collection_variables_count: int | None = None
     root_site_code: str | None = None
+    source_site_code: str | None = None
+    last_change_time: str | None = None
+    last_member_change_time: str | None = None
+    members: list[str] = Field(default_factory=list)
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -70,6 +74,10 @@ class SCCMCollection(BaseAsset):
                 limit_to_collection_name=self.limit_to_collection_name,
                 collection_variables_count=self.collection_variables_count,
                 root_site_code=self.root_site_code,
+                source_site_code=self.source_site_code,
+                last_change_time=self.last_change_time,
+                last_member_change_time=self.last_member_change_time,
+                members=list(self.members or []),
             ),
         )
 

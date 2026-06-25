@@ -15,3 +15,15 @@ def test_graph_edge_non_traversable_kind():
 
 def test_graph_edge_drops_incomplete_row():
     assert list(GraphEdge(start_id="A", end_id=None, kind="MemberOf").edges) == []
+
+
+def test_graph_edge_carries_collection_source():
+    e = list(GraphEdge(start_id="A", end_id="B", kind="SCCM_HasClient",
+                       collection_source=["AdminService-ClientDevices"]).edges)[0]
+    assert e.properties.collection_source == ["AdminService-ClientDevices"]
+    assert e.properties.traversable is True
+
+
+def test_graph_edge_collection_source_defaults_empty():
+    e = list(GraphEdge(start_id="A", end_id="B", kind="MemberOf").edges)[0]
+    assert e.properties.collection_source == []

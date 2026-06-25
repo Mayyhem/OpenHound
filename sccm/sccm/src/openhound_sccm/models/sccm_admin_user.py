@@ -11,7 +11,7 @@ the original case, matching the casing rule in the node_admin_user coalesce.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, SCCMAdminUserProperties
 from ..kinds import nodes as nk
@@ -37,6 +37,16 @@ class SCCMAdminUser(BaseAsset):
     is_group: bool | None = None
     account_type: int | None = None
     root_site_code: str | None = None
+    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3).
+    source_site_code: str | None = None
+    created_by: str | None = None
+    created_date: str | None = None
+    last_modified_by: str | None = None
+    last_modified_date: str | None = None
+    # Assignment lists added by _enrich_admin_assignments.
+    collection_ids: list[str] = Field(default_factory=list)
+    role_ids: list[str] = Field(default_factory=list)
+    member_of: list[str] = Field(default_factory=list)
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -64,6 +74,15 @@ class SCCMAdminUser(BaseAsset):
                 is_group=self.is_group,
                 account_type=self.account_type,
                 root_site_code=self.root_site_code,
+                display_name=self.display_name,
+                source_site_code=self.source_site_code,
+                created_by=self.created_by,
+                created_date=self.created_date,
+                last_modified_by=self.last_modified_by,
+                last_modified_date=self.last_modified_date,
+                collection_ids=list(self.collection_ids),
+                role_ids=list(self.role_ids),
+                member_of=list(self.member_of),
             ),
         )
 

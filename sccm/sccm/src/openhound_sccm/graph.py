@@ -67,6 +67,9 @@ class ComputerProperties(NodeProperties):
     sccm_infra: bool = field(default=False, kw_only=True)
     sccm_resource_ids: list[str] = field(default_factory=list, kw_only=True)
     sccm_client_device_identifier: str | None = field(default=None, kw_only=True)
+    dnshostname: str | None = field(default=None, kw_only=True)
+    sam_account_name: str | None = field(default=None, kw_only=True)
+    distinguished_name: str | None = field(default=None, kw_only=True)
     smb_signing_required: bool | None = field(default=None, kw_only=True)
     sccm_has_client_remote_control_spn: bool = field(default=False, kw_only=True)
     network_boot_server: bool = field(default=False, kw_only=True)
@@ -83,6 +86,8 @@ class UserProperties(NodeProperties):
     sccm_resource_ids: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=False, kw_only=True)
     stored_in_sccm_site: str | None = field(default=None, kw_only=True)
+    distinguished_name: str | None = field(default=None, kw_only=True)
+    user_principal_name: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -106,6 +111,12 @@ class SCCMSiteProperties(NodeProperties):
     version: str | None = field(default=None, kw_only=True)
     build_number: str | None = field(default=None, kw_only=True)
     install_dir: str | None = field(default=None, kw_only=True)
+    # Stage 3 C5 additions — CMBP parity.
+    sql_service_account_name: str | None = field(default=None, kw_only=True)
+    distinguished_name: str | None = field(default=None, kw_only=True)
+    source_forest: str | None = field(default=None, kw_only=True)
+    admin_users: list[str] = field(default_factory=list, kw_only=True)
+    stored_accounts: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
 
 
@@ -121,6 +132,10 @@ class SCCMCollectionProperties(NodeProperties):
     limit_to_collection_name: str | None = field(default=None, kw_only=True)
     collection_variables_count: int | None = field(default=None, kw_only=True)
     root_site_code: str | None = field(default=None, kw_only=True)
+    source_site_code: str | None = field(default=None, kw_only=True)
+    last_change_time: str | None = field(default=None, kw_only=True)
+    last_member_change_time: str | None = field(default=None, kw_only=True)
+    members: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
 
 
@@ -133,6 +148,17 @@ class SCCMAdminUserProperties(NodeProperties):
     is_group: bool | None = field(default=None, kw_only=True)
     account_type: int | None = field(default=None, kw_only=True)
     root_site_code: str | None = field(default=None, kw_only=True)
+    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3).
+    display_name: str | None = field(default=None, kw_only=True)
+    source_site_code: str | None = field(default=None, kw_only=True)
+    created_by: str | None = field(default=None, kw_only=True)
+    created_date: str | None = field(default=None, kw_only=True)
+    last_modified_by: str | None = field(default=None, kw_only=True)
+    last_modified_date: str | None = field(default=None, kw_only=True)
+    # Assignment lists: raw role ids, resolved role node ids, resolved collection node ids.
+    collection_ids: list[str] = field(default_factory=list, kw_only=True)
+    role_ids: list[str] = field(default_factory=list, kw_only=True)
+    member_of: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
 
 
@@ -148,6 +174,14 @@ class SCCMSecurityRoleProperties(NodeProperties):
     number_of_admins: int | None = field(default=None, kw_only=True)
     operations: list[str] = field(default_factory=list, kw_only=True)
     root_site_code: str | None = field(default=None, kw_only=True)
+    # Audit fields from ROLE_COLUMNS (CMBP parity, Stage 3 C2).
+    site_code: str | None = field(default=None, kw_only=True)
+    created_by: str | None = field(default=None, kw_only=True)
+    created_date: str | None = field(default=None, kw_only=True)
+    last_modified_by: str | None = field(default=None, kw_only=True)
+    last_modified_date: str | None = field(default=None, kw_only=True)
+    # Members: upper(logon_name)@root for each admin assigned to this role.
+    members: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=True, kw_only=True)
 
 
@@ -170,4 +204,19 @@ class SCCMClientDeviceProperties(NodeProperties):
     root_site_code: str | None = field(default=None, kw_only=True)
     possible: bool = field(default=False, kw_only=True)
     sccm_ad_domain_sid: str | None = field(default=None, kw_only=True)
+    # Telemetry scalars — Stage 3 C4 (CMBP parity).
+    ad_last_logon_time: str | None = field(default=None, kw_only=True)
+    ad_last_logon_user_domain: str | None = field(default=None, kw_only=True)
+    source_site_code: str | None = field(default=None, kw_only=True)
+    last_active_time: str | None = field(default=None, kw_only=True)
+    last_online_time: str | None = field(default=None, kw_only=True)
+    last_offline_time: str | None = field(default=None, kw_only=True)
+    # Resolved SID fields — Stage 3 C4 (CMBP ps1:7227/7232/7245/7248).
+    primary_user_sid: str | None = field(default=None, kw_only=True)
+    current_logon_user_sid: str | None = field(default=None, kw_only=True)
+    ad_last_logon_user_sid: str | None = field(default=None, kw_only=True)
+    last_reported_mp_server_sid: str | None = field(default=None, kw_only=True)
+    # Collection membership lists — Stage 3 C4 (CMBP ps1:7228-7229).
+    collection_ids: list[str] = field(default_factory=list, kw_only=True)
+    collection_names: list[str] = field(default_factory=list, kw_only=True)
     sccm_infra: bool = field(default=False, kw_only=True)

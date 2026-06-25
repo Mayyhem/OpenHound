@@ -10,7 +10,7 @@ added in Task E2.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, SCCMClientDeviceProperties
 from ..kinds import nodes as nk
@@ -45,6 +45,21 @@ class SCCMClientDevice(BaseAsset):
     root_site_code: str | None = None
     possible: bool = False
     ad_domain_sid: str | None = None
+    # Telemetry scalars — Stage 3 C4 (CMBP parity).
+    ad_last_logon_time: str | None = None
+    ad_last_logon_user_domain: str | None = None
+    source_site_code: str | None = None
+    last_active_time: str | None = None
+    last_online_time: str | None = None
+    last_offline_time: str | None = None
+    # Resolved SID fields — Stage 3 C4 (CMBP ps1:7227/7232/7245/7248).
+    primary_user_sid: str | None = None
+    current_logon_user_sid: str | None = None
+    ad_last_logon_user_sid: str | None = None
+    last_reported_mp_server_sid: str | None = None
+    # Collection membership lists — Stage 3 C4 (CMBP ps1:7228-7229).
+    collection_ids: list[str] = Field(default_factory=list)
+    collection_names: list[str] = Field(default_factory=list)
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -80,6 +95,21 @@ class SCCMClientDevice(BaseAsset):
                 root_site_code=self.root_site_code,
                 possible=self.possible,
                 sccm_ad_domain_sid=self.ad_domain_sid,
+                # Telemetry scalars (Stage 3 C4).
+                ad_last_logon_time=self.ad_last_logon_time,
+                ad_last_logon_user_domain=self.ad_last_logon_user_domain,
+                source_site_code=self.source_site_code,
+                last_active_time=self.last_active_time,
+                last_online_time=self.last_online_time,
+                last_offline_time=self.last_offline_time,
+                # Resolved SIDs (Stage 3 C4).
+                primary_user_sid=self.primary_user_sid,
+                current_logon_user_sid=self.current_logon_user_sid,
+                ad_last_logon_user_sid=self.ad_last_logon_user_sid,
+                last_reported_mp_server_sid=self.last_reported_mp_server_sid,
+                # Collection membership lists (Stage 3 C4).
+                collection_ids=self.collection_ids or [],
+                collection_names=self.collection_names or [],
             ),
         )
 

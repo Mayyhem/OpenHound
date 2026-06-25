@@ -83,3 +83,51 @@ def test_sccm_site_build_number_and_install_dir_emitted():
     node = SCCMSite(**row).as_node
     assert node.properties.build_number == "9107"
     assert node.properties.install_dir == r"C:\Program Files\Microsoft Configuration Manager"
+
+
+def test_sccm_site_sql_service_account_name_emitted():
+    """sql_service_account_name is passed through to node properties."""
+    row = {
+        "site_code": "CAS",
+        "root_site_code": "CAS",
+        "site_type": 4,
+        "sql_service_account_name": "MAYYHEM\\sqlsvc",
+    }
+    node = SCCMSite(**row).as_node
+    assert node.properties.sql_service_account_name == "MAYYHEM\\sqlsvc"
+
+
+def test_sccm_site_admin_users_and_stored_accounts_emitted():
+    """admin_users and stored_accounts lists are passed through to node properties."""
+    row = {
+        "site_code": "CAS",
+        "root_site_code": "CAS",
+        "site_type": 4,
+        "admin_users": ["MAYYHEM\\ADM@CAS"],
+        "stored_accounts": ["S-1-5-21-1-2-3-1300"],
+    }
+    node = SCCMSite(**row).as_node
+    assert node.properties.admin_users == ["MAYYHEM\\ADM@CAS"]
+    assert node.properties.stored_accounts == ["S-1-5-21-1-2-3-1300"]
+
+
+def test_sccm_site_admin_users_defaults_to_empty_list():
+    """admin_users defaults to [] when absent from the DB row."""
+    row = {"site_code": "CAS", "root_site_code": "CAS", "site_type": 4}
+    node = SCCMSite(**row).as_node
+    assert node.properties.admin_users == []
+    assert node.properties.stored_accounts == []
+
+
+def test_sccm_site_distinguished_name_and_source_forest_emitted():
+    """distinguished_name and source_forest from ldap_sites are passed through."""
+    row = {
+        "site_code": "CAS",
+        "root_site_code": "CAS",
+        "site_type": 4,
+        "distinguished_name": "CN=CAS,CN=SMS-Site-CAS,CN=System,DC=lab,DC=local",
+        "source_forest": "lab.local",
+    }
+    node = SCCMSite(**row).as_node
+    assert node.properties.distinguished_name == "CN=CAS,CN=SMS-Site-CAS,CN=System,DC=lab,DC=local"
+    assert node.properties.source_forest == "lab.local"

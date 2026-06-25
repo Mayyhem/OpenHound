@@ -14,7 +14,7 @@ fallback_domain_sid. If no fallback is available, the node is dropped.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import GroupProperties, SCCMNode, domain_environment_id
 from ..kinds import nodes as nk
@@ -35,7 +35,7 @@ class GroupNode(BaseAsset):
     sid: str | None = None
     name: str | None = None
     sccm_infra: bool = False
-    sccm_resource_ids: list[str] = []
+    sccm_resource_ids: list[str] = Field(default_factory=list)
     # A co-occurring domain SID used to qualify builtin/well-known SIDs that
     # have no domain part of their own. Populated by the _node_group coalesce
     # when a domain SID from a co-occurring device/user is available.

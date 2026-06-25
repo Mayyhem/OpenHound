@@ -8,7 +8,7 @@ SCCM_SecurityRole node with id = '<ROLE_ID>@<root_site_code>'.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, SCCMSecurityRoleProperties
 from ..kinds import nodes as nk
@@ -33,8 +33,16 @@ class SCCMSecurityRole(BaseAsset):
     is_sec_admin_role: bool | None = None
     copied_from_id: str | None = None
     number_of_admins: int | None = None
-    operations: list[str] = []
+    operations: list[str] = Field(default_factory=list)
     root_site_code: str | None = None
+    # Audit fields from ROLE_COLUMNS (CMBP parity, Stage 3 C2).
+    site_code: str | None = None
+    created_by: str | None = None
+    created_date: str | None = None
+    last_modified_by: str | None = None
+    last_modified_date: str | None = None
+    # Members: upper(logon_name)@root for each admin assigned to this role.
+    members: list[str] = Field(default_factory=list)
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -64,6 +72,12 @@ class SCCMSecurityRole(BaseAsset):
                 number_of_admins=self.number_of_admins,
                 operations=list(self.operations or []),
                 root_site_code=self.root_site_code,
+                site_code=self.site_code,
+                created_by=self.created_by,
+                created_date=self.created_date,
+                last_modified_by=self.last_modified_by,
+                last_modified_date=self.last_modified_date,
+                members=list(self.members or []),
             ),
         )
 

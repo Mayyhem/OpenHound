@@ -97,3 +97,49 @@ def test_node_user_uppercases_sid():
     transforms(con)
     rows = con.execute("SELECT sid FROM sccm.node_user").fetchall()
     assert rows == [("S-1-5-21-1-2-3-1200",)]
+
+
+def test_node_user_carries_ad_attrs():
+    """adminservice_r_user rows with distinguished_name and user_principal_name
+    must surface those columns in node_user after the coalesce."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_r_user AS SELECT "
+        "'S-1-5-21-1-2-3-1200' AS sid, 'alice' AS name, "
+        "5 AS resource_id, 'CAS' AS source_site_code, "
+        "'CN=alice,DC=lab' AS distinguished_name, 'alice@lab' AS user_principal_name"
+    )
+    transforms(con)
+    r = con.execute(
+        "SELECT distinguished_name, user_principal_name FROM sccm.node_user "
+        "WHERE sid='S-1-5-21-1-2-3-1200'"
+    ).fetchone()
+    assert r == ("CN=alice,DC=lab", "alice@lab")
+
+
+def test_node_user_ad_attrs_any_value_coalesce():
+    """When both adminservice_r_user and wmi_r_user have the same SID,
+    any_value picks one non-null distinguished_name (idempotent)."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_r_user AS SELECT "
+        "'S-1-5-21-1-2-3-1300' AS sid, 'carol' AS name, "
+        "6 AS resource_id, 'PS1' AS source_site_code, "
+        "'CN=carol,DC=lab' AS distinguished_name, 'carol@lab' AS user_principal_name"
+    )
+    con.execute(
+        "CREATE TABLE sccm.wmi_r_user AS SELECT "
+        "'S-1-5-21-1-2-3-1300' AS sid, 'carol' AS name, "
+        "6 AS resource_id, 'PS1' AS source_site_code, "
+        "'CN=carol,DC=lab' AS distinguished_name, 'carol@lab' AS user_principal_name"
+    )
+    transforms(con)
+    rows = con.execute("SELECT sid FROM sccm.node_user").fetchall()
+    assert len(rows) == 1
+    r = con.execute(
+        "SELECT distinguished_name, user_principal_name FROM sccm.node_user "
+        "WHERE sid='S-1-5-21-1-2-3-1300'"
+    ).fetchone()
+    assert r == ("CN=carol,DC=lab", "carol@lab")

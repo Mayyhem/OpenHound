@@ -232,8 +232,12 @@ or **post-proc** (`Invoke-PostProcessing` :1577-1984). Every item maps to a port
        and log the count.
    - **Lookups**: `principal_by_name`, `resource_to_sid`, `device_by_resourceid`, `site_root`,
      `sites_in_hierarchy`.
-   - **Derived edges**: build `graph_edges(start_id, end_id, kind, properties)` by `UNION`-ing the
-     per-edge-kind SELECTs (CMBP post-processing :1577-1984 + the inline edge logic).
+   - **Derived edges**: build `graph_edges(start_id, end_id, kind, collection_source)` by `UNION`-ing the
+     per-edge-kind SELECTs (CMBP post-processing :1577-1984 + the inline edge logic). *Schema note:*
+     Stage 2 reduced this to 3-col `(start_id, end_id, kind)` (its Task-C0 note dropped a free-form
+     `properties JSON` column — DuckDB returns JSON as a *string*, breaking a `dict` read). **Stage 3
+     re-introduces a typed `collection_source VARCHAR[]`** column (not JSON) so edge entity panels are
+     populated; the dedup pass array-unions it (`GROUP BY start_id,end_id,kind`).
    - **No writeback.** Everything stays in the lookup DuckDB.
 
 ### Convert (`convert_pipeline.py` + `models/*` + `main.py`)
@@ -367,13 +371,68 @@ openhound convert sccm <raw>/sccm <graph> --lookup-file <raw>/lookup.duckdb
   - **One collect change beyond settings:** stamp the host computer SID onto the `remoteregistry_users` current-user
     row so `HasSession` has a start endpoint ([registry.py:471-483](../../src/openhound_sccm/collectors/registry.py#L471-L483)).
 
-### Stage 3 — Containment + RBAC fan-out
+### Stage 3 — Containment + RBAC fan-out **+ full node/edge property parity**
 - **PS1:** `SCCM_Contains` :1659-1690; role fan-out + role-kind mapping :1714-1827; `SCCM_AllPermissions`
-  :1730-1837; `SCCM_AssignAllPermissions` (SMS Provider) :1932-1940.
-- **Do:** derived tables `contains`, `rbac_grants` (role→admin→collection→device, edge-kind column),
-  `assign_all_permissions`; append to `graph_edges`.
+  :1730-1837; `SCCM_AssignAllPermissions` (SMS Provider) :1932-1940. Node-property sources: every
+  `Upsert-Node` call per kind (Collection :7532/7605; SecurityRole :7700; AdminUser :7771; ClientDevice
+  :7220; base AD nodes enriched at 45+ sites via `-PSObject`).
+- **Do (the 10 edges):** four edge builders appended to `graph_edges` —
+  - `_edge_contains` — non-secondary sites × {collections, roles, admin users} (all `@root`).
+  - `_edge_rbac_role_grants` — the 7 role edges (AdminUser→ClientDevice), reconstructed by joining the
+    Stage-2 `graph_edges` rows: `SCCM_IsAssigned`(admin→role) ⋈ `SCCM_IsAssigned`(admin→Device-type
+    collection) ⋈ `SCCM_HasMember`(collection→ClientDevice), with a fixed role-id→edge-kind map
+    (`SMS0001R`→FullAdministrator, `SMS0008R`→ApplicationAuthor, `SMS0009R`→ApplicationAdministrator,
+    `SMS0006R`→ComplianceSettingsManager, `SMS000AR`→OSDManager, `SMS000ER`→OperationsAdministrator,
+    `SMS000FR`→SecurityAdministrator). Logs a count of skipped custom roles.
+  - `_edge_all_permissions` — Full Administrator (`SMS0001R`) **and** assigned both `SMS00001` (All
+    Systems) **and** `SMS00004` (All Users and User Groups) → every non-secondary site.
+  - `_edge_assign_all_permissions` — Computer whose `site_system_roles` contains `%SMS Provider%` →
+    every non-secondary site.
 - **Validate:** the 7 role edges + AllPermissions + AssignAllPermissions appear; pick a Full
-  Administrator and confirm `SCCM_FullAdministrator` reaches the expected devices.
+  Administrator and confirm `SCCM_FullAdministrator` reaches the expected devices; every edge carries a
+  non-empty `collection_source`; entity panels show the ported node properties.
+
+**Resolved 2026-06-24 (grilled with the user; gtk `ope-1950`; implementation plan
+[`../plans/2026-06-24-sccm-preproc-convert-stage3.md`](../plans/2026-06-24-sccm-preproc-convert-stage3.md)):**
+Stage 3 expanded well beyond the original "10 edges" into a **node/edge property-parity pass** so
+BloodHound entity panels are fully populated. Three workstreams under one stage:
+
+- **WS-1 — Edge-property infrastructure (cross-cutting, retrofits Stage 1/2 edges):** re-introduce a
+  **typed `collection_source VARCHAR[]`** column on `graph_edges` (Stage 2's Task-C0 note had dropped the
+  free-form `properties JSON` column because DuckDB returns JSON as a *string*; a typed array column
+  avoids that bug). Every existing edge builder is tagged with its CMBP `collectionSource`; `_graph_edges_dedup`
+  changes from `SELECT DISTINCT` to `GROUP BY start_id,end_id,kind` with
+  `list_distinct(flatten(list(collection_source)))`; `GraphEdge` emits it via the existing
+  `SCCMEdgeProperties.collection_source` (already supported — only the table had stopped carrying it).
+  Future richer edge props (e.g. Stage 6 EPA status) get their own typed columns.
+- **WS-2 — The 10 Stage-3 edges** (above). `TRAVERSABLE_EDGE_KINDS` is already correct (only
+  `SCCM_FullAdministrator` + `SCCM_ApplicationAdministrator` traversable among the 7 role edges, per
+  CMBP :2216-2249); ~10 new kind constants added to `kinds/edges.py`.
+- **WS-3 — Node property parity (the bulk):** port **every** CMBP node property — including ones a
+  traversable edge already encodes — for the **8 node kinds that exist today** (Computer, User, Group,
+  Site, Collection, SecurityRole, AdminUser, ClientDevice). `MSSQL_*` parity is **deferred to Stage 5**
+  (those node tables don't exist until then; Stage 5 builds them with full parity from birth — no
+  retrofit). The plan's **first task is a systematic CMBP→port property matrix** (one pass over all
+  `Upsert-Node` calls per kind) producing the authoritative gap checklist. Relationship-list properties
+  (`collection.members`, `role.members`, `admin.collection_ids/member_of/role_ids`,
+  `site.admin_users/site_system_roles`, `clientdevice.collection_ids/collection_names`) are built **in the
+  preproc node coalesces from the raw source tables** and kept **raw/faithful to CMBP** — unresolved
+  resource keys and built-in pseudo-resources **included** (e.g. `collection.members` = the literal
+  `ResourceID@SiteCode` list). **No edge→node aggregation** — `graph_edges` stays the resolved/traversable
+  representation; the node panels carry CMBP's raw lists. Scalars/timestamps/audit fields and resolved
+  `*_sid` fields (via `principal_by_name`) fill the remaining gaps.
+
+**Locked decisions (1–6):** (1) RBAC fan-out reconstructed from `graph_edges`, not raw tables.
+(2) `SCCM_AllPermissions` "All Systems"/"All Users and User Groups" detected by well-known IDs
+`SMS00001`/`SMS00004` (a code comment cites CMBP's name-match; the validation harness confirms the IDs
+against the lab). (3) Port all CMBP node/edge properties for the panels, even relationship-encoding ones.
+(4) Typed `collection_source` column (WS-1). (5) Full parity for all node kinds (MSSQL via Stage 5).
+(6) Relationship lists built in preproc from raw tables, raw/faithful, no edge→node aggregation.
+
+**Non-secondary site set:** the single hierarchy = all `site_hierarchy` rows; "non-secondary" excludes
+only confirmed Secondary (`site_type = 1`), matching CMBP's `Type -ne "Secondary Site"` (NULL/unknown
+types are included). **ARCHITECTURE.md §11c** (graph_edges columns + `GraphEdge`) is updated in the same
+change as the WS-1 code.
 
 ### Stage 4 — SameHostAs + LocalAdminRequired
 - **PS1:** `Add-SameHostAsEdges` :2261-2311 (incl. duplicate-client-device merge preferring the

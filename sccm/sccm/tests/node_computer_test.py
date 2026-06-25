@@ -169,3 +169,95 @@ def test_node_computer_obsolete_rows_dropped():
 
     rows = con.execute("SELECT sid FROM sccm.node_computer").fetchall()
     assert all(r[0] != "S-1-5-21-1-2-3-9999" for r in rows)
+
+
+def test_node_computer_distinguished_name_from_smb_computers():
+    """smb_computers spreads **ad_object which includes distinguished_name;
+    it must appear in node_computer after the coalesce."""
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-1600' AS object_sid, 'SMBHOST' AS name, "
+        "'smbhost.lab' AS dns_host_name, NULL AS sam_account_name, "
+        "'CN=SMBHOST,OU=Computers,DC=lab,DC=local' AS distinguished_name, "
+        "false AS smb_signing_required, true AS sccm_infra, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT distinguished_name FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-1600'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "CN=SMBHOST,OU=Computers,DC=lab,DC=local"
+
+
+def test_node_computer_distinguished_name_from_wmi_site_definitions_computers():
+    """wmi_site_definitions_computers spreads **ad_object (same as the adminservice arm),
+    so distinguished_name must not be silently dropped to NULL.
+
+    This is a regression guard for the C6 bug where the wmi arm emitted
+    NULL AS distinguished_name while the adminservice arm correctly forwarded it.
+    """
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    # Use a parameterised insert to avoid any backslash-escaping issues with the DN value.
+    con.execute("CREATE TABLE sccm.wmi_site_definitions_computers ("
+                "object_sid VARCHAR, name VARCHAR, dns_host_name VARCHAR, "
+                "distinguished_name VARCHAR, sccm_site_system_roles VARCHAR, "
+                "sccm_infra BOOLEAN)")
+    con.execute(
+        "INSERT INTO sccm.wmi_site_definitions_computers VALUES (?, ?, ?, ?, ?, ?)",
+        ["S-1-5-21-1-2-3-1800", "WMIHOST", "wmihost.lab",
+         "CN=WMIHOST,OU=Computers,DC=lab,DC=local", "SMS Site Server", True],
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT distinguished_name FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-1800'"
+    ).fetchone()
+    assert row is not None, "wmi_site_definitions_computers row not found in node_computer"
+    assert row[0] == "CN=WMIHOST,OU=Computers,DC=lab,DC=local"
+
+
+def test_node_computer_distinguished_name_any_value_wins():
+    """When smb_computers and remoteregistry_computers both have distinguished_name
+    for the same SID, any_value picks the first non-null (idempotent)."""
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-1700' AS object_sid, 'MULTI' AS name, "
+        "'multi.lab' AS dns_host_name, NULL AS sam_account_name, "
+        "'CN=MULTI,OU=Computers,DC=lab,DC=local' AS distinguished_name, "
+        "false AS smb_signing_required, true AS sccm_infra, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+    con.execute(
+        "CREATE TABLE sccm.remoteregistry_computers AS SELECT "
+        "'S-1-5-21-1-2-3-1700' AS object_sid, 'MULTI' AS name, "
+        "'multi.lab' AS dns_host_name, NULL AS sam_account_name, "
+        "'CN=MULTI,OU=Computers,DC=lab,DC=local' AS distinguished_name, "
+        "false AS smb_signing_required, false AS sccm_infra, "
+        "false AS disable_loopback_check, NULL AS restrict_receiving_ntlm_traffic, "
+        "NULL AS sccm_site_system_roles"
+    )
+
+    transforms(con)
+
+    rows = con.execute("SELECT sid FROM sccm.node_computer").fetchall()
+    assert len(rows) == 1
+    row = con.execute(
+        "SELECT distinguished_name FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-1700'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "CN=MULTI,OU=Computers,DC=lab,DC=local"

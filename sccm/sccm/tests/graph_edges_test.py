@@ -80,3 +80,22 @@ def test_total_edge_count():
     # Only replication edges — no spike row, no phantom pair
     replication_rows = {r for r in rows if r[2] == "SCCM_AdminsReplicatedTo"}
     assert len(replication_rows) == 3, f"Expected 3 replication edges, got {len(replication_rows)}: {replication_rows}"
+
+
+def test_existing_edges_carry_collection_source():
+    """Every replication edge must carry collection_source=['SCCM_Invoke-PostProcessing']."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
+        "(VALUES ('CAS',NULL,4),('PS1','CAS',2)) AS t(site_code,parent_site_code,site_type)"
+    )
+    transforms(con)
+    rows = con.execute(
+        "SELECT DISTINCT kind, collection_source FROM sccm.graph_edges "
+        "WHERE kind='SCCM_AdminsReplicatedTo'"
+    ).fetchall()
+    assert rows, "Expected at least one SCCM_AdminsReplicatedTo edge"
+    assert rows[0][1] == ["SCCM_Invoke-PostProcessing"], (
+        f"Expected ['SCCM_Invoke-PostProcessing'], got {rows[0][1]}"
+    )

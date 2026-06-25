@@ -9,7 +9,7 @@ properties populated.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import ComputerProperties, SCCMNode, domain_environment_id
 from ..kinds import nodes as nk
@@ -31,8 +31,9 @@ class ComputerNode(BaseAsset):
     name: str | None = None
     dnshostname: str | None = None
     sam_account_name: str | None = None
-    site_system_roles: list[str] = []
-    resource_ids: list[str] = []
+    distinguished_name: str | None = None
+    site_system_roles: list[str] = Field(default_factory=list)
+    resource_ids: list[str] = Field(default_factory=list)
     sccm_infra: bool = False
     sms_unique_identifier: str | None = None
     smb_signing_required: bool | None = None
@@ -81,6 +82,9 @@ class ComputerNode(BaseAsset):
                 sccm_infra=self.sccm_infra,
                 sccm_resource_ids=self.resource_ids,
                 sccm_client_device_identifier=self.sms_unique_identifier,
+                dnshostname=self.dnshostname,
+                sam_account_name=self.sam_account_name,
+                distinguished_name=self.distinguished_name,
                 smb_signing_required=self.smb_signing_required,
                 sccm_has_client_remote_control_spn=self.sccm_has_client_remote_control_spn,
                 network_boot_server=self.network_boot_server,

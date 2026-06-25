@@ -18,6 +18,18 @@ SCCM_HAS_STORED_ACCOUNT = "SCCM_HasStoredAccount"
 MEMBER_OF = "MemberOf"
 HAS_SESSION = "HasSession"
 
+# Stage 3 edge kinds (containment + RBAC fan-out)
+SCCM_CONTAINS = "SCCM_Contains"
+SCCM_FULL_ADMINISTRATOR = "SCCM_FullAdministrator"
+SCCM_APPLICATION_AUTHOR = "SCCM_ApplicationAuthor"
+SCCM_APPLICATION_ADMINISTRATOR = "SCCM_ApplicationAdministrator"
+SCCM_COMPLIANCE_SETTINGS_MANAGER = "SCCM_ComplianceSettingsManager"
+SCCM_OSD_MANAGER = "SCCM_OSDManager"
+SCCM_OPERATIONS_ADMINISTRATOR = "SCCM_OperationsAdministrator"
+SCCM_SECURITY_ADMINISTRATOR = "SCCM_SecurityAdministrator"
+SCCM_ALL_PERMISSIONS = "SCCM_AllPermissions"
+SCCM_ASSIGN_ALL_PERMISSIONS = "SCCM_AssignAllPermissions"
+
 # CMBP traversable allow-list (ConfigManBearPig.ps1:2216-2249, uncommented entries only).
 # Edges whose kind is in this set get properties.traversable = True. Includes future
 # (Stage 3-6) kinds so later stages reuse this one source of truth.

@@ -8,7 +8,7 @@ environmentid, and emits a User+Base node with all SCCM-specific properties.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, UserProperties, domain_environment_id
 from ..kinds import nodes as nk
@@ -28,9 +28,11 @@ class UserNode(BaseAsset):
 
     sid: str | None = None
     name: str | None = None
-    resource_ids: list[str] = []
+    resource_ids: list[str] = Field(default_factory=list)
     sccm_infra: bool = False
     stored_in_sccm_site: str | None = None
+    distinguished_name: str | None = None
+    user_principal_name: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -67,6 +69,8 @@ class UserNode(BaseAsset):
                 sccm_resource_ids=self.resource_ids,
                 sccm_infra=self.sccm_infra,
                 stored_in_sccm_site=self.stored_in_sccm_site,
+                distinguished_name=self.distinguished_name,
+                user_principal_name=self.user_principal_name,
             ),
         )
 

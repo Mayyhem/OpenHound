@@ -1,5 +1,6 @@
 # src/openhound_sccm/models/computer_test.py
 """Tests for ComputerNode: row -> SCCMNode conversion."""
+import pytest
 from openhound_sccm.models.computer import ComputerNode
 
 
@@ -81,3 +82,26 @@ def test_computer_all_extra_properties():
     assert props.sccm_client_certificate_required is True
     assert props.sccm_hosts_content_library is True
     assert props.sccm_is_pxe_support_enabled is False
+
+
+@pytest.mark.parametrize("dnshostname,sam_account_name,distinguished_name", [
+    ("ws01.lab", "WS01$", "CN=WS01,OU=Computers,DC=lab,DC=local"),
+    ("dc01.lab", "DC01$", "CN=DC01,OU=Domain Controllers,DC=lab,DC=local"),
+    (None, None, None),
+])
+def test_computer_exposes_dnshostname_samaccountname_distinguished_name(
+    dnshostname, sam_account_name, distinguished_name
+):
+    """dnshostname, sam_account_name, and distinguished_name must be exposed on
+    ComputerProperties and flow through from the ComputerNode fields."""
+    n = ComputerNode(
+        sid="S-1-5-21-1-2-3-1104",
+        name="WS01",
+        dnshostname=dnshostname,
+        sam_account_name=sam_account_name,
+        distinguished_name=distinguished_name,
+    ).as_node
+    assert n is not None
+    assert n.properties.dnshostname == dnshostname
+    assert n.properties.sam_account_name == sam_account_name
+    assert n.properties.distinguished_name == distinguished_name

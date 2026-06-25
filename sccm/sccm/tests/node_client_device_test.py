@@ -3,6 +3,60 @@ import duckdb
 from openhound_sccm.transforms import transforms
 
 
+def test_client_device_resolved_sid_and_collections():
+    """Stage 3 C4: telemetry scalars, resolved *_sid fields, collection lists."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute("CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
+                "(VALUES ('CAS',NULL,4)) AS t(site_code,parent_site_code,site_type)")
+    con.execute("CREATE TABLE sccm.adminservice_r_user AS "
+                "SELECT 'S-1-5-21-1-2-3-1200' AS sid, 'MAYYHEM\\\\alice' AS unique_user_name, "
+                "5 AS resource_id, 'CAS' AS source_site_code, 'alice' AS name")
+    con.execute("CREATE TABLE sccm.adminservice_client_devices AS "
+                "SELECT 'GUID-1' AS smsid, 'WS01' AS name, 50 AS resource_id, 'CAS' AS site_code, "
+                "true AS is_client, false AS is_obsolete, "
+                "'MAYYHEM\\\\alice' AS primary_user, 'CORP' AS user_domain_name, "
+                "'2026-01-02' AS ad_last_logon_time, 'CAS' AS source_site_code")
+    con.execute("CREATE TABLE sccm.adminservice_collections AS "
+                "SELECT 'SMS00001' AS collection_id, 'All Systems' AS name, "
+                "2 AS collection_type, 'CAS' AS source_site_code")
+    con.execute("CREATE TABLE sccm.adminservice_collection_members AS "
+                "SELECT 'SMS00001' AS collection_id, 50 AS resource_id, 'CAS' AS site_code")
+    transforms(con)
+    r = con.execute(
+        "SELECT ad_last_logon_time, ad_last_logon_user_domain, source_site_code, "
+        "primary_user_sid, collection_ids, collection_names "
+        "FROM sccm.node_client_device WHERE smsid='GUID-1'"
+    ).fetchone()
+    assert r[0] == "2026-01-02", f"ad_last_logon_time: {r[0]}"
+    assert r[1] == "CORP", f"ad_last_logon_user_domain: {r[1]}"
+    assert r[2] == "CAS", f"source_site_code: {r[2]}"
+    assert r[3] == "S-1-5-21-1-2-3-1200", f"primary_user_sid: {r[3]}"
+    assert r[4] == ["SMS00001@CAS"], f"collection_ids: {r[4]}"
+    assert r[5] == ["All Systems"], f"collection_names: {r[5]}"
+
+
+def test_client_device_timestamp_scalars():
+    """Stage 3 C4 (matrix reclassification): last_active_time, last_online/offline_time."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute("CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
+                "(VALUES ('PS1',NULL,2)) AS t(site_code,parent_site_code,site_type)")
+    con.execute("CREATE TABLE sccm.adminservice_client_devices AS "
+                "SELECT 'GUID-A' AS smsid, 'SRV01' AS name, 10 AS resource_id, 'PS1' AS site_code, "
+                "true AS is_client, false AS is_obsolete, "
+                "'2026-01-10' AS last_active_time, '2026-01-11' AS c_n_last_online_time, "
+                "'2026-01-09' AS c_n_last_offline_time")
+    transforms(con)
+    r = con.execute(
+        "SELECT last_active_time, last_online_time, last_offline_time "
+        "FROM sccm.node_client_device WHERE smsid='GUID-A'"
+    ).fetchone()
+    assert r[0] == "2026-01-10", f"last_active_time: {r[0]}"
+    assert r[1] == "2026-01-11", f"last_online_time: {r[1]}"
+    assert r[2] == "2026-01-09", f"last_offline_time: {r[2]}"
+
+
 def test_node_client_device_filters_and_keys_on_smsid():
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA IF NOT EXISTS sccm")

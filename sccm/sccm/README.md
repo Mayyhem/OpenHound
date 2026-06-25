@@ -11,7 +11,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, and Stages 1–2 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and ten edge kinds: [`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), and [`HasSession`](#hassession).
+> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and twenty edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)).
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -47,6 +47,16 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [MemberOf](#memberof)
   - [HasSession](#hassession)
   - [SCCM_HasStoredAccount](#sccm_hasstoredaccount)
+  - [SCCM_Contains](#sccm_contains)
+  - [SCCM_FullAdministrator](#sccm_fulladministrator)
+  - [SCCM_ApplicationAuthor](#sccm_applicationauthor)
+  - [SCCM_ApplicationAdministrator](#sccm_applicationadministrator)
+  - [SCCM_ComplianceSettingsManager](#sccm_compliancesettingsmanager)
+  - [SCCM_OSDManager](#sccm_osdmanager)
+  - [SCCM_OperationsAdministrator](#sccm_operationsadministrator)
+  - [SCCM_SecurityAdministrator](#sccm_securityadministrator)
+  - [SCCM_AllPermissions](#sccm_allpermissions)
+  - [SCCM_AssignAllPermissions](#sccm_assignallpermissions)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -203,7 +213,13 @@ The collector relies on these assumptions about the target environment and how i
 
 # Limitations
 
-- **Graph output covers Stages 1 and 2.** `convert` now emits eight node kinds and ten edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, `SameHostAs` dedup, NAA secrets) are planned for later stages.
+- **Graph output covers Stages 1–3.** `convert` now emits eight node kinds and twenty edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, `SameHostAs` dedup, NAA secrets) are planned for later stages.
+- **Some node properties are deferred to later collectors or stages.** The following properties appear in ConfigManBearPig but are not yet emitted because the required collector does not exist or the data is coupled to a later pipeline stage:
+  - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `sccm_is_pxe_support_enabled`) but not the DHCP/PXE configuration parameters.
+  - **NAA flag on `User`** (`is_sccm_network_access_account`) — requires NAA secret decryption (`--enable-bad-opsec`) and a dedicated NAA collector, neither of which is implemented yet.
+  - **Group DN / SAM account name** (`distinguished_name`, `sam_account_name` on `Group`) — groups are built from name-only lists resolved to SIDs; no LDAP group-object lookup is performed.
+  - **Several `SCCM_ClientDevice` fields** (`current_management_point`, `distinguished_name`, `dnshostname`, `domain`, `previous_smsid`) — not present in the AdminService/WMI device columns collected; would require a collection-phase change.
+  - **MSSQL-coupled `SCCM_Site` fields** (`site_server_domain_sid`, `site_server_fqdn`, `sql_server_domain_sid`, `sql_server_fqdn`, `sql_service_port`, `sql_service_account_domain_sid`) — deferred to Stage 5 when the MSSQL node tables are introduced.
 - **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, some graph now); DHCP is a placeholder.
 - **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `possible = true`. Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
 - **`MemberOf` covers direct memberships only.** SCCM's `security_group_name` field carries the direct groups a principal belongs to; group-to-group nesting is not captured. Merge with a SharpHound collection for full nested-group paths (the Group nodes key on AD SID, so the two datasets join cleanly).
@@ -376,6 +392,11 @@ An AD computer account observed in SCCM — collected from AdminService/WMI reso
 | `sccm_client_certificate_required` | bool | `true` if the host's SCCM site systems require a client certificate (from HTTP probing). |
 | `sccm_hosts_content_library` | bool | `true` if an SCCM content library share was found on this host (SMB). |
 | `sccm_is_pxe_support_enabled` | bool | `true` if PXE support was found on this host (SMB `REMINST` share). |
+| `dnshostname` | string | DNS hostname of this computer (from AdminService resource tables, LDAP, and SMB sources). |
+| `sam_account_name` | string | AD `sAMAccountName` of this computer account (from LDAP and HTTP sources). |
+| `distinguished_name` | string | AD distinguished name (from LDAP and SMB sources). |
+
+> **Properties not yet emitted:** DHCP/PXE detail fields (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector; see [Limitations](#limitations).
 
 ## User
 
@@ -392,6 +413,8 @@ An AD user account observed in SCCM — collected from AdminService/WMI user res
 | `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
 | `sccm_infra` | bool | `true` if this account appears in the SCCM admins tables (an SCCM admin user). |
 | `stored_in_sccm_site` | string | Site code of the SCCM site that stores this account as a reserved/stored credential (`SMS_SCI_Reserved`). |
+| `distinguished_name` | string | AD distinguished name from the SCCM user resource record (`SMS_R_User`). |
+| `user_principal_name` | string | AD user principal name (UPN) from the SCCM user resource record. |
 
 > **Not yet emitted:** `is_sccm_network_access_account` — this property is set only when NAA secrets are decrypted, which requires the `--enable-bad-opsec` flag and the NAA-secret collector, neither of which is implemented yet.
 
@@ -436,6 +459,13 @@ A Configuration Manager **site**, coalesced from AdminService/WMI site tables, s
 | `build_number` | string | Build number (e.g. `9106`). |
 | `install_dir` | string | Site server install directory. |
 | `sccm_infra` | bool | Always `true` for a site. |
+| `sql_service_account_name` | string | Domain account running the SQL Server service on this site's database server (from `SMS_SCI_SysResUse`). |
+| `distinguished_name` | string | AD distinguished name of the `mSSMSSite` object in the System Management container. |
+| `source_forest` | string | AD forest the site was published into (from `mSSMSSourceForest` on the LDAP site object). |
+| `admin_users` | list\<string\> | Admin node IDs (`DOMAIN\\USER@SITE`) for every SCCM admin in the hierarchy. |
+| `stored_accounts` | list\<string\> | Uppercased AD object SIDs of accounts stored as reserved credentials in `SMS_SCI_Reserved`. |
+
+> **Properties not yet emitted:** MSSQL-coupled site fields (`site_server_domain_sid`, `site_server_fqdn`, `sql_server_domain_sid`, `sql_server_fqdn`, `sql_service_port`, `sql_service_account_domain_sid`) are deferred to Stage 5; see [Limitations](#limitations).
 
 ## SCCM_ClientDevice
 
@@ -463,6 +493,20 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `ad_last_logon_user` | string | Name of the last AD-logged-on user. |
 | `possible` | bool | `true` for inferred possible-client nodes (not confirmed enrolled). |
 | `sccm_ad_domain_sid` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
+| `ad_last_logon_time` | string | Timestamp of the device's last AD logon as reported by SCCM. |
+| `ad_last_logon_user_domain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
+| `source_site_code` | string | Site code of the site that enrolled this device. |
+| `primary_user_sid` | string | AD SID of the primary user (resolved from `primary_user` via the name lookup). |
+| `current_logon_user_sid` | string | AD SID of the currently logged-on user (resolved from `current_logon_user`). |
+| `ad_last_logon_user_sid` | string | AD SID of the last AD-authenticated user (resolved from `user_name`). |
+| `last_reported_mp_server_sid` | string | AD SID of the management point host last reported by this client (resolved from `last_mp_server_name`). |
+| `collection_ids` | list\<string\> | Raw collection IDs this device belongs to (e.g. `SMS00001`). |
+| `collection_names` | list\<string\> | Display names of the collections this device belongs to. |
+| `last_active_time` | string | Timestamp of the device's last active check-in (`LastActiveTime`). |
+| `last_online_time` | string | Timestamp the device was last seen online (`CNLastOnlineTime`). |
+| `last_offline_time` | string | Timestamp the device last went offline (`CNLastOfflineTime`). |
+
+> **Properties not yet emitted:** `current_management_point`, `distinguished_name` (client), `dnshostname` (client), `domain`, `previous_smsid` — these fields are absent from the AdminService/WMI device columns; see [Limitations](#limitations).
 
 ## SCCM_Collection
 
@@ -483,6 +527,10 @@ An SCCM collection — a named set of devices or users used to scope deployments
 | `limit_to_collection_id` | string | Collection ID that limits membership for this collection. |
 | `limit_to_collection_name` | string | Name of the limiting collection. |
 | `collection_variables_count` | int | Number of collection variables defined on this collection. |
+| `source_site_code` | string | Site code of the site that owns this collection (from `SMS_Collection.SourceSite` metadata). |
+| `last_change_time` | string | Timestamp of the last change to the collection definition. |
+| `last_member_change_time` | string | Timestamp of the last membership change in this collection. |
+| `members` | list\<string\> | Raw `ResourceID@SiteCode` keys of the collection's members (faithful — built-in and unresolved members included). |
 
 ## SCCM_AdminUser
 
@@ -500,6 +548,15 @@ An SCCM RBAC administrator — an AD user or group that has been granted SCCM ad
 | `distinguished_name` | string | AD distinguished name (if available). |
 | `is_group` | bool | `true` if this admin entry is an AD group rather than a user. |
 | `account_type` | int | SCCM account type integer. |
+| `display_name` | string | Display name from the SCCM admin record. |
+| `source_site_code` | string | Site code of the site that owns this admin record. |
+| `created_by` | string | Logon name of the account that created this admin entry. |
+| `created_date` | string | Timestamp when this admin entry was created. |
+| `last_modified_by` | string | Logon name of the account that last modified this admin entry. |
+| `last_modified_date` | string | Timestamp of the last modification to this admin entry. |
+| `collection_ids` | list\<string\> | Collection node IDs (`COLLECTION_ID@SITE`) this admin is assigned to (resolved via collection name). |
+| `role_ids` | list\<string\> | Raw security role IDs assigned to this admin (e.g. `SMS0001R`). |
+| `member_of` | list\<string\> | Node IDs of the collections this admin is scoped to (derived from `SCCM_IsAssigned` edges). |
 
 ## SCCM_SecurityRole
 
@@ -520,14 +577,23 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 | `copied_from_id` | string | Role ID this was cloned from (custom roles only). |
 | `number_of_admins` | int | Number of admins assigned to this role. |
 | `operations` | list\<string\> | List of SCCM operation strings granted by this role. |
+| `source_site` | string | Site code of the site that owns this role (from `SMS_Role.SourceSite`). |
+| `created_by` | string | Logon name of the account that created this role. |
+| `created_date` | string | Timestamp when this role was created. |
+| `last_modified_by` | string | Logon name of the account that last modified this role. |
+| `last_modified_date` | string | Timestamp of the last modification to this role. |
+| `members` | list\<string\> | Node IDs of the admin users assigned to this role (derived from `SCCM_IsMappedTo` edges). |
 
 ---
 
 # Edge Reference
 
-> **Currently emitted: 10 edge kinds** — `SCCM_AdminsReplicatedTo`, `SCCM_HasClient`, `SCCM_HasMember`, `SCCM_IsMappedTo`, `SCCM_IsAssigned`, `SCCM_HasPrimaryUser`, `SCCM_HasCurrentUser`, `SCCM_HasADLastLogonUser`, `SCCM_HasStoredAccount`, `MemberOf`, and `HasSession`.
+> **Currently emitted: 20 edge kinds** — 10 from Stages 1–2 and 10 new from Stage 3.
 
-Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries a `traversable` property set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only the traversable edges are followed by BloodHound's attack-path engine when finding attack paths.
+Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
+
+- **`traversable`** — set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only traversable edges are followed by BloodHound's attack-path engine.
+- **`collection_source`** — a list of strings identifying which collectors contributed the data behind this edge (e.g. `["AdminService-SMS_Admin"]`, `["SCCM_Invoke-PostProcessing"]`). Matches the `collectionSource` provenance tags used by ConfigManBearPig.
 
 ## SCCM_AdminsReplicatedTo
 
@@ -609,6 +675,123 @@ Links an SCCM site to any AD user or group stored as a reserved/NAA-style creden
 - **Traversable:** no
 
 > **Deferred:** `SCCM_HasNetworkAccessAccount` (NAA secret decryption) requires the `--enable-bad-opsec` flag and the NAA-secret collector, neither of which is implemented yet.
+
+## SCCM_Contains
+
+Links a non-secondary SCCM site to every collection, security role, and admin user it contains. Built during post-processing from the site hierarchy and the node tables (CMBP `ps1:1659-1690`).
+
+- **Start:** `SCCM_Site` (non-secondary — CAS or Primary)
+- **End:** `SCCM_Collection`, `SCCM_SecurityRole`, or `SCCM_AdminUser`
+- **Traversable:** yes
+- **Note:** Secondary sites are excluded because administrative data does not originate from them.
+
+## SCCM_FullAdministrator
+
+Links an `SCCM_AdminUser` to every `SCCM_ClientDevice` in any device collection they are assigned to, when they hold the built-in Full Administrator role (`SMS0001R`). Grants unrestricted access to all SCCM functionality and all managed clients.
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** yes
+- **Abuse note:** A Full Administrator can deploy scripts, applications, and OS images to any client device they are scoped to — full code execution on target.
+
+## SCCM_ApplicationAuthor
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in Application Author role (`SMS0008R`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** no
+- **Abuse note:** Can create and modify applications; combined with a deploying role can achieve code execution.
+
+## SCCM_ApplicationAdministrator
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in Application Administrator role (`SMS0009R`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** yes
+- **Abuse note:** Can create, modify, and deploy applications to managed clients — direct path to code execution on scoped devices.
+
+## SCCM_ComplianceSettingsManager
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in Compliance Settings Manager role (`SMS0006R`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** no
+- **Abuse note:** Can author and deploy compliance baselines and configuration items; may enable script execution on clients.
+
+## SCCM_OSDManager
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in OSD (Operating System Deployment) Manager role (`SMS000AR`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** no
+- **Abuse note:** Can author task sequences and boot images; a malicious task sequence delivers full OS-level code execution during deployment.
+
+## SCCM_OperationsAdministrator
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in Operations Administrator role (`SMS000ER`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** no
+- **Abuse note:** Broad operational access including software deployments and remote tools; can achieve code execution on managed clients.
+
+## SCCM_SecurityAdministrator
+
+Links an `SCCM_AdminUser` to `SCCM_ClientDevice` nodes reachable through their assigned device collections, when they hold the built-in Security Administrator role (`SMS000FR`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_ClientDevice`
+- **Traversable:** no
+- **Abuse note:** Can modify other admins' role assignments and collection scopes — an indirect path to escalating privileges within SCCM.
+
+## SCCM_AllPermissions
+
+Links an `SCCM_AdminUser` to every non-secondary `SCCM_Site` in the hierarchy when they hold the Full Administrator role (`SMS0001R`) **and** are assigned to both `SMS00001` (All Systems) and `SMS00004` (All Users and User Groups). Indicates unrestricted, hierarchy-wide access (CMBP `ps1:1730-1837`).
+
+- **Start:** `SCCM_AdminUser`
+- **End:** `SCCM_Site`
+- **Traversable:** yes
+- **Abuse note:** Confirms the admin has no scope restriction — they can manage every device and user in every site.
+
+## SCCM_AssignAllPermissions
+
+Links an SMS Provider computer to every non-secondary `SCCM_Site` in the hierarchy. A host running the SMS Provider role can write SCCM administrative data and effectively control any object the hierarchy manages (CMBP `ps1:1932-1940`).
+
+- **Start:** `Computer` (SMS Provider host)
+- **End:** `SCCM_Site`
+- **Traversable:** yes
+- **Abuse note:** Compromise of an SMS Provider host (e.g. via relay to the AdminService REST API) gives an attacker administrative control equivalent to a Full Administrator over the whole hierarchy.
+
+---
+
+## Attack path example — Full Administrator to client device (mayyhem.com lab)
+
+The following traversal shows how a Full Administrator in the `mayyhem.com` lab reaches a managed client device. The path uses only traversable edges and can be queried directly in BloodHound after ingesting the collector output.
+
+```
+MATCH p = (u:User {name: "MAYYHEM\\SCCMADMIN"})-[:SCCM_IsMappedTo]->
+          (a:SCCM_AdminUser)-[:SCCM_FullAdministrator]->
+          (d:SCCM_ClientDevice)
+RETURN p LIMIT 25
+```
+
+Step-by-step:
+
+1. `MAYYHEM\SCCMADMIN` (a `User` node, keyed by AD SID) is linked to its SCCM admin record via `SCCM_IsMappedTo`.
+2. The `SCCM_AdminUser` node carries `role_ids = ["SMS0001R"]` (Full Administrator) and `collection_ids` listing the device collections in scope (e.g. `SMS00001` — All Systems).
+3. `SCCM_FullAdministrator` edges are drawn to every `SCCM_ClientDevice` that belongs to any of those device collections, as built by the `_edge_rbac_role_grants` transform.
+4. Each `SCCM_ClientDevice` node carries `collection_ids`, `collection_names`, and the resolved `primary_user_sid` / `current_logon_user_sid` — useful for identifying which user account to target on the compromised host.
+
+To see the scope of an admin's reach without filtering by user:
+
+```
+MATCH p = (:SCCM_AdminUser)-[:SCCM_FullAdministrator]->(d:SCCM_ClientDevice)
+RETURN count(d) AS devices_at_risk
+```
 
 ---
 

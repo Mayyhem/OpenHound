@@ -71,3 +71,64 @@ def test_node_site_unions_ldap_source():
     ).fetchone()
     assert row[0] == "PS1"
     assert row[1] == "{guid-1234}"
+
+
+def test_node_site_lists_and_sql_account():
+    """node_site gains sql_service_account_name from site_systems and
+    admin_users / stored_accounts list columns from _enrich_site_lists."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions AS "
+        "SELECT * FROM (VALUES ('CAS', NULL, 4)) "
+        "AS t(site_code, parent_site_code, site_type)"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_sites AS "
+        "SELECT 'CAS' AS site_code, 'CAS Site' AS site_name, 'srv' AS server_name, 4 AS type"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_admins AS "
+        "SELECT 'MAYYHEM\\adm' AS logon_name, 'S-1-5-21-1-2-3-1110' AS admin_sid, false AS is_group"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_reserved_accounts AS "
+        "SELECT 'S-1-5-21-1-2-3-1300' AS object_sid, 'CAS' AS site_code, 'svc_naa' AS name"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_systems AS "
+        "SELECT '\\\\SQL01.lab' AS network_os_path, 'CAS' AS site_code, "
+        "'SMS SQL Server' AS role_name, "
+        "'MAYYHEM\\sqlsvc' AS sql_server_service_logon_account"
+    )
+    transforms(con)
+    r = con.execute(
+        "SELECT sql_service_account_name, admin_users, stored_accounts "
+        "FROM sccm.node_site WHERE site_code='CAS'"
+    ).fetchone()
+    assert r[0] == "MAYYHEM\\sqlsvc"
+    assert r[1] == ["MAYYHEM\\ADM@CAS"]
+    assert r[2] == ["S-1-5-21-1-2-3-1300"]
+
+
+def test_node_site_ldap_distinguished_name_and_source_forest():
+    """distinguished_name and source_forest from ldap_sites land in node_site."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions AS "
+        "SELECT * FROM (VALUES ('CAS', NULL, 4)) "
+        "AS t(site_code, parent_site_code, site_type)"
+    )
+    con.execute(
+        "CREATE TABLE sccm.ldap_sites AS "
+        "SELECT 'CAS' AS site_code, NULL AS site_guid, NULL AS parent_site_code, "
+        "'CN=CAS,CN=SMS-Site-CAS,CN=System,DC=lab,DC=local' AS distinguished_name, "
+        "'lab.local' AS source_forest"
+    )
+    transforms(con)
+    row = con.execute(
+        "SELECT distinguished_name, source_forest FROM sccm.node_site WHERE site_code='CAS'"
+    ).fetchone()
+    assert row[0] == "CN=CAS,CN=SMS-Site-CAS,CN=System,DC=lab,DC=local"
+    assert row[1] == "lab.local"

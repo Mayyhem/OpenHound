@@ -8,7 +8,7 @@ hierarchy and infrastructure properties populated.
 import logging
 
 from openhound.core.asset import BaseAsset
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from ..graph import SCCMNode, SCCMSiteProperties
 from ..kinds import nodes as nk
@@ -46,7 +46,13 @@ class SCCMSite(BaseAsset):
     build_number: str | None = None
     install_dir: str | None = None
     root_site_code: str | None = None
-    collection_source: list[str] = []
+    collection_source: list[str] = Field(default_factory=list)
+    # Stage 3 C5 additions — CMBP parity.
+    sql_service_account_name: str | None = None
+    distinguished_name: str | None = None
+    source_forest: str | None = None
+    admin_users: list[str] = Field(default_factory=list)
+    stored_accounts: list[str] = Field(default_factory=list)
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -93,6 +99,11 @@ class SCCMSite(BaseAsset):
                 version=self.version,
                 build_number=self.build_number,
                 install_dir=self.install_dir,
+                sql_service_account_name=self.sql_service_account_name,
+                distinguished_name=self.distinguished_name,
+                source_forest=self.source_forest,
+                admin_users=list(self.admin_users),
+                stored_accounts=list(self.stored_accounts),
             ),
         )
 
