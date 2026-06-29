@@ -19,8 +19,8 @@ def test_group_as_node_basic():
     assert node.id == "S-1-5-21-1-2-3-5001"
     assert node.kinds == ["Group", "Base"]
     assert node.properties.environmentid == "S-1-5-21-1-2-3"
-    assert node.properties.sccm_resource_ids == ["9@PS1"]
-    assert node.properties.sccm_infra is False
+    assert node.properties.SCCMResourceIDs == ["9@PS1"]
+    assert node.properties.SCCMInfra is False
 
 
 def test_group_as_node_sccm_infra():
@@ -32,7 +32,7 @@ def test_group_as_node_sccm_infra():
     ).as_node
 
     assert node is not None
-    assert node.properties.sccm_infra is True
+    assert node.properties.SCCMInfra is True
 
 
 def test_group_no_sid_returns_none():

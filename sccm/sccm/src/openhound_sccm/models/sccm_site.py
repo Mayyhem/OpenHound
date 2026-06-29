@@ -53,6 +53,13 @@ class SCCMSite(BaseAsset):
     source_forest: str | None = None
     admin_users: list[str] = Field(default_factory=list)
     stored_accounts: list[str] = Field(default_factory=list)
+    # Site/SQL server identity (CMBP ps1:7052-7065, 3040), derived in _node_site.
+    site_server_fqdn: str | None = None
+    site_server_domain_sid: str | None = None
+    sql_server_fqdn: str | None = None
+    sql_server_domain_sid: str | None = None
+    sql_service_account_domain_sid: str | None = None
+    sql_service_port: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -87,23 +94,29 @@ class SCCMSite(BaseAsset):
                 name=display,
                 displayname=display,
                 environmentid=env,
-                collection_source=list(self.collection_source),
-                site_code=self.site_code,
-                parent_site_code=self.parent_site_code,
-                root_site_code=self.root_site_code,
-                site_type=site_type_str,
-                site_guid=self.site_guid,
-                site_server_name=self.server_name,
-                sql_server_name=self.sql_server_name,
-                sql_database_name=self.sql_database_name,
+                collectionSource=list(self.collection_source),
+                siteCode=self.site_code,
+                parentSiteCode=self.parent_site_code,
+                rootSiteCode=self.root_site_code,
+                siteType=site_type_str,
+                siteGUID=self.site_guid,
+                siteServerName=self.server_name,
+                SQLServerName=self.sql_server_name,
+                SQLDatabaseName=self.sql_database_name,
                 version=self.version,
-                build_number=self.build_number,
-                install_dir=self.install_dir,
-                sql_service_account_name=self.sql_service_account_name,
-                distinguished_name=self.distinguished_name,
-                source_forest=self.source_forest,
-                admin_users=list(self.admin_users),
-                stored_accounts=list(self.stored_accounts),
+                buildNumber=self.build_number,
+                installDir=self.install_dir,
+                SQLServiceAccountName=self.sql_service_account_name,
+                distinguishedName=self.distinguished_name,
+                sourceForest=self.source_forest,
+                adminUsers=list(self.admin_users),
+                storedAccounts=list(self.stored_accounts),
+                siteServerFQDN=self.site_server_fqdn,
+                siteServerDomainSID=self.site_server_domain_sid,
+                SQLServerFQDN=self.sql_server_fqdn,
+                SQLServerDomainSID=self.sql_server_domain_sid,
+                SQLServiceAccountDomainSID=self.sql_service_account_domain_sid,
+                SQLServicePort=self.sql_service_port,
             ),
         )
 

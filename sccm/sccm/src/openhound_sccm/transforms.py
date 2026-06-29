@@ -1030,7 +1030,9 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "build_number VARCHAR, "
         "install_dir VARCHAR, "
         "distinguished_name VARCHAR, "
-        "source_forest VARCHAR"
+        "source_forest VARCHAR, "
+        "sql_server_fqdn VARCHAR, "       # SMS_SCI_SiteDefinition Props "SQLServerFQDN"
+        "sql_service_port VARCHAR"        # SMS_SCI_SiteDefinition Props "SQLServicePort"
         ")"
     )
 
@@ -1055,6 +1057,8 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "sql_database_name": "VARCHAR",     # site_definitions
         "distinguished_name": "VARCHAR",    # ldap_sites (mSSMSSite DN)
         "source_forest": "VARCHAR",         # ldap_sites (mSSMSSourceForest)
+        "sql_server_fqdn": "VARCHAR",       # site_definitions (Props SQLServerFQDN)
+        "sql_service_port": "VARCHAR",      # site_definitions (Props SQLServicePort)
     }
     for _src in (
         "adminservice_sites", "wmi_sites",
@@ -1097,7 +1101,8 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT site_code, NULL AS site_name, NULL AS server_name, "
         f"parent_site_code, TRY_CAST(site_type AS INTEGER) AS site_type, "
         f"site_guid, sql_server_name, sql_database_name, "
-        f"NULL AS version, NULL AS build_number, NULL AS install_dir "
+        f"NULL AS version, NULL AS build_number, NULL AS install_dir, "
+        f"sql_server_fqdn, CAST(sql_service_port AS VARCHAR) AS sql_service_port "
         f"FROM {schema}.adminservice_site_definitions WHERE site_code IS NOT NULL",
     )
 
@@ -1109,7 +1114,8 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT site_code, NULL AS site_name, NULL AS server_name, "
         f"parent_site_code, TRY_CAST(site_type AS INTEGER) AS site_type, "
         f"site_guid, sql_server_name, sql_database_name, "
-        f"NULL AS version, NULL AS build_number, NULL AS install_dir "
+        f"NULL AS version, NULL AS build_number, NULL AS install_dir, "
+        f"sql_server_fqdn, CAST(sql_service_port AS VARCHAR) AS sql_service_port "
         f"FROM {schema}.wmi_site_definitions WHERE site_code IS NOT NULL",
     )
 
@@ -1144,7 +1150,9 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  any_value(build_number) AS build_number, "
         f"  any_value(install_dir) AS install_dir, "
         f"  any_value(distinguished_name) AS distinguished_name, "
-        f"  any_value(source_forest) AS source_forest "
+        f"  any_value(source_forest) AS source_forest, "
+        f"  any_value(sql_server_fqdn) AS sql_server_fqdn, "
+        f"  any_value(sql_service_port) AS sql_service_port "
         f"FROM {schema}.node_site "
         f"WHERE site_code IS NOT NULL "
         f"GROUP BY upper(site_code)"
@@ -1171,16 +1179,60 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
             f"GROUP BY upper(site_code)",
         )
 
-    # Stamp each row with root_site_code from the site_hierarchy table and
-    # sql_service_account_name from the aggregated temp table (any non-null
-    # sql_server_service_logon_account for that site_code; CMBP ps1:225 area).
-    # LEFT JOIN for root_site_code so sites absent from site_hierarchy still appear.
+    # Resolve the site-server and SQL-server computer SIDs/FQDNs per site (CMBP
+    # ps1:7052-7063). The privileged collector already resolved each server to an AD
+    # object at collect time and tagged it with its role ("SMS Site Server@<site>" /
+    # "SMS SQL Server@<site>") in *_site_definitions_computers, so we read object_sid
+    # and dns_host_name straight from there instead of re-resolving. CMBP names these
+    # properties "*DomainSID" but stores the full computer SID, not the domain prefix —
+    # we mirror that. The site code is parsed back out of the role string.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _site_def_computers "
+        "(role_kind VARCHAR, site_code VARCHAR, object_sid VARCHAR, dns_host_name VARCHAR)"
+    )
+    for _sdc in ("adminservice_site_definitions_computers", "wmi_site_definitions_computers"):
+        _ensure_columns(con, schema, _sdc, {
+            "object_sid": "VARCHAR",
+            "dns_host_name": "VARCHAR",
+            "sccm_site_system_roles": "VARCHAR",
+        })
+        _safe(
+            con,
+            f"_site_def_computers<-{_sdc}",
+            f"INSERT INTO _site_def_computers "
+            f"SELECT CASE WHEN sccm_site_system_roles LIKE 'SMS Site Server@%' THEN 'SITE' "
+            f"            WHEN sccm_site_system_roles LIKE 'SMS SQL Server@%' THEN 'SQL' END AS role_kind, "
+            f"  upper(split_part(sccm_site_system_roles, '@', 2)) AS site_code, "
+            f"  upper(object_sid) AS object_sid, dns_host_name "
+            f"FROM {schema}.{_sdc} "
+            f"WHERE object_sid IS NOT NULL "
+            f"  AND (sccm_site_system_roles LIKE 'SMS Site Server@%' "
+            f"       OR sccm_site_system_roles LIKE 'SMS SQL Server@%')",
+        )
+
+    # Stamp each row with root_site_code from site_hierarchy, sql_service_account_name
+    # from the aggregated temp table (CMBP ps1:225 area), and the site-server/SQL-server
+    # SIDs + FQDNs (CMBP ps1:7052-7065). The SQL service-account SID is resolved by
+    # name through principal_by_name (CMBP ps1:3040). All LEFT JOINs so a site missing
+    # any of these still appears.
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_site AS "
-        f"SELECT ns.*, sh.root_site_code, ssa.acct AS sql_service_account_name "
+        f"SELECT ns.*, sh.root_site_code, ssa.acct AS sql_service_account_name, "
+        f"  site_srv.object_sid AS site_server_domain_sid, "
+        f"  site_srv.dns_host_name AS site_server_fqdn, "
+        f"  sql_srv.object_sid AS sql_server_domain_sid, "
+        f"  (SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f"   WHERE upper(pbn.name) = upper(ssa.acct) LIMIT 1) AS sql_service_account_domain_sid "
         f"FROM {schema}.node_site ns "
         f"LEFT JOIN {schema}.site_hierarchy sh USING (site_code) "
         f"LEFT JOIN (SELECT site_code, any_value(acct) AS acct FROM _site_sql_acct GROUP BY site_code) ssa "
+        f"  USING (site_code) "
+        f"LEFT JOIN (SELECT site_code, any_value(object_sid) AS object_sid, "
+        f"                  any_value(dns_host_name) AS dns_host_name "
+        f"           FROM _site_def_computers WHERE role_kind = 'SITE' GROUP BY site_code) site_srv "
+        f"  USING (site_code) "
+        f"LEFT JOIN (SELECT site_code, any_value(object_sid) AS object_sid "
+        f"           FROM _site_def_computers WHERE role_kind = 'SQL' GROUP BY site_code) sql_srv "
         f"  USING (site_code)"
     )
     logger.info("node_site built in schema %r", schema)

@@ -73,9 +73,9 @@ class GroupNode(BaseAsset):
                 name=self.name or display,
                 displayname=display,
                 environmentid=env,
-                collection_source=[],
-                sccm_infra=self.sccm_infra,
-                sccm_resource_ids=self.sccm_resource_ids,
+                collectionSource=[],
+                SCCMInfra=self.sccm_infra,
+                SCCMResourceIDs=self.sccm_resource_ids,
             ),
         )
 

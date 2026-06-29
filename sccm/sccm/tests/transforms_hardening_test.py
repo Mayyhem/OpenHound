@@ -116,6 +116,9 @@ def test_node_site_site_definitions_missing_site_guid_still_coalesces():
         "(site_code VARCHAR, parent_site_code VARCHAR, site_type INTEGER, root_site_code VARCHAR)"
     )
     con.execute("INSERT INTO sccm.site_hierarchy VALUES ('PS1', NULL, 2, 'PS1')")
+    # principal_by_name is consumed by _node_site's SQLServiceAccountDomainSID subquery
+    # (it always exists before _node_site in the real pipeline); empty stub here.
+    con.execute("CREATE TABLE sccm.principal_by_name (name VARCHAR, sid VARCHAR)")
     # No site_guid / version / build_number / install_dir columns — the real shape.
     con.execute(
         "CREATE TABLE sccm.adminservice_site_definitions "

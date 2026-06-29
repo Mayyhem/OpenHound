@@ -25,7 +25,7 @@ def test_user_as_node_resource_ids_in_properties():
         name="alice",
         resource_ids=["9@PS1"],
     ).as_node
-    assert n.properties.sccm_resource_ids == ["9@PS1"]
+    assert n.properties.SCCMResourceIDs == ["9@PS1"]
 
 
 def test_user_as_node_sccm_infra():
@@ -35,7 +35,7 @@ def test_user_as_node_sccm_infra():
         name="svc_sccm",
         sccm_infra=True,
     ).as_node
-    assert n.properties.sccm_infra is True
+    assert n.properties.SCCMInfra is True
 
 
 def test_user_as_node_stored_in_sccm_site():
@@ -45,7 +45,7 @@ def test_user_as_node_stored_in_sccm_site():
         name="naa_account",
         stored_in_sccm_site="PS1",
     ).as_node
-    assert n.properties.stored_in_sccm_site == "PS1"
+    assert n.properties.storedInSCCMSite == "PS1"
 
 
 def test_user_no_sid_returns_none():
@@ -79,5 +79,5 @@ def test_user_exposes_distinguished_name_and_upn(distinguished_name, user_princi
         user_principal_name=user_principal_name,
     ).as_node
     assert n is not None
-    assert n.properties.distinguished_name == distinguished_name
-    assert n.properties.user_principal_name == user_principal_name
+    assert n.properties.distinguishedName == distinguished_name
+    assert n.properties.userPrincipalName == user_principal_name

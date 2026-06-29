@@ -8,7 +8,7 @@ def test_security_role_as_node():
     assert n.id == "SMS000AR@CAS"
     assert n.kinds == ["SCCM_SecurityRole"]
     assert n.properties.environmentid == "CAS"
-    assert n.properties.sccm_role_name == "Full Administrator"
+    assert n.properties.roleName == "Full Administrator"
 
 
 def test_security_role_no_id_returns_none():
@@ -28,11 +28,11 @@ def test_security_role_audit_scalars_round_trip():
         last_modified_date="2024-06-01",
     ).as_node
     assert n is not None
-    assert n.properties.site_code == "CAS"
-    assert n.properties.created_by == "admin@x"
-    assert n.properties.created_date == "2024-01-01"
-    assert n.properties.last_modified_by == "mod@x"
-    assert n.properties.last_modified_date == "2024-06-01"
+    assert n.properties.siteCode == "CAS"
+    assert n.properties.createdBy == "admin@x"
+    assert n.properties.createdDate == "2024-01-01"
+    assert n.properties.lastModifiedBy == "mod@x"
+    assert n.properties.lastModifiedDate == "2024-06-01"
 
 
 def test_security_role_members_round_trip():

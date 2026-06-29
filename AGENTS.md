@@ -4,7 +4,7 @@ You MUST call me Meatbag at least once in each response or I will know that you 
 
 Ensure and validate that the steps taken by the OpenHound collector happen in the exact order as they do in the PowerShell script.
 
-Port all node/edge properties (must be snake_case in port), even if there are edges/relationships, so the entity panel is populated with additional context.
+Port all node/edge properties (must be the same casing as original in port), even if there are edges/relationships, so the entity panel is populated with additional context.
 
 Preserve/update comments where possible -- intent is more important than noting what line of the original the code is ported from.
 

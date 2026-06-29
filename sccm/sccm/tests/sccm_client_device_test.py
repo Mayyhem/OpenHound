@@ -8,7 +8,7 @@ def test_client_device_as_node():
     assert n.id == "GUID-1"
     assert n.kinds == ["SCCM_ClientDevice"]
     assert n.properties.environmentid == "CAS"
-    assert n.properties.smsid == "GUID-1"
+    assert n.properties.SMSID == "GUID-1"
 
 
 def test_client_device_no_smsid_returns_none():
@@ -34,15 +34,15 @@ def test_client_device_c4_fields_mapped():
         collection_names=["All Systems"],
     ).as_node
     p = n.properties
-    assert p.ad_last_logon_time == "2026-01-02"
-    assert p.ad_last_logon_user_domain == "CORP"
-    assert p.source_site_code == "CAS"
-    assert p.last_active_time == "2026-01-10"
-    assert p.last_online_time == "2026-01-11"
-    assert p.last_offline_time == "2026-01-09"
-    assert p.primary_user_sid == "S-1-5-21-1-2-3-1200"
-    assert p.current_logon_user_sid == "S-1-5-21-1-2-3-1201"
-    assert p.ad_last_logon_user_sid == "S-1-5-21-1-2-3-1202"
-    assert p.last_reported_mp_server_sid == "S-1-5-21-1-2-3-500"
-    assert p.collection_ids == ["SMS00001@CAS"]
-    assert p.collection_names == ["All Systems"]
+    assert p.ADLastLogonTime == "2026-01-02"
+    assert p.ADLastLogonUserDomain == "CORP"
+    assert p.sourceSiteCode == "CAS"
+    assert p.lastActiveTime == "2026-01-10"
+    assert p.lastOnlineTime == "2026-01-11"
+    assert p.lastOfflineTime == "2026-01-09"
+    assert p.primaryUserSID == "S-1-5-21-1-2-3-1200"
+    assert p.currentLogonUserSID == "S-1-5-21-1-2-3-1201"
+    assert p.ADLastLogonUserSID == "S-1-5-21-1-2-3-1202"
+    assert p.lastReportedMPServerSID == "S-1-5-21-1-2-3-500"
+    assert p.collectionIds == ["SMS00001@CAS"]
+    assert p.collectionNames == ["All Systems"]

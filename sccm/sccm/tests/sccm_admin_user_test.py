@@ -8,7 +8,7 @@ def test_admin_user_as_node():
     assert n.id == "MAYYHEM\\SCCMADMIN@CAS"      # id uppercases logon_name
     assert n.kinds == ["SCCM_AdminUser"]
     assert n.properties.environmentid == "CAS"
-    assert n.properties.is_group is False
+    assert n.properties.isGroup is False
 
 
 def test_admin_user_no_logon_returns_none():
@@ -29,12 +29,12 @@ def test_admin_user_audit_scalars_on_node():
         last_modified_by="mod@x",
         last_modified_date="2024-06-01",
     ).as_node
-    assert n.properties.display_name == "adm disp"
-    assert n.properties.source_site_code == "CAS"
-    assert n.properties.created_by == "admin@x"
-    assert n.properties.created_date == "2024-01-01"
-    assert n.properties.last_modified_by == "mod@x"
-    assert n.properties.last_modified_date == "2024-06-01"
+    assert n.properties.displayName == "adm disp"
+    assert n.properties.sourceSiteCode == "CAS"
+    assert n.properties.createdBy == "admin@x"
+    assert n.properties.createdDate == "2024-01-01"
+    assert n.properties.lastModifiedBy == "mod@x"
+    assert n.properties.lastModifiedDate == "2024-06-01"
 
 
 def test_admin_user_list_fields_on_node():
@@ -46,14 +46,14 @@ def test_admin_user_list_fields_on_node():
         role_ids=["SMS0001R"],
         member_of=["SMS0001R@CAS"],
     ).as_node
-    assert n.properties.collection_ids == ["SMS00001@CAS"]
-    assert n.properties.role_ids == ["SMS0001R"]
-    assert n.properties.member_of == ["SMS0001R@CAS"]
+    assert n.properties.collectionIds == ["SMS00001@CAS"]
+    assert n.properties.roleIDs == ["SMS0001R"]
+    assert n.properties.memberOf == ["SMS0001R@CAS"]
 
 
 def test_admin_user_list_fields_default_empty():
     """List fields default to empty lists when not provided."""
     n = SCCMAdminUser(logon_name="MAYYHEM\\adm", root_site_code="CAS").as_node
-    assert n.properties.collection_ids == []
-    assert n.properties.role_ids == []
-    assert n.properties.member_of == []
+    assert n.properties.collectionIds == []
+    assert n.properties.roleIDs == []
+    assert n.properties.memberOf == []

@@ -22,11 +22,11 @@ def test_computer_as_node_full_row():
     assert node.id == "S-1-5-21-1-2-3-1104"
     assert node.kinds == ["Computer", "Base"]
     assert node.properties.environmentid == "S-1-5-21-1-2-3"
-    assert node.properties.sccm_site_system_roles == ["SMS Provider"]
-    assert node.properties.sccm_resource_ids == ["7@PS1"]
-    assert node.properties.sccm_client_device_identifier == "GUID:abc"
-    assert node.properties.smb_signing_required is True
-    assert node.properties.sccm_infra is True
+    assert node.properties.SCCMSiteSystemRoles == ["SMS Provider"]
+    assert node.properties.SCCMResourceIDs == ["7@PS1"]
+    assert node.properties.SCCMClientDeviceIdentifier == "GUID:abc"
+    assert node.properties.SMBSigningRequired is True
+    assert node.properties.SCCMInfra is True
 
 
 def test_computer_as_node_lowercased_sid_is_uppercased():
@@ -75,13 +75,13 @@ def test_computer_all_extra_properties():
     node = ComputerNode(**row).as_node
     assert node is not None
     props = node.properties
-    assert props.sccm_has_client_remote_control_spn is True
-    assert props.network_boot_server is True
-    assert props.disable_loopback_check is True
-    assert props.restrict_receiving_ntlm_traffic == "Deny_All"
-    assert props.sccm_client_certificate_required is True
-    assert props.sccm_hosts_content_library is True
-    assert props.sccm_is_pxe_support_enabled is False
+    assert props.SCCMHasClientRemoteControlSPN is True
+    assert props.networkBootServer is True
+    assert props.disableLoopbackCheck is True
+    assert props.restrictReceivingNtlmTraffic == "Deny_All"
+    assert props.SCCMClientCertificateRequired is True
+    assert props.SCCMHostsContentLibrary is True
+    assert props.SCCMIsPXESupportEnabled is False
 
 
 @pytest.mark.parametrize("dnshostname,sam_account_name,distinguished_name", [
@@ -102,6 +102,6 @@ def test_computer_exposes_dnshostname_samaccountname_distinguished_name(
         distinguished_name=distinguished_name,
     ).as_node
     assert n is not None
-    assert n.properties.dnshostname == dnshostname
-    assert n.properties.sam_account_name == sam_account_name
-    assert n.properties.distinguished_name == distinguished_name
+    assert n.properties.dNSHostName == dnshostname
+    assert n.properties.samAccountName == sam_account_name
+    assert n.properties.distinguishedName == distinguished_name

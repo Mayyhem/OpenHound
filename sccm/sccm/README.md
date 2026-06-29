@@ -215,11 +215,10 @@ The collector relies on these assumptions about the target environment and how i
 
 - **Graph output covers Stages 1–3.** `convert` now emits eight node kinds and twenty edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, `SameHostAs` dedup, NAA secrets) are planned for later stages.
 - **Some node properties are deferred to later collectors or stages.** The following properties appear in ConfigManBearPig but are not yet emitted because the required collector does not exist or the data is coupled to a later pipeline stage:
-  - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `sccm_is_pxe_support_enabled`) but not the DHCP/PXE configuration parameters.
+  - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `SCCMIsPXESupportEnabled`) but not the DHCP/PXE configuration parameters.
   - **NAA flag on `User`** (`is_sccm_network_access_account`) — requires NAA secret decryption (`--enable-bad-opsec`) and a dedicated NAA collector, neither of which is implemented yet.
-  - **Group DN / SAM account name** (`distinguished_name`, `sam_account_name` on `Group`) — groups are built from name-only lists resolved to SIDs; no LDAP group-object lookup is performed.
-  - **Several `SCCM_ClientDevice` fields** (`current_management_point`, `distinguished_name`, `dnshostname`, `domain`, `previous_smsid`) — not present in the AdminService/WMI device columns collected; would require a collection-phase change.
-  - **MSSQL-coupled `SCCM_Site` fields** (`site_server_domain_sid`, `site_server_fqdn`, `sql_server_domain_sid`, `sql_server_fqdn`, `sql_service_port`, `sql_service_account_domain_sid`) — deferred to Stage 5 when the MSSQL node tables are introduced.
+  - **Group DN / SAM account name** (`distinguishedName`, `samAccountName` on `Group`) — groups are built from name-only lists resolved to SIDs; no LDAP group-object lookup is performed.
+  - **Several `SCCM_ClientDevice` fields** (`currentManagementPoint`, `distinguishedName`, `dNSHostName`, `domain`, `previous_smsid`) — not present in the AdminService/WMI device columns collected; would require a collection-phase change.
 - **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, some graph now); DHCP is a placeholder.
 - **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `possible = true`. Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
 - **`MemberOf` covers direct memberships only.** SCCM's `security_group_name` field carries the direct groups a principal belongs to; group-to-group nesting is not captured. Merge with a SharpHound collection for full nested-group paths (the Group nodes key on AD SID, so the two datasets join cleanly).
@@ -379,22 +378,22 @@ An AD computer account observed in SCCM — collected from AdminService/WMI reso
 
 | Property | Type | Description |
 |---|---|---|
-| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
-| `sccm_site_system_roles` | list\<string\> | SCCM site-system roles observed on this host (e.g. `SMS Provider`, `SMS Distribution Point`). |
-| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format, one per site that enrolled this device. |
-| `sccm_infra` | bool | `true` if this computer is an SCCM infrastructure host (site system, server). |
-| `sccm_client_device_identifier` | string | The SCCM client GUID (`sms_unique_identifier` / `GUID:…`). |
-| `smb_signing_required` | bool | `true` if SMB signing is required on this host (from RemoteRegistry or SMB signing-check). |
-| `sccm_has_client_remote_control_spn` | bool | `true` if the host has a `CmRcService` SPN in AD (LDAP-discovered). |
-| `network_boot_server` | bool | `true` if the host was discovered as a network boot server in AD. |
-| `disable_loopback_check` | bool | `true` if the loopback check is disabled (RemoteRegistry). |
-| `restrict_receiving_ntlm_traffic` | string | NTLM restriction policy value (e.g. `Off`, `Deny_All`) from RemoteRegistry. |
-| `sccm_client_certificate_required` | bool | `true` if the host's SCCM site systems require a client certificate (from HTTP probing). |
-| `sccm_hosts_content_library` | bool | `true` if an SCCM content library share was found on this host (SMB). |
-| `sccm_is_pxe_support_enabled` | bool | `true` if PXE support was found on this host (SMB `REMINST` share). |
-| `dnshostname` | string | DNS hostname of this computer (from AdminService resource tables, LDAP, and SMB sources). |
-| `sam_account_name` | string | AD `sAMAccountName` of this computer account (from LDAP and HTTP sources). |
-| `distinguished_name` | string | AD distinguished name (from LDAP and SMB sources). |
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
+| `SCCMSiteSystemRoles` | list\<string\> | SCCM site-system roles observed on this host (e.g. `SMS Provider`, `SMS Distribution Point`). |
+| `SCCMResourceIDs` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format, one per site that enrolled this device. |
+| `SCCMInfra` | bool | `true` if this computer is an SCCM infrastructure host (site system, server). |
+| `SCCMClientDeviceIdentifier` | string | The SCCM client GUID (`sms_unique_identifier` / `GUID:…`). |
+| `SMBSigningRequired` | bool | `true` if SMB signing is required on this host (from RemoteRegistry or SMB signing-check). |
+| `SCCMHasClientRemoteControlSPN` | bool | `true` if the host has a `CmRcService` SPN in AD (LDAP-discovered). |
+| `networkBootServer` | bool | `true` if the host was discovered as a network boot server in AD. |
+| `disableLoopbackCheck` | bool | `true` if the loopback check is disabled (RemoteRegistry). |
+| `restrictReceivingNtlmTraffic` | string | NTLM restriction policy value (e.g. `Off`, `Deny_All`) from RemoteRegistry. |
+| `SCCMClientCertificateRequired` | bool | `true` if the host's SCCM site systems require a client certificate (from HTTP probing). |
+| `SCCMHostsContentLibrary` | bool | `true` if an SCCM content library share was found on this host (SMB). |
+| `SCCMIsPXESupportEnabled` | bool | `true` if PXE support was found on this host (SMB `REMINST` share). |
+| `dNSHostName` | string | DNS hostname of this computer (from AdminService resource tables, LDAP, and SMB sources). |
+| `samAccountName` | string | AD `sAMAccountName` of this computer account (from LDAP and HTTP sources). |
+| `distinguishedName` | string | AD distinguished name (from LDAP and SMB sources). |
 
 > **Properties not yet emitted:** DHCP/PXE detail fields (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector; see [Limitations](#limitations).
 
@@ -409,12 +408,12 @@ An AD user account observed in SCCM — collected from AdminService/WMI user res
 
 | Property | Type | Description |
 |---|---|---|
-| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
-| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
-| `sccm_infra` | bool | `true` if this account appears in the SCCM admins tables (an SCCM admin user). |
-| `stored_in_sccm_site` | string | Site code of the SCCM site that stores this account as a reserved/stored credential (`SMS_SCI_Reserved`). |
-| `distinguished_name` | string | AD distinguished name from the SCCM user resource record (`SMS_R_User`). |
-| `user_principal_name` | string | AD user principal name (UPN) from the SCCM user resource record. |
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
+| `SCCMResourceIDs` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
+| `SCCMInfra` | bool | `true` if this account appears in the SCCM admins tables (an SCCM admin user). |
+| `storedInSCCMSite` | string | Site code of the SCCM site that stores this account as a reserved/stored credential (`SMS_SCI_Reserved`). |
+| `distinguishedName` | string | AD distinguished name from the SCCM user resource record (`SMS_R_User`). |
+| `userPrincipalName` | string | AD user principal name (UPN) from the SCCM user resource record. |
 
 > **Not yet emitted:** `is_sccm_network_access_account` — this property is set only when NAA secrets are decrypted, which requires the `--enable-bad-opsec` flag and the NAA-secret collector, neither of which is implemented yet.
 
@@ -431,9 +430,9 @@ An AD group observed in SCCM — either named in a device's or user's `security_
 
 | Property | Type | Description |
 |---|---|---|
-| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
-| `sccm_infra` | bool | `true` if this group appears in the SCCM admins tables. |
-| `sccm_resource_ids` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
+| `SCCMInfra` | bool | `true` if this group appears in the SCCM admins tables. |
+| `SCCMResourceIDs` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
 
 ## SCCM_Site
 
@@ -446,26 +445,30 @@ A Configuration Manager **site**, coalesced from AdminService/WMI site tables, s
 
 | Property | Type | Description |
 |---|---|---|
-| `collection_source` | list\<string\> | Collection sources that contributed to this node. |
-| `site_code` | string | The site code (e.g. `PS1`). |
-| `parent_site_code` | string | Parent site in the hierarchy; `null` for the root (CAS) site. |
-| `root_site_code` | string | Hierarchy root site code (CAS if present, else the parentless Primary). |
-| `site_type` | string | `Primary Site`, `Central Administration Site`, or `Secondary Site`. |
-| `site_guid` | string | Site GUID from the site definitions or LDAP `mSSMSHealthState`. |
-| `site_server_name` | string | Hostname of the primary site server. |
-| `sql_server_name` | string | Hostname of the SQL Server hosting the site database. |
-| `sql_database_name` | string | Site database name (e.g. `CM_PS1`). |
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
+| `siteCode` | string | The site code (e.g. `PS1`). |
+| `parentSiteCode` | string | Parent site in the hierarchy; `null` for the root (CAS) site. |
+| `rootSiteCode` | string | Hierarchy root site code (CAS if present, else the parentless Primary). |
+| `siteType` | string | `Primary Site`, `Central Administration Site`, or `Secondary Site`. |
+| `siteGUID` | string | Site GUID from the site definitions or LDAP `mSSMSHealthState`. |
+| `siteServerName` | string | Hostname of the primary site server. |
+| `siteServerFQDN` | string | FQDN of the site server, from the resolved site-server computer. |
+| `siteServerDomainSID` | string | Full SID of the site-server computer. |
+| `SQLServerName` | string | Hostname of the SQL Server hosting the site database. |
+| `SQLServerFQDN` | string | FQDN of the site database server, from `SMS_SCI_SiteDefinition` Props. |
+| `SQLServerDomainSID` | string | Full SID of the SQL-server computer. |
+| `SQLDatabaseName` | string | Site database name (e.g. `CM_PS1`). |
+| `SQLServiceAccountName` | string | Domain account running the SQL Server service on this site's database server (from `SMS_SCI_SysResUse`). |
+| `SQLServiceAccountDomainSID` | string | SID of the SQL service account resolved by name. |
+| `SQLServicePort` | string | SQL Server service port from site-definition Props. |
 | `version` | string | Site version string (e.g. `5.00.9106.1000`). |
-| `build_number` | string | Build number (e.g. `9106`). |
-| `install_dir` | string | Site server install directory. |
-| `sccm_infra` | bool | Always `true` for a site. |
-| `sql_service_account_name` | string | Domain account running the SQL Server service on this site's database server (from `SMS_SCI_SysResUse`). |
-| `distinguished_name` | string | AD distinguished name of the `mSSMSSite` object in the System Management container. |
-| `source_forest` | string | AD forest the site was published into (from `mSSMSSourceForest` on the LDAP site object). |
-| `admin_users` | list\<string\> | Admin node IDs (`DOMAIN\\USER@SITE`) for every SCCM admin in the hierarchy. |
-| `stored_accounts` | list\<string\> | Uppercased AD object SIDs of accounts stored as reserved credentials in `SMS_SCI_Reserved`. |
-
-> **Properties not yet emitted:** MSSQL-coupled site fields (`site_server_domain_sid`, `site_server_fqdn`, `sql_server_domain_sid`, `sql_server_fqdn`, `sql_service_port`, `sql_service_account_domain_sid`) are deferred to Stage 5; see [Limitations](#limitations).
+| `buildNumber` | string | Build number (e.g. `9106`). |
+| `installDir` | string | Site server install directory. |
+| `SCCMInfra` | bool | Always `true` for a site. |
+| `distinguishedName` | string | AD distinguished name of the `mSSMSSite` object in the System Management container. |
+| `sourceForest` | string | AD forest the site was published into (from `mSSMSSourceForest` on the LDAP site object). |
+| `adminUsers` | list\<string\> | Admin node IDs (`DOMAIN\\USER@SITE`) for every SCCM admin in the hierarchy. |
+| `storedAccounts` | list\<string\> | Uppercased AD object SIDs of accounts stored as reserved credentials in `SMS_SCI_Reserved`. |
 
 ## SCCM_ClientDevice
 
@@ -478,35 +481,35 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 
 | Property | Type | Description |
 |---|---|---|
-| `smsid` | string | The SCCM unique identifier (e.g. `GUID:3F8A…`). |
-| `sccm_resource_id` | string | SCCM resource ID in `"<id>@<site_code>"` format. |
-| `site_code` | string | The enrolling site code. |
-| `device_os` | string | Operating system string reported by SCCM. |
-| `device_os_build` | string | OS build string. |
-| `is_virtual_machine` | bool | `true` if SCCM reports this device as a virtual machine. |
-| `co_managed` | bool | `true` if the device is co-managed with Intune. |
-| `aad_device_id` | string | Azure AD device ID (if known). |
-| `aad_tenant_id` | string | Azure AD tenant ID (if known). |
-| `last_reported_mp_server_name` | string | Hostname of the management point last reported by this client. |
-| `primary_user` | string | Primary user name (from SCCM user-device affinity). |
-| `current_logon_user` | string | Name of the user currently logged on. |
-| `ad_last_logon_user` | string | Name of the last AD-logged-on user. |
+| `SMSID` | string | The SCCM unique identifier (e.g. `GUID:3F8A…`). |
+| `resourceID` | string | SCCM resource ID in `"<id>@<site_code>"` format. |
+| `siteCode` | string | The enrolling site code. |
+| `deviceOS` | string | Operating system string reported by SCCM. |
+| `deviceOSBuild` | string | OS build string. |
+| `isVirtualMachine` | bool | `true` if SCCM reports this device as a virtual machine. |
+| `coManaged` | bool | `true` if the device is co-managed with Intune. |
+| `AADDeviceID` | string | Azure AD device ID (if known). |
+| `AADTenantID` | string | Azure AD tenant ID (if known). |
+| `lastReportedMPServerName` | string | Hostname of the management point last reported by this client. |
+| `primaryUser` | string | Primary user name (from SCCM user-device affinity). |
+| `currentLogonUser` | string | Name of the user currently logged on. |
+| `ADLastLogonUser` | string | Name of the last AD-logged-on user. |
 | `possible` | bool | `true` for inferred possible-client nodes (not confirmed enrolled). |
-| `sccm_ad_domain_sid` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
-| `ad_last_logon_time` | string | Timestamp of the device's last AD logon as reported by SCCM. |
-| `ad_last_logon_user_domain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
-| `source_site_code` | string | Site code of the site that enrolled this device. |
-| `primary_user_sid` | string | AD SID of the primary user (resolved from `primary_user` via the name lookup). |
-| `current_logon_user_sid` | string | AD SID of the currently logged-on user (resolved from `current_logon_user`). |
-| `ad_last_logon_user_sid` | string | AD SID of the last AD-authenticated user (resolved from `user_name`). |
-| `last_reported_mp_server_sid` | string | AD SID of the management point host last reported by this client (resolved from `last_mp_server_name`). |
-| `collection_ids` | list\<string\> | Raw collection IDs this device belongs to (e.g. `SMS00001`). |
-| `collection_names` | list\<string\> | Display names of the collections this device belongs to. |
-| `last_active_time` | string | Timestamp of the device's last active check-in (`LastActiveTime`). |
-| `last_online_time` | string | Timestamp the device was last seen online (`CNLastOnlineTime`). |
-| `last_offline_time` | string | Timestamp the device last went offline (`CNLastOfflineTime`). |
+| `ADDomainSID` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
+| `ADLastLogonTime` | string | Timestamp of the device's last AD logon as reported by SCCM. |
+| `ADLastLogonUserDomain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
+| `sourceSiteCode` | string | Site code of the site that enrolled this device. |
+| `primaryUserSID` | string | AD SID of the primary user (resolved from `primaryUser` via the name lookup). |
+| `currentLogonUserSID` | string | AD SID of the currently logged-on user (resolved from `currentLogonUser`). |
+| `ADLastLogonUserSID` | string | AD SID of the last AD-authenticated user (resolved from `user_name`). |
+| `lastReportedMPServerSID` | string | AD SID of the management point host last reported by this client (resolved from `last_mp_server_name`). |
+| `collectionIds` | list\<string\> | Raw collection IDs this device belongs to (e.g. `SMS00001`). |
+| `collectionNames` | list\<string\> | Display names of the collections this device belongs to. |
+| `lastActiveTime` | string | Timestamp of the device's last active check-in (`LastActiveTime`). |
+| `lastOnlineTime` | string | Timestamp the device was last seen online (`CNLastOnlineTime`). |
+| `lastOfflineTime` | string | Timestamp the device last went offline (`CNLastOfflineTime`). |
 
-> **Properties not yet emitted:** `current_management_point`, `distinguished_name` (client), `dnshostname` (client), `domain`, `previous_smsid` — these fields are absent from the AdminService/WMI device columns; see [Limitations](#limitations).
+> **Properties not yet emitted:** `currentManagementPoint`, `distinguishedName` (client), `dNSHostName` (client), `domain`, `previous_smsid` — these fields are absent from the AdminService/WMI device columns; see [Limitations](#limitations).
 
 ## SCCM_Collection
 
@@ -519,17 +522,17 @@ An SCCM collection — a named set of devices or users used to scope deployments
 
 | Property | Type | Description |
 |---|---|---|
-| `sccm_collection_id` | string | The collection ID (e.g. `SMS00001`). |
-| `sccm_collection_type` | string | `Other`, `User`, or `Device` (from the integer type field). |
-| `member_count` | int | Number of members in the collection. |
+| `collectionID` | string | The collection ID (e.g. `SMS00001`). |
+| `collectionType` | string | `Other`, `User`, or `Device` (from the integer type field). |
+| `memberCount` | int | Number of members in the collection. |
 | `comment` | string | Collection description. |
-| `is_built_in` | bool | `true` for SCCM built-in collections (e.g. All Systems). |
-| `limit_to_collection_id` | string | Collection ID that limits membership for this collection. |
-| `limit_to_collection_name` | string | Name of the limiting collection. |
-| `collection_variables_count` | int | Number of collection variables defined on this collection. |
-| `source_site_code` | string | Site code of the site that owns this collection (from `SMS_Collection.SourceSite` metadata). |
-| `last_change_time` | string | Timestamp of the last change to the collection definition. |
-| `last_member_change_time` | string | Timestamp of the last membership change in this collection. |
+| `isBuiltIn` | bool | `true` for SCCM built-in collections (e.g. All Systems). |
+| `limitToCollectionID` | string | Collection ID that limits membership for this collection. |
+| `limitToCollectionName` | string | Name of the limiting collection. |
+| `collectionVariablesCount` | int | Number of collection variables defined on this collection. |
+| `sourceSiteCode` | string | Site code of the site that owns this collection (from `SMS_Collection.SourceSite` metadata). |
+| `lastChangeTime` | string | Timestamp of the last change to the collection definition. |
+| `lastMemberChangeTime` | string | Timestamp of the last membership change in this collection. |
 | `members` | list\<string\> | Raw `ResourceID@SiteCode` keys of the collection's members (faithful — built-in and unresolved members included). |
 
 ## SCCM_AdminUser
@@ -543,20 +546,20 @@ An SCCM RBAC administrator — an AD user or group that has been granted SCCM ad
 
 | Property | Type | Description |
 |---|---|---|
-| `sccm_admin_id` | string | SCCM internal admin ID. |
-| `admin_sid` | string | AD SID of this admin account or group. |
-| `distinguished_name` | string | AD distinguished name (if available). |
-| `is_group` | bool | `true` if this admin entry is an AD group rather than a user. |
-| `account_type` | int | SCCM account type integer. |
-| `display_name` | string | Display name from the SCCM admin record. |
-| `source_site_code` | string | Site code of the site that owns this admin record. |
-| `created_by` | string | Logon name of the account that created this admin entry. |
-| `created_date` | string | Timestamp when this admin entry was created. |
-| `last_modified_by` | string | Logon name of the account that last modified this admin entry. |
-| `last_modified_date` | string | Timestamp of the last modification to this admin entry. |
-| `collection_ids` | list\<string\> | Collection node IDs (`COLLECTION_ID@SITE`) this admin is assigned to (resolved via collection name). |
-| `role_ids` | list\<string\> | Raw security role IDs assigned to this admin (e.g. `SMS0001R`). |
-| `member_of` | list\<string\> | Node IDs of the collections this admin is scoped to (derived from `SCCM_IsAssigned` edges). |
+| `adminID` | string | SCCM internal admin ID. |
+| `adminSid` | string | AD SID of this admin account or group. |
+| `distinguishedName` | string | AD distinguished name (if available). |
+| `isGroup` | bool | `true` if this admin entry is an AD group rather than a user. |
+| `accountType` | int | SCCM account type integer. |
+| `displayName` | string | Display name from the SCCM admin record. |
+| `sourceSiteCode` | string | Site code of the site that owns this admin record. |
+| `createdBy` | string | Logon name of the account that created this admin entry. |
+| `createdDate` | string | Timestamp when this admin entry was created. |
+| `lastModifiedBy` | string | Logon name of the account that last modified this admin entry. |
+| `lastModifiedDate` | string | Timestamp of the last modification to this admin entry. |
+| `collectionIds` | list\<string\> | Collection node IDs (`COLLECTION_ID@SITE`) this admin is assigned to (resolved via collection name). |
+| `roleIDs` | list\<string\> | Raw security role IDs assigned to this admin (e.g. `SMS0001R`). |
+| `memberOf` | list\<string\> | Node IDs of the collections this admin is scoped to (derived from `SCCM_IsAssigned` edges). |
 
 ## SCCM_SecurityRole
 
@@ -569,19 +572,19 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 
 | Property | Type | Description |
 |---|---|---|
-| `sccm_role_id` | string | SCCM role ID (e.g. `SMS000AR`). |
-| `sccm_role_name` | string | Human-readable role name (e.g. `Full Administrator`). |
-| `role_description` | string | Description of the role's purpose. |
-| `is_built_in` | bool | `true` for SCCM built-in roles. |
-| `is_sec_admin_role` | bool | `true` if this role grants Security Administrator privileges. |
-| `copied_from_id` | string | Role ID this was cloned from (custom roles only). |
-| `number_of_admins` | int | Number of admins assigned to this role. |
+| `roleID` | string | SCCM role ID (e.g. `SMS000AR`). |
+| `roleName` | string | Human-readable role name (e.g. `Full Administrator`). |
+| `roleDescription` | string | Description of the role's purpose. |
+| `isBuiltIn` | bool | `true` for SCCM built-in roles. |
+| `isSecAdminRole` | bool | `true` if this role grants Security Administrator privileges. |
+| `copiedFromID` | string | Role ID this was cloned from (custom roles only). |
+| `numberOfAdmins` | int | Number of admins assigned to this role. |
 | `operations` | list\<string\> | List of SCCM operation strings granted by this role. |
-| `source_site` | string | Site code of the site that owns this role (from `SMS_Role.SourceSite`). |
-| `created_by` | string | Logon name of the account that created this role. |
-| `created_date` | string | Timestamp when this role was created. |
-| `last_modified_by` | string | Logon name of the account that last modified this role. |
-| `last_modified_date` | string | Timestamp of the last modification to this role. |
+| `siteCode` | string | Site code of the site that owns this role (from `SMS_Role.SourceSite`). |
+| `createdBy` | string | Logon name of the account that created this role. |
+| `createdDate` | string | Timestamp when this role was created. |
+| `lastModifiedBy` | string | Logon name of the account that last modified this role. |
+| `lastModifiedDate` | string | Timestamp of the last modification to this role. |
 | `members` | list\<string\> | Node IDs of the admin users assigned to this role (derived from `SCCM_IsMappedTo` edges). |
 
 ---
@@ -593,7 +596,7 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
 
 - **`traversable`** — set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only traversable edges are followed by BloodHound's attack-path engine.
-- **`collection_source`** — a list of strings identifying which collectors contributed the data behind this edge (e.g. `["AdminService-SMS_Admin"]`, `["SCCM_Invoke-PostProcessing"]`). Matches the `collectionSource` provenance tags used by ConfigManBearPig.
+- **`collectionSource`** — a list of strings identifying which collectors contributed the data behind this edge (e.g. `["AdminService-SMS_Admin"]`, `["SCCM_Invoke-PostProcessing"]`). Matches the `collectionSource` provenance tags used by ConfigManBearPig.
 
 ## SCCM_AdminsReplicatedTo
 
@@ -644,9 +647,9 @@ Link an `SCCM_ClientDevice` to a user based on SCCM's recorded affinity or logon
 
 | Kind | Start | End | Traversable | Source |
 |---|---|---|---|---|
-| `SCCM_HasPrimaryUser` | `SCCM_ClientDevice` | `User` | yes | SCCM user-device affinity (`primary_user_name`) |
-| `SCCM_HasCurrentUser` | `SCCM_ClientDevice` | `User` | yes | Currently logged-on user (`current_logon_user_name`) |
-| `SCCM_HasADLastLogonUser` | `SCCM_ClientDevice` | `User` | yes | Last AD-authenticated user (`ad_last_logon_user_name`) |
+| `SCCM_HasPrimaryUser` | `SCCM_ClientDevice` | `User` | yes | SCCM user-device affinity (`primaryUser`) |
+| `SCCM_HasCurrentUser` | `SCCM_ClientDevice` | `User` | yes | Currently logged-on user (`currentLogonUser`) |
+| `SCCM_HasADLastLogonUser` | `SCCM_ClientDevice` | `User` | yes | Last AD-authenticated user (`ADLastLogonUser`) |
 
 ## MemberOf
 
@@ -782,9 +785,9 @@ RETURN p LIMIT 25
 Step-by-step:
 
 1. `MAYYHEM\SCCMADMIN` (a `User` node, keyed by AD SID) is linked to its SCCM admin record via `SCCM_IsMappedTo`.
-2. The `SCCM_AdminUser` node carries `role_ids = ["SMS0001R"]` (Full Administrator) and `collection_ids` listing the device collections in scope (e.g. `SMS00001` — All Systems).
+2. The `SCCM_AdminUser` node carries `roleIDs = ["SMS0001R"]` (Full Administrator) and `collectionIds` listing the device collections in scope (e.g. `SMS00001` — All Systems).
 3. `SCCM_FullAdministrator` edges are drawn to every `SCCM_ClientDevice` that belongs to any of those device collections, as built by the `_edge_rbac_role_grants` transform.
-4. Each `SCCM_ClientDevice` node carries `collection_ids`, `collection_names`, and the resolved `primary_user_sid` / `current_logon_user_sid` — useful for identifying which user account to target on the compromised host.
+4. Each `SCCM_ClientDevice` node carries `collectionIds`, `collectionNames`, and the resolved `primaryUserSID` / `currentLogonUserSID` — useful for identifying which user account to target on the compromised host.
 
 To see the scope of an admin's reach without filtering by user:
 

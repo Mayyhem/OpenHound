@@ -65,12 +65,12 @@ class UserNode(BaseAsset):
                 name=self.name or display,
                 displayname=display,
                 environmentid=env,
-                collection_source=[],
-                sccm_resource_ids=self.resource_ids,
-                sccm_infra=self.sccm_infra,
-                stored_in_sccm_site=self.stored_in_sccm_site,
-                distinguished_name=self.distinguished_name,
-                user_principal_name=self.user_principal_name,
+                collectionSource=[],
+                SCCMResourceIDs=self.resource_ids,
+                SCCMInfra=self.sccm_infra,
+                storedInSCCMSite=self.stored_in_sccm_site,
+                distinguishedName=self.distinguished_name,
+                userPrincipalName=self.user_principal_name,
             ),
         )
 

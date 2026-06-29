@@ -47,7 +47,10 @@ BACKFILL_END_KIND: dict[str, str] = {
 
 @dataclass
 class SCCMEdgeProperties(EdgeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
+    # Property names mirror ConfigManBearPig.ps1 exactly so BloodHound entity panels
+    # render the keys operators know from the original tool. `traversable`/`composed`
+    # come from the framework EdgeProperties base and already match CMBP.
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
 
 
 @dataclass
@@ -60,163 +63,176 @@ class SCCMNode(Node):
         return
 
 
+# All node-property field names below mirror ConfigManBearPig.ps1's exact casing (camelCase for
+# LDAP-derived attributes like dNSHostName/samAccountName, PascalCase for SCCM-specific properties
+# like SCCMSiteSystemRoles). The framework base fields name/displayname/environmentid/last_seen are
+# left as-is. dataclasses.asdict() emits these field names verbatim as the OpenGraph JSON keys.
 @dataclass
 class ComputerProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_site_system_roles: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=False, kw_only=True)
-    sccm_resource_ids: list[str] = field(default_factory=list, kw_only=True)
-    sccm_client_device_identifier: str | None = field(default=None, kw_only=True)
-    dnshostname: str | None = field(default=None, kw_only=True)
-    sam_account_name: str | None = field(default=None, kw_only=True)
-    distinguished_name: str | None = field(default=None, kw_only=True)
-    smb_signing_required: bool | None = field(default=None, kw_only=True)
-    sccm_has_client_remote_control_spn: bool = field(default=False, kw_only=True)
-    network_boot_server: bool = field(default=False, kw_only=True)
-    disable_loopback_check: bool | None = field(default=None, kw_only=True)
-    restrict_receiving_ntlm_traffic: str | None = field(default=None, kw_only=True)
-    sccm_client_certificate_required: bool | None = field(default=None, kw_only=True)
-    sccm_hosts_content_library: bool | None = field(default=None, kw_only=True)
-    sccm_is_pxe_support_enabled: bool | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    SCCMSiteSystemRoles: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=False, kw_only=True)
+    SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
+    SCCMClientDeviceIdentifier: str | None = field(default=None, kw_only=True)
+    dNSHostName: str | None = field(default=None, kw_only=True)
+    samAccountName: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
+    SMBSigningRequired: bool | None = field(default=None, kw_only=True)
+    SCCMHasClientRemoteControlSPN: bool = field(default=False, kw_only=True)
+    networkBootServer: bool = field(default=False, kw_only=True)
+    disableLoopbackCheck: bool | None = field(default=None, kw_only=True)
+    restrictReceivingNtlmTraffic: str | None = field(default=None, kw_only=True)
+    SCCMClientCertificateRequired: bool | None = field(default=None, kw_only=True)
+    SCCMHostsContentLibrary: bool | None = field(default=None, kw_only=True)
+    SCCMIsPXESupportEnabled: bool | None = field(default=None, kw_only=True)
 
 
 @dataclass
 class UserProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_resource_ids: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=False, kw_only=True)
-    stored_in_sccm_site: str | None = field(default=None, kw_only=True)
-    distinguished_name: str | None = field(default=None, kw_only=True)
-    user_principal_name: str | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=False, kw_only=True)
+    storedInSCCMSite: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
+    userPrincipalName: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
 class GroupProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=False, kw_only=True)
-    sccm_resource_ids: list[str] = field(default_factory=list, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=False, kw_only=True)
+    SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
 
 
 @dataclass
 class SCCMSiteProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    site_code: str | None = field(default=None, kw_only=True)
-    parent_site_code: str | None = field(default=None, kw_only=True)
-    root_site_code: str | None = field(default=None, kw_only=True)
-    site_type: str | None = field(default=None, kw_only=True)
-    site_guid: str | None = field(default=None, kw_only=True)
-    site_server_name: str | None = field(default=None, kw_only=True)
-    sql_server_name: str | None = field(default=None, kw_only=True)
-    sql_database_name: str | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    siteCode: str | None = field(default=None, kw_only=True)
+    parentSiteCode: str | None = field(default=None, kw_only=True)
+    rootSiteCode: str | None = field(default=None, kw_only=True)
+    siteType: str | None = field(default=None, kw_only=True)
+    siteGUID: str | None = field(default=None, kw_only=True)
+    siteServerName: str | None = field(default=None, kw_only=True)
+    SQLServerName: str | None = field(default=None, kw_only=True)
+    SQLDatabaseName: str | None = field(default=None, kw_only=True)
     version: str | None = field(default=None, kw_only=True)
-    build_number: str | None = field(default=None, kw_only=True)
-    install_dir: str | None = field(default=None, kw_only=True)
+    buildNumber: str | None = field(default=None, kw_only=True)
+    installDir: str | None = field(default=None, kw_only=True)
     # Stage 3 C5 additions — CMBP parity.
-    sql_service_account_name: str | None = field(default=None, kw_only=True)
-    distinguished_name: str | None = field(default=None, kw_only=True)
-    source_forest: str | None = field(default=None, kw_only=True)
-    admin_users: list[str] = field(default_factory=list, kw_only=True)
-    stored_accounts: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=True, kw_only=True)
+    SQLServiceAccountName: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
+    sourceForest: str | None = field(default=None, kw_only=True)
+    adminUsers: list[str] = field(default_factory=list, kw_only=True)
+    storedAccounts: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
+    # Site/SQL server identity (CMBP ps1:7052-7065, 3040). The *DomainSID fields hold the full
+    # resolved computer/account SID (CMBP names them "DomainSID" but stores the whole object SID).
+    siteServerFQDN: str | None = field(default=None, kw_only=True)
+    siteServerDomainSID: str | None = field(default=None, kw_only=True)
+    SQLServerFQDN: str | None = field(default=None, kw_only=True)
+    SQLServerDomainSID: str | None = field(default=None, kw_only=True)
+    SQLServiceAccountDomainSID: str | None = field(default=None, kw_only=True)
+    SQLServicePort: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
 class SCCMCollectionProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_collection_id: str | None = field(default=None, kw_only=True)
-    sccm_collection_type: str | None = field(default=None, kw_only=True)   # "Other"/"User"/"Device"
-    member_count: int | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    collectionID: str | None = field(default=None, kw_only=True)
+    collectionType: str | None = field(default=None, kw_only=True)   # "Other"/"User"/"Device"
+    memberCount: int | None = field(default=None, kw_only=True)
     comment: str | None = field(default=None, kw_only=True)
-    is_built_in: bool | None = field(default=None, kw_only=True)
-    limit_to_collection_id: str | None = field(default=None, kw_only=True)
-    limit_to_collection_name: str | None = field(default=None, kw_only=True)
-    collection_variables_count: int | None = field(default=None, kw_only=True)
-    root_site_code: str | None = field(default=None, kw_only=True)
-    source_site_code: str | None = field(default=None, kw_only=True)
-    last_change_time: str | None = field(default=None, kw_only=True)
-    last_member_change_time: str | None = field(default=None, kw_only=True)
+    isBuiltIn: bool | None = field(default=None, kw_only=True)
+    limitToCollectionID: str | None = field(default=None, kw_only=True)
+    limitToCollectionName: str | None = field(default=None, kw_only=True)
+    collectionVariablesCount: int | None = field(default=None, kw_only=True)
+    rootSiteCode: str | None = field(default=None, kw_only=True)
+    sourceSiteCode: str | None = field(default=None, kw_only=True)
+    lastChangeTime: str | None = field(default=None, kw_only=True)
+    lastMemberChangeTime: str | None = field(default=None, kw_only=True)
     members: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=True, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
 
 
 @dataclass
 class SCCMAdminUserProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_admin_id: str | None = field(default=None, kw_only=True)
-    admin_sid: str | None = field(default=None, kw_only=True)
-    distinguished_name: str | None = field(default=None, kw_only=True)
-    is_group: bool | None = field(default=None, kw_only=True)
-    account_type: int | None = field(default=None, kw_only=True)
-    root_site_code: str | None = field(default=None, kw_only=True)
-    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3).
-    display_name: str | None = field(default=None, kw_only=True)
-    source_site_code: str | None = field(default=None, kw_only=True)
-    created_by: str | None = field(default=None, kw_only=True)
-    created_date: str | None = field(default=None, kw_only=True)
-    last_modified_by: str | None = field(default=None, kw_only=True)
-    last_modified_date: str | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    adminID: str | None = field(default=None, kw_only=True)
+    adminSid: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
+    isGroup: bool | None = field(default=None, kw_only=True)
+    accountType: int | None = field(default=None, kw_only=True)  # port-added (no CMBP key)
+    rootSiteCode: str | None = field(default=None, kw_only=True)
+    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3). displayName is a distinct key from
+    # the framework base `displayname` — CMBP sets both, so we mirror that.
+    displayName: str | None = field(default=None, kw_only=True)
+    sourceSiteCode: str | None = field(default=None, kw_only=True)
+    createdBy: str | None = field(default=None, kw_only=True)
+    createdDate: str | None = field(default=None, kw_only=True)
+    lastModifiedBy: str | None = field(default=None, kw_only=True)
+    lastModifiedDate: str | None = field(default=None, kw_only=True)
     # Assignment lists: raw role ids, resolved role node ids, resolved collection node ids.
-    collection_ids: list[str] = field(default_factory=list, kw_only=True)
-    role_ids: list[str] = field(default_factory=list, kw_only=True)
-    member_of: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=True, kw_only=True)
+    collectionIds: list[str] = field(default_factory=list, kw_only=True)
+    roleIDs: list[str] = field(default_factory=list, kw_only=True)
+    memberOf: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
 
 
 @dataclass
 class SCCMSecurityRoleProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    sccm_role_id: str | None = field(default=None, kw_only=True)
-    sccm_role_name: str | None = field(default=None, kw_only=True)
-    role_description: str | None = field(default=None, kw_only=True)
-    is_built_in: bool | None = field(default=None, kw_only=True)
-    is_sec_admin_role: bool | None = field(default=None, kw_only=True)
-    copied_from_id: str | None = field(default=None, kw_only=True)
-    number_of_admins: int | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    roleID: str | None = field(default=None, kw_only=True)
+    roleName: str | None = field(default=None, kw_only=True)
+    roleDescription: str | None = field(default=None, kw_only=True)
+    isBuiltIn: bool | None = field(default=None, kw_only=True)
+    isSecAdminRole: bool | None = field(default=None, kw_only=True)
+    copiedFromID: str | None = field(default=None, kw_only=True)
+    numberOfAdmins: int | None = field(default=None, kw_only=True)
     operations: list[str] = field(default_factory=list, kw_only=True)
-    root_site_code: str | None = field(default=None, kw_only=True)
+    rootSiteCode: str | None = field(default=None, kw_only=True)
     # Audit fields from ROLE_COLUMNS (CMBP parity, Stage 3 C2).
-    site_code: str | None = field(default=None, kw_only=True)
-    created_by: str | None = field(default=None, kw_only=True)
-    created_date: str | None = field(default=None, kw_only=True)
-    last_modified_by: str | None = field(default=None, kw_only=True)
-    last_modified_date: str | None = field(default=None, kw_only=True)
+    siteCode: str | None = field(default=None, kw_only=True)
+    createdBy: str | None = field(default=None, kw_only=True)
+    createdDate: str | None = field(default=None, kw_only=True)
+    lastModifiedBy: str | None = field(default=None, kw_only=True)
+    lastModifiedDate: str | None = field(default=None, kw_only=True)
     # Members: upper(logon_name)@root for each admin assigned to this role.
     members: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=True, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
 
 
 @dataclass
 class SCCMClientDeviceProperties(NodeProperties):
-    collection_source: list[str] = field(default_factory=list, kw_only=True)
-    smsid: str | None = field(default=None, kw_only=True)
-    sccm_resource_id: str | None = field(default=None, kw_only=True)
-    site_code: str | None = field(default=None, kw_only=True)
-    device_os: str | None = field(default=None, kw_only=True)
-    device_os_build: str | None = field(default=None, kw_only=True)
-    is_virtual_machine: bool | None = field(default=None, kw_only=True)
-    co_managed: bool | None = field(default=None, kw_only=True)
-    aad_device_id: str | None = field(default=None, kw_only=True)
-    aad_tenant_id: str | None = field(default=None, kw_only=True)
-    last_reported_mp_server_name: str | None = field(default=None, kw_only=True)
-    primary_user: str | None = field(default=None, kw_only=True)
-    current_logon_user: str | None = field(default=None, kw_only=True)
-    ad_last_logon_user: str | None = field(default=None, kw_only=True)
-    root_site_code: str | None = field(default=None, kw_only=True)
-    possible: bool = field(default=False, kw_only=True)
-    sccm_ad_domain_sid: str | None = field(default=None, kw_only=True)
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    SMSID: str | None = field(default=None, kw_only=True)
+    resourceID: str | None = field(default=None, kw_only=True)
+    siteCode: str | None = field(default=None, kw_only=True)
+    deviceOS: str | None = field(default=None, kw_only=True)
+    deviceOSBuild: str | None = field(default=None, kw_only=True)
+    isVirtualMachine: bool | None = field(default=None, kw_only=True)
+    coManaged: bool | None = field(default=None, kw_only=True)
+    AADDeviceID: str | None = field(default=None, kw_only=True)
+    AADTenantID: str | None = field(default=None, kw_only=True)
+    lastReportedMPServerName: str | None = field(default=None, kw_only=True)
+    primaryUser: str | None = field(default=None, kw_only=True)
+    currentLogonUser: str | None = field(default=None, kw_only=True)
+    ADLastLogonUser: str | None = field(default=None, kw_only=True)
+    rootSiteCode: str | None = field(default=None, kw_only=True)
+    possible: bool = field(default=False, kw_only=True)  # port-added (no CMBP key)
+    ADDomainSID: str | None = field(default=None, kw_only=True)
     # Telemetry scalars — Stage 3 C4 (CMBP parity).
-    ad_last_logon_time: str | None = field(default=None, kw_only=True)
-    ad_last_logon_user_domain: str | None = field(default=None, kw_only=True)
-    source_site_code: str | None = field(default=None, kw_only=True)
-    last_active_time: str | None = field(default=None, kw_only=True)
-    last_online_time: str | None = field(default=None, kw_only=True)
-    last_offline_time: str | None = field(default=None, kw_only=True)
+    ADLastLogonTime: str | None = field(default=None, kw_only=True)
+    ADLastLogonUserDomain: str | None = field(default=None, kw_only=True)
+    sourceSiteCode: str | None = field(default=None, kw_only=True)
+    lastActiveTime: str | None = field(default=None, kw_only=True)
+    lastOnlineTime: str | None = field(default=None, kw_only=True)
+    lastOfflineTime: str | None = field(default=None, kw_only=True)
     # Resolved SID fields — Stage 3 C4 (CMBP ps1:7227/7232/7245/7248).
-    primary_user_sid: str | None = field(default=None, kw_only=True)
-    current_logon_user_sid: str | None = field(default=None, kw_only=True)
-    ad_last_logon_user_sid: str | None = field(default=None, kw_only=True)
-    last_reported_mp_server_sid: str | None = field(default=None, kw_only=True)
+    primaryUserSID: str | None = field(default=None, kw_only=True)
+    currentLogonUserSID: str | None = field(default=None, kw_only=True)
+    ADLastLogonUserSID: str | None = field(default=None, kw_only=True)
+    lastReportedMPServerSID: str | None = field(default=None, kw_only=True)
     # Collection membership lists — Stage 3 C4 (CMBP ps1:7228-7229).
-    collection_ids: list[str] = field(default_factory=list, kw_only=True)
-    collection_names: list[str] = field(default_factory=list, kw_only=True)
-    sccm_infra: bool = field(default=False, kw_only=True)
+    collectionIds: list[str] = field(default_factory=list, kw_only=True)
+    collectionNames: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=False, kw_only=True)

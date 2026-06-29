@@ -54,6 +54,6 @@ class GraphEdge(BaseAsset):
             end=EdgePath(match_by="id", value=self.end_id),
             properties=SCCMEdgeProperties(
                 traversable=self.kind in TRAVERSABLE_EDGE_KINDS,
-                collection_source=self.collection_source or [],
+                collectionSource=self.collection_source or [],
             ),
         )

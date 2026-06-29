@@ -8,9 +8,9 @@ def test_collection_as_node():
     assert n.id == "PS100016@CAS"
     assert n.kinds == ["SCCM_Collection"]
     assert n.properties.environmentid == "CAS"
-    assert n.properties.sccm_collection_id == "PS100016"
-    assert n.properties.sccm_collection_type == "Device"
-    assert n.properties.collection_variables_count == 3
+    assert n.properties.collectionID == "PS100016"
+    assert n.properties.collectionType == "Device"
+    assert n.properties.collectionVariablesCount == 3
 
 
 def test_collection_no_id_returns_none():
@@ -28,9 +28,9 @@ def test_collection_scalar_parity_fields():
         last_change_time="2026-01-01",
         last_member_change_time="2026-01-02",
     ).as_node
-    assert n.properties.source_site_code == "CAS"
-    assert n.properties.last_change_time == "2026-01-01"
-    assert n.properties.last_member_change_time == "2026-01-02"
+    assert n.properties.sourceSiteCode == "CAS"
+    assert n.properties.lastChangeTime == "2026-01-01"
+    assert n.properties.lastMemberChangeTime == "2026-01-02"
 
 
 def test_collection_members_on_node():

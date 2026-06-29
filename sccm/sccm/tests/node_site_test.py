@@ -111,6 +111,50 @@ def test_node_site_lists_and_sql_account():
     assert r[2] == ["S-1-5-21-1-2-3-1300"]
 
 
+def test_node_site_server_and_sql_identity():
+    """The six server-identity columns are derived from already-collected data:
+    sql_server_fqdn / sql_service_port from the site-definition Props; the site- and
+    SQL-server SIDs + the site-server FQDN from the resolved
+    *_site_definitions_computers role rows; and the SQL service-account SID resolved
+    by name through principal_by_name (CMBP ps1:7052-7065, 3040)."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    # Site definition carries the SQL FQDN + port (SMS_SCI_SiteDefinition Props).
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
+        "(VALUES ('PS1', NULL, 2, 'sql.lab.local', '1433')) "
+        "AS t(site_code, parent_site_code, site_type, sql_server_fqdn, sql_service_port)"
+    )
+    # Resolved site-server and SQL-server computers, each tagged with its role.
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions_computers AS SELECT * FROM "
+        "(VALUES ('S-1-5-21-1-2-3-1001', 'siteserver.lab.local', 'SMS Site Server@PS1'), "
+        "        ('S-1-5-21-1-2-3-1002', 'sql.lab.local', 'SMS SQL Server@PS1')) "
+        "AS t(object_sid, dns_host_name, sccm_site_system_roles)"
+    )
+    # SQL service account on the site, plus the same account as a principal so its SID resolves.
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_systems AS "
+        "SELECT 'PS1' AS site_code, 'MAYYHEM\\sqlsvc' AS sql_server_service_logon_account"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_admins AS "
+        "SELECT 'MAYYHEM\\sqlsvc' AS logon_name, 'S-1-5-21-1-2-3-1500' AS admin_sid, false AS is_group"
+    )
+    transforms(con)
+    row = con.execute(
+        "SELECT sql_server_fqdn, sql_service_port, site_server_domain_sid, site_server_fqdn, "
+        "       sql_server_domain_sid, sql_service_account_domain_sid "
+        "FROM sccm.node_site WHERE site_code='PS1'"
+    ).fetchone()
+    assert row[0] == "sql.lab.local"           # SQLServerFQDN (from Props)
+    assert row[1] == "1433"                     # SQLServicePort (from Props)
+    assert row[2] == "S-1-5-21-1-2-3-1001"      # siteServerDomainSID (full computer SID)
+    assert row[3] == "siteserver.lab.local"     # siteServerFQDN
+    assert row[4] == "S-1-5-21-1-2-3-1002"      # SQLServerDomainSID (full computer SID)
+    assert row[5] == "S-1-5-21-1-2-3-1500"      # SQLServiceAccountDomainSID (resolved by name)
+
+
 def test_node_site_ldap_distinguished_name_and_source_forest():
     """distinguished_name and source_forest from ldap_sites land in node_site."""
     con = duckdb.connect(":memory:")
