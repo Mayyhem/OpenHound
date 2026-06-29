@@ -1,91 +1,43 @@
-# Stage 2 (ope-2ff3) — subagent-driven progress ledger
-Plan: sccm/sccm/docs/superpowers/plans/2026-06-23-sccm-preproc-convert-stage2.md
-Mechanic: no commits (CLAUDE.md); per-task diffs via ephemeral git tree snapshots; implementers stage only.
-Stop gate: after Phase E (re-collect required before Phase F).
+# SDD Progress — Collect summary per-run metric (ticket ope-4c6f)
 
-## Tasks
-(pending)
+Plan: sccm/sccm/docs/superpowers/plans/2026-06-29-collect-summary-per-run-metric.md
+Branch: ohsccm
+NOTE: No commits per CLAUDE.md — owner commits manually. Reviews use working-tree diffs.
 
-- Task A1: complete (tree 2b4df8f..f4c86954, review clean). Minor (non-blocking, deferred to final): pre-existing redundant `or {}` guard; warning-path untested (brief didn't require).
-- Task A2: complete (tree f4c86954..f0b7654e, review clean). collection_settings resource wired into DISCOVERY_RESOURCE_NAMES (consumed at main.py:967) + source() return + _preproc_table_map. Phase A done.
-- Task B1: complete (tree f0b7654e..d32ac283, review clean after 1 fix). FIX: collection_type mapping corrected to {0:Other,1:User,2:Device} per CMBP:1741 (bug originated in plan; plan doc corrected); collection_variables_count now flows through. node_collection + SCCMCollection + _root_code helper.
-- Task B2: complete (tree d32ac283..(B2), review clean, no fixes). node_security_role + SCCMSecurityRole.
-- Task B3: complete (tree (B2)..(B3), review clean, DONE_WITH_CONCERNS resolved). node_admin_user (stores original-case logon_name, dedup GROUP BY upper(logon_name); model uppercases for id) + SCCMAdminUser. NOTE for C4/C5: use `\` (one backslash) in Python test VALUES for DOMAIN\user logons.
-- Task B4: complete (tree (B3)..(B4), review clean, 2 minor non-blocking). node_client_device (real clients, possible/ad_domain_sid placeholders) + SCCMClientDevice. PHASE B DONE.
-- DESIGN CHANGE for Phase C: graph_edges stays 3-col (start_id,end_id,kind) — NO JSON properties column (DuckDB returns JSON as str -> would break GraphEdge.properties:dict). Edge collection_source deferred (YAGNI; Stage 1 edges had none). Edge builders SELECT start_id,end_id,kind only. GraphEdge sets traversable from TRAVERSABLE_EDGE_KINDS.
-- Task C0: complete (tree (B4)..(C0), review clean). ReplicationEdge->GraphEdge (generic; sets traversable from TRAVERSABLE_EDGE_KINDS); kinds/edges.py +10 kinds +allowlist; SCCMEdgeProperties; _graph_edges split -> _graph_edges_init + _edge_replication. graph_edges stays 3-col. 8 tests pass.
-- Task C1: complete (tree (C0)..(C1), review clean, 1 minor non-blocking). resource_to_sid, device_by_resourceid, collection_by_name, role_by_name + principal_by_name enriched (unique_user_name/full_user_name/user_principal_name). 5 tests pass.
-- Task C2: complete (tree (C1)..(C2), review clean). _edge_has_client (Site->ClientDevice). Note: edge builders import kind constants in-function (consistent w/ _edge_replication).
-- Task C3: complete (tree (C2)..(C3), review clean). _edge_has_member (Collection->device/user; coalesce device-then-sid; built-in filter; start=collection_id@root). 1 test.
-- Task C4: complete (tree (C3)..(C4), review clean). _edge_is_mapped_to (AD principal->AdminUser; coalesce(admin_sid, pbn.sid); end=logon@root). 1 test.
-- Task C5: complete (tree (C4)..(C5), review clean). _edge_is_assigned (AdminUser->Collection by name; ->Role by id-list w/ role_names fallback gated on len(_arr(roles))=0). 1 test. PHASE C DONE.
-- Task D1: complete (tree (C5)..(D1), review clean). _edge_has_user (3 ClientDevice->User kinds; name-only fields resolved via principal_by_name; INNER JOIN drops unresolved). 1 test.
-- Task D2: complete (tree (D1)..(D2), review clean). _edge_member_of (Computer/User->Group; reuses _node_group unnest+principal_by_name; principal->group only, nesting via SharpHound). 1 test.
-- Task D3: complete (tree (D2)..(D3), review clean; full suite 119/119). _edge_has_session (RemoteRegistry host->user + MSSQL site_systems svc-acct->host, domain-only gate). DEFERRED-MINOR (final review): wmi_site_systems arm not separately test-covered (schema-identical mirror of tested adminservice arm; applies to ALL Stage 2 tasks' wmi arms by convention).
-- Task D4: complete (tree (D3)..(D4), review clean). _edge_has_stored_account (Site->User/Group from reserved_accounts). 1 test. PHASE D DONE.
-- Task E1: complete (tree (D4)..(E1), review clean). _read_disable_possible gate reader (absent->False). 3 tests. Not yet wired (E2 wires it).
-- Task E2: complete (tree (E1)..(E2), review clean). _node_client_device_possible (id=object_sid@root, gated on disable+root; ad_domain_sid=raw SID for Stage4) + wired _read_disable_possible into transforms(). HasClient auto-covers possibles. 2 tests.
-- Task E3: complete (tree (E2)..(E3), review clean, no findings). _node_backfill (stub nodes for nodeless edge endpoints, inferred kind + warn) + StubNode + BACKFILL_END_KIND. 4 tests; FULL SUITE 129 passed. PHASE E DONE.
-- ===== RE-COLLECT GATE: Phases A-E complete. Phase F (docs + code-tour harness) needs the user's single lab re-collect (covers A1 host-sid, A2 collection_settings, + ope-a88e user_group). =====
-- FINAL whole-branch review (opus): fix-then-merge. ID consistency/ordering/root-inlining/backfill all CLEAN. Fixes applied:
-  - [Important] graph_edges dedup -> _graph_edges_dedup (after edges, before backfill). dedup test + full suite 130 passed.
-  - [Minor] stale _graph_edges docstrings in graph_edges_test.py + transforms_test.py fixed.
-- DEFERRED to Phase F (real-data decision): backfill misses model-DROPPED builtin SIDs (e.g. S-1-5-32-544) reached by MemberOf/HasMember/HasStoredAccount — node_* row exists so _existing_ids skips it, but UserNode/GroupNode drop non-domain SIDs w/o fallback -> dangling edge. Latent (collected data is domain-direct). Revisit with re-collected data; interacts with locked Stage 1 drop rule.
-- DEFERRED to Phase F: README:434 stale link to deleted models/replication_edge.py (README rewrite is Task F2).
-- STATUS: Phases A-E COMPLETE + final-review fixes. All staged (NO commit per CLAUDE.md). Awaiting user: review+commit, then ONE lab re-collect, then Phase F.
+- [x] Task 1: _normalize_row_counts helper — complete (no commit; spec PASS, review clean except 1 Minor)
+- [x] Task 2: _log_collect_summary rewrite — complete (no commit; spec PASS, quality Approved, no actionable findings)
+- [x] Task 3: wire counts into collect_sccm + _run_per_host_stage — complete (no commit; spec PASS, quality Approved)
 
-== PHASE F (post-recollect, /tmp/redo) ==
-- REAL-DATA VALIDATION: all 4 Stage 2 node kinds present (collection 10, role 17, admin 3, client_device 31 + 13 possible). Edges present EXCEPT IsAssigned=0 (BUG). node_backfill=0. collection_settings(disable=F,bad_opsec=F).
-- [CRITICAL BUG found] C5 IsAssigned: real collection_names/role_names are JSON-array TEXT ('["All Systems",...]'), but C5 used string_split(',') -> garbage -> 0 edges. roles already uses _arr. FIX: use _arr() for collection_names + role_names too (superset; existing test stays green).
-- DEFERRED builtin-SID concern: NOT triggered on real data (no S-1-5-32-* endpoints; security_group_name is domain-direct). Keep backfill as-is; document latent gap. Resolved.
-- IsAssigned FIX confirmed on real data: re-preprocess+re-convert -> IsAssigned=9 (e.g. DOMAINADMIN@CAS->SMS0001R@CAS Full Admin role + collection scopes, deduped). Graph JSON has all 4 node kinds + all edge kinds. PHASE F real-data validation PASS.
-- TEST RELOCATION: 46 co-located *_test.py moved (git mv) into tests/ (kept *_test.py names, collision-free); 3 needed relative-import fixes. tests/ now 421 passed / 13 failed / 5 skipped; src collects 0.
-- 13 FAILURES = PRE-EXISTING STALE TESTS (not Stage 2): tests/test_lookup_computer_site_system_roles.py + tests/test_transforms_computer_roles.py test a removed lookup/transform design (computer_site_system_roles / site_types / computer_mp_roles). Verified: gone from current code AND from HEAD before my changes (old commits 8c8e366/d1ba4a5/0f7554f). They were never moved by me. DECISION NEEDED from user: delete stale tests or leave.
-- per_host_phases_test.py moved but has 0 test functions (it's a fixture helper) — candidate to become conftest/fixtures later.
-- PHASE F: F1 integration+preproc tests refreshed (assert Stage 2 kinds + collection_settings); F2 README + ARCHITECTURE updated (Node/Edge Reference, Limitations, CLI, Testing->pytest tests, stale replication_edge link fixed, ARCHITECTURE §11 + changelog incl. stub-backfill divergence); F3 validation doc written (real-data results). Final suite: 421 passed / 5 skipped / 13 pre-existing-stale failed.
-- ALL STAGED (no commit). OPEN DECISIONS for user: (1) delete the 13 stale tests? (2) add Stage 2 code-tour launch.json profile? (3) commit.
-- USER DECISIONS applied: (1) deleted 2 stale test files -> suite now 421 passed / 5 skipped / 0 failed. (2) added tour_driver_stage2.py + "Debug: Stage 2 code tour" launch profile (verified: emits all 4 entity nodes + possible-client + every Stage 2 edge kind incl IsAssigned + both HasSession arms; AdminsReplicatedTo CAS<->PS1 + PS1->SEC).
-- Validation doc corrected: real topology CAS -> PS1 (primary) -> SEC (secondary), NOT "2 primaries" (user catch; 3 replication edges = 2 + 1 confirms it).
-- STAGE 2 COMPLETE. All staged (no commit). Final suite 421/5/0.
+## Minor findings (for final whole-branch review fix wave)
+- [Task 1] tests/collect_summary_test.py::test_normalize_row_counts_returns_empty_when_no_normalize_info
+  passes `_FakeTrace(None)` instead of the spec's `_FakePipeline(_FakeTrace(None))`, so it hits the
+  except branch rather than the `if info is None` branch it names. Fix: restore the spec's verbatim arg.
 
-========================================================================
-== STAGE 3 (ope-1950) — Containment + RBAC fan-out + node/edge property parity
-========================================================================
-Plan: sccm/sccm/docs/superpowers/plans/2026-06-24-sccm-preproc-convert-stage3.md
-Mechanic: no commits (CLAUDE.md); per-task diffs via ephemeral git tree snapshots; implementers stage only (git add -A).
-Tests: sccm/sccm/tests/ (*_test.py); isolated uv env. NO re-collect (preproc/convert only).
-Phases: A (edge collection_source infra) -> B (10 edges) -> C (node parity, C0 gates C1-C6) -> D (docs+validation).
-Hand-off to user: when Task D3 (validation harness) is ready for lab testing.
+---
 
-## Tasks
-- Task A1: complete (tree 2ba3e795..93d62e82, review clean, Approved). graph_edges 4-col +collection_source VARCHAR[]; _graph_edges_dedup GROUP BY array-union; GraphEdge emits collection_source (or [] guard). 14 tests pass. MINOR (deferred->final): dedup test does not assert collection_source survives as []; add a short assertion later.
-- Task A2: complete (tree 93d62e82..d2caacf0, review clean, Approved). All 9 edge builders tagged with CMBP collection_source (per-source _src_tags dict: AdminService-* vs WMI-*; _edge_has_client CASE on possible; replication 3 arms; has_session 2 arms). 18 tests pass. MINORS (deferred->final): replication UNION arms 2/3 positional not aliased (works, style); broader collection_source!=[] smoke test would add regression value (combine w/ A1 dedup minor).
-- Task B0: complete (tree 39dffe2b..81671444, review clean, Approved, no issues). 10 Stage-3 edge-kind constants added to kinds/edges.py; TRAVERSABLE_EDGE_KINDS untouched; tests/kinds_edges_test.py 2/2.
-- Task B1: complete (tree a6abca94..1aac8f90, review clean, Approved). _edge_contains (non-secondary sites x {collection,role,admin}, collection_source=[SCCM_Invoke-PostProcessing]); wired after Stage-2 builders, before dedup. ID-consistency CONFIRMED vs all 3 node models (collection/role pre-uppercased; admin upper(logon_name)). 10 tests. MINOR (deferred->final): test uses double-backslash logon (MAYYHEM\\adm); real data is single-backslash; tidy later. CONVENTION for C-phase admin tests: use single backslash (Python "MAYYHEM\adm").
-- Task B2: complete (tree 9023fa1c..bd9c649a, +fix ..7372388a, review clean after 1 fix). _edge_rbac_role_grants: 7 role edges via graph_edges 3-way join (IsAssigned admin->role x IsAssigned admin->Device-collection x HasMember coll->device); _ROLE_EDGE_KIND map; same-admin join + id-consistency + pre-dedup-harmless all CONFIRMED by review.
-  - Important RESOLVED: _ROLE_KNOWN_NO_EDGE has 8 ids (incl SMS0003R Remote Tools Operator). CMBP runtime -notin array (ps1:1811-1818) omits SMS0003R (oversight -> spurious warn); port includes it (full built-in list ps1:1803-1810) so custom-role warning fires only for genuine custom roles. Comment added documenting divergence. FIX added 3 negative-path tests (custom role / non-Device collection / role-without-collection -> no edge). 4 tests pass.
-- Task B3: complete (tree 64671739..e2f1c8f8, review clean, Approved). _edge_all_permissions: Full Admin(SMS0001R)+BOTH SMS00001&SMS00004 -> every non-secondary site; BOTH-required via TWO distinct joins (not IN) CONFIRMED; role pin + non-secondary + id-joins confirmed. 8 tests (incl. missing-either negatives). MINORS (deferred->final): no wrong-role negative test; redundant upper() on pre-uppercased cols (pre-existing pattern).
-- Task B4: complete (tree 471badb8..d2719fec, review clean, Approved, no issues). _edge_assign_all_permissions: Computer w/ SMS Provider site_system_role -> every non-secondary site; list_filter on role array (element match, not substring); start=raw SID. 11 tests (positive+negative). ===== PHASE B COMPLETE (10 Stage-3 edges + WS-1 retrofit). =====
-- PHASE A+B integration: 114 passed across transforms+all edge builders+node coalesces+models (full suite has slow http/wmi/network tests, run subset). Clean.
-- Task C0: complete (matrix doc docs/superpowers/plans/2026-06-24-stage3-property-matrix.md; review Approved +1 doc-fix). Per-kind PORT-NOW counts: Computer 3, User 2, Group 0(no group LDAP collector), Collection 4, SecurityRole 6, AdminUser 9, ClientDevice 12, Site 5. Verified vs sms_rows.py tuples + ldap.py. Reclassified->PORT-NOW: ClientDevice last_active/online/offline_time (in DEVICE_COLUMNS); Site distinguished_name+source_forest (ldap_sites). FIX: Computer.distinguished_name source corrected ldap_cmrc->smb_computers (+ad_object sources); dup row removed. Lab spot-check deferred to Phase D (no lookup.duckdb present). C1-C6 implementers: consult the matrix doc for the authoritative field list.
-- Task C1: complete (tree c0a42b52..1438118a, +idiom-fix, review clean after 1 fix; all 4 named risks CLEAN). SCCM_Collection parity: scalars source_site_code/last_change_time/last_member_change_time into _node_collection; new _enrich_collection_members (raw ResourceID@SiteCode keys incl built-ins, from collection_members, NOT graph_edges); enrichment block wired after _role_by_name before _graph_edges_init. FIX: model list field -> Field(default_factory=list) (C2-C5 use this idiom). 16 tests. ESTABLISHED: _enrich_* block in transforms() for C2-C5 list builders.
-- Task C2: complete (tree c8132b4a..cb246ec7, review clean, Approved; all 5 named risks CLEAR). SCCM_SecurityRole parity: audit scalars (site_code=source_site, created_by/date, last_modified_by/date) into _node_security_role; new _enrich_role_members (admin node ids upper(logon_name)@root per role; roles via _arr + role_names fallback gated len(_arr(roles))=0; from raw admins NOT graph_edges). Model members+operations use Field(default_factory=list). Tests use parameterized inserts for DOMAIN\user (avoids backslash ambiguity). 22 tests. MINOR(defer): add comment that Arm2 rbn.role_id already uppercased.
-- Task C3: complete (tree d922c5d3..11389e10, review clean, Approved; all 6 named risks CLEAN). SCCM_AdminUser parity: audit scalars (display_name expose, source_site_code, created_by/date, last_modified_by/date) into _node_admin_user; new _enrich_admin_assignments (4-arm _aassign: role_ids RAW, member_of=role_id@root, role_names fallback gated, collection_ids=collection_id@root via collection_by_name; _arr throughout). display_name distinct from name(=logon). Lists Field(default_factory=list). 16 tests. Reviewer MINOR (role_by_name case) = FALSE POSITIVE: _role_by_name/_collection_by_name store name as upper(trim(...)) (Stage 2; IsAssigned worked on real data). No action.
-- Task C4: complete (tree b71d70fe..1f03d479, +idiom-fix, review clean after 1 fix; risks 1-4 CLEAN). SCCM_ClientDevice parity: 6 scalars (ad_last_logon_time, ad_last_logon_user_domain, source_site_code + matrix-added last_active/online/offline_time); new _enrich_client_device (4 *_sid resolved via principal_by_name correlated subqueries; collection_ids@root + collection_names from collection_members JOIN collections keyed resource_id_str). d.* preserves smsid/site_code/root/possible/ad_domain_sid. FIX: model collection_ids/collection_names = None -> Field(default_factory=list). 17 tests. DEFER-D: verify ad_last_logon_time column name vs dlt camelCase on real lab data.
-- Task C5: complete (tree a8bb6cc7..812e5aab, +site_code-fix, review clean after 1 fix; risks CLEAN). SCCM_Site parity: scalars sql_service_account_name(site_systems), distinguished_name+source_forest(ldap_sites); new _enrich_site_lists (admin_users=all admin node ids@root; stored_accounts=reserved object_sid per site). FIX: _stored INSERT now upper(site_code) (mixed-case join bug). Deferred kept out: display_name, SQL SID/FQDN/port (Stage5), client_certificate_required. 23 tests. MINOR(final-sweep): sccm_site.py collection_source=[] pre-existing bare default -> Field(default_factory=list).
-- Task C6: complete (tree 4139a1f3..12d4b986, +wmi-DN-fix, review clean after 1 fix). Base-node parity: Computer expose dnshostname+sam_account_name + add distinguished_name (from smb/remoteregistry/adminservice+wmi site_definitions_computers); User add distinguished_name+user_principal_name (r_user); Group untouched (no source). Deferred kept out: Computer DHCP/PXE, User NAA. FIX: wmi_site_definitions_computers arm was NULL AS distinguished_name (both site-def tables share _site_definitions() spreading **ad_object) -> now selects distinguished_name + covering test. ===== PHASE C COMPLETE (all 8 node kinds at parity for collectable fields). =====
-- PHASE C integration: 153 passed across full Stage-3 preproc/convert surface. Clean.
-- Task D1: complete (ARCHITECTURE.md §11c: graph_edges 3->4 col +collection_source VARCHAR[] typed; GraphEdge sets traversable+collection_source; dedup GROUP BY array-union; quick-ref table row + 2026-06-25 changelog entry). Doc; review folded into combined D1+D2 doc review.
-- Task D2: complete (README: intro/TOC/Limitations edge count 10->20; 10 Stage-3 edges in Edge Reference w/ start->end + traversable flags; per-kind Stage-3 properties in Node Reference; collection_source documented; deferred props in Limitations only; mayyhem.com Full-Admin path example). +3-desc fix (admin_users/stored_accounts/collection_ids = scoped node-ids/SIDs not raw names).
-- D1+D2 combined doc review: all critical PASS (20 edges, traversable flags all correct, directions correct, deferred props excluded from reference, ARCHITECTURE §11c accurate). 3 minor desc fixes applied.
-- Task D3: complete (tour_driver_stage3.py + validation doc + .vscode launch profile; review Approved). Driver RAN CLEAN: 33 edges, 0 empty collection_source, all 4 Stage-3 edge kinds (Contains 10, FullAdmin 1, AllPerms 2, AssignAllPerms 2), backfill 0, convert emitted node+edge JSON. 11-stop code tour w/ exact file:lines; black-box smoke check w/ greps incl dlt-snakecase guard for ad_last_logon_time. ===== PHASE D code/docs/harness COMPLETE. D4 = USER real-data lab run (no lookup.duckdb on this box). HARNESS READY FOR USER TESTING. =====
-- FINAL whole-branch review (opus): APPROVED TO MERGE, no must-fix. 6 cross-cutting checks all CLEAN (transforms() ordering; enrich-before-edges + column preservation; collection_source VARCHAR[]->list[str]->SCCMEdgeProperties; id-format upper(id)@root consistent; coalesce<->dataclass<->model types; no swallowed errors). Full suite 476 passed / 5 skipped. CORRECTION: bare list[str]=[] defaults are on PYDANTIC models -> safe (per-instance deep copy); Field(default_factory=list) was idiom-only, not a bugfix.
-- OPTIONAL non-gating follow-ups: (1) A1 multi-source collection_source merge test; (2) C5 style sweep of remaining bare [] list defaults in models computer.py/group.py/sccm_site.py/user.py -> Field(default_factory=list).
-- STAGE 3 CODE/TESTS/DOCS/HARNESS COMPLETE. All STAGED, NO COMMIT (CLAUDE.md). Awaiting USER: run validation harness/D4 lab loop, then commit. gtk ope-1950 in_progress.
-- D4 REAL-DATA VALIDATION (user ran collect/preproc/convert -> C:/tmp/redo; 13 adminservice tables / 0 wmi): PASS. SMS00001=All Systems, SMS00004=All Users and User Groups (CONFIRMED). node_client_device.ad_last_logon_time present (NOT a_d_last_logon_time). graph_edges 300 edges, 0 empty collection_source. All 10 Stage-3 edge kinds present (Contains 62, FullAdmin 18, AppAdmin 18, AllPerms 2, AssignAllPerms 8; other 5 role kinds 0 = no admins assigned them, expected). DOMAINADMIN@CAS FullAdministrator->18 devices. Node props populate; role_ids=0 because SMS_Admin.Roles empty in lab -> member_of via RoleNames fallback (CMBP-documented). convert JSON matches graph_edges exactly.
-- USER FEEDBACK (post-validation): (1) rename cryptic SQL aliases (ia_role/c_au/ia_au...) in Stage-3 edge builders for readability; (2) mute preproc WMI-missing warnings when AdminService sibling tables present.
-- FEEDBACK changes complete + reviewed (Approved) + VERIFIED ON REAL LAB DATA:
-  (1) SQL aliases: _edge_rbac_role_grants/_edge_all_permissions/_edge_contains/_edge_assign_all_permissions cryptic aliases -> descriptive (admin_to_role, full_admin_role, all_systems_collection, client_device, ...) + plain-English join comments. Behavior-preserving: re-preprocess of lab raw -> IDENTICAL graph_edges (300 edges, 0 empty collection_source, Contains 62/FullAdmin 18/AppAdmin 18/AllPerms 2/AssignAllPerms 8, DOMAINADMIN@CAS->18).
-  (2) _safe mutes expected WMI<->AdminService fallback missing-source misses (DEBUG not WARNING) when the sibling family table exists; sibling check scoped to the missing table schema. Re-preprocess of lab raw (13 adminservice/0 wmi): 0 missing-source WARNINGs (was noisy). 11 tests + 3 new _safe fallback tests pass.
-- STATUS: Stage 3 + feedback COMPLETE, all reviewed, validated on real data. ALL STAGED, NO COMMIT (CLAUDE.md). Awaiting user commit. Optional non-gating: A1 multi-source collection_source merge test; C5 bare-[] list defaults in 4 models -> Field(default_factory=list) (final review confirmed SAFE on Pydantic, idiom-only).
-- POLISH complete (review Approved): 5 model list fields ([] -> Field(default_factory=list)) in computer.py/group.py/sccm_site.py/user.py + Field imports; 2 new dedup tests (multi-source collection_source array-union + identical-tag collapse). 43 tests pass. Stage 3 fully done. UNSTAGED per user request (controller will not git add going forward).
+# SDD Progress — Split AD nodes/edges into a separate untagged OpenGraph file (ticket ope-6aa7)
+
+Plan: sccm/sccm/docs/superpowers/plans/2026-06-29-split-ad-nodes-edges-output.md
+Branch: ohsccm
+NOTE: No commits per CLAUDE.md — owner commits manually. Reviews use working-tree diffs.
+NOTE: main.py has unrelated pre-existing uncommitted changes (ope-4c6f collect-summary); Task 3
+      review uses a pre-task snapshot of main.py to isolate this ticket's diff. Other task files
+      are clean vs HEAD b4b2e3a.
+
+- [x] Task 1: Preproc edge split (_graph_edges_split) — complete (no commit; spec ✅, quality Approved; 2 Minor)
+- [x] Task 2: Untagged destination + parameterized emit_graph_from_duckdb — complete (no commit; spec ✅, 1 Important + 1 Minor fixed, re-review Approved)
+- [x] Task 3: Split convert specs + two-pass convert — complete (no commit; spec ✅, all 4 named risks clean, quality Approved; brief test seed site_type fixed 'Primary'->2 int)
+- [x] Task 4: Docs (README + ARCHITECTURE §11f) — complete (no commit; spec ✅, 6/6 code-truth checks pass, quality Approved; 2 cosmetic Minor)
+- [x] FINAL whole-branch review (opus) — Ready to merge: YES. No Critical/Important defects. 513 passed/5 skipped.
+      Cross-task invariants verified vs live source (table-name lineup, post-backfill ordering, bare-Base
+      stub routing on both axes, no-metadata AD writer, faithful core mirror).
+      ⚠️ COMMIT-SEQUENCING CAVEAT: this ticket renames NODE_SPECS/EDGE_SPECS -> SCCM_*/AD_*. The uncommitted
+      Stage 5 (MSSQL) plan adds entries to NODE_SPECS and a test imports NODE_SPECS — incompatible. Whichever
+      lands second must reconcile: Stage 5 MSSQL nodes go into SCCM_NODE_SPECS (before node_backfill), and the
+      Stage 5 test must import SCCM_NODE_SPECS.
+
+## Minor findings — ALL APPLIED 2026-06-29 (cosmetic cleanup, split test re-run 1 passed)
+- [x] [Task 1] graph_edges_split_test.py _seed helper: collapsed alignment whitespace on AS sid/AS id selects.
+- [x] [Task 1] transforms.py: added comment on _ad_ids that the bare (unqualified) TEMP TABLE name is intentional.
+- [x] [Task 4] ARCHITECTURE.md §11f: reworded "Node routing is free" -> "Node routing needs no preproc step".
+- [x] [Task 4] ARCHITECTURE.md §11f trade-offs: graph_edges_split_test.py now a relative-path markdown link.

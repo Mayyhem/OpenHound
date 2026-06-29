@@ -761,7 +761,7 @@ def _build_phase_scope():
     return _phase_scope
 
 
-def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000, phases=None) -> None:
+def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000, phases=None) -> dict[str, int]:
     """Stage 2: drain the work queue with a worker pool while streaming each
     per-host table to disk through its emit resource.
 
@@ -816,6 +816,7 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
     previous = {key: os.environ.get(key) for key in env_overrides}
     os.environ.update(env_overrides)
 
+    per_host_counts: dict[str, int] = {}
     pool_thread = threading.Thread(target=_pool, name="per-host-pool", daemon=True)
     pool_thread.start()
     try:
@@ -826,6 +827,10 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
             write_disposition="append",
             loader_file_format="jsonl",
         )
+        # Capture this run's per-table row counts from dlt's normalize step while
+        # the in-memory trace still reflects the per-host pass — a later run on the
+        # same pipeline would replace it.
+        per_host_counts = _normalize_row_counts(pipeline)
     finally:
         # Always await the engine thread. If pipeline.run raised, the emit
         # consumers stopped draining, so a worker may be blocked on a full
@@ -846,6 +851,7 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = prior
+    return per_host_counts
 
 
 # ---------------------------------------------------------------------------
@@ -973,6 +979,9 @@ def collect_sccm(
         # Stage 1 — discovery (once-phases): run only the discovery resources.
         # They seed the work queue via register_target (allow-list applied).
         load_info = collector.run(src.with_resources(*DISCOVERY_RESOURCE_NAMES))
+        # Capture discovery row counts from the pipeline that just ran (held via
+        # LoadInfo.pipeline) before the per-host pass replaces the trace.
+        discovery_counts = _normalize_row_counts(load_info.pipeline) if load_info else {}
 
         # Seed CLI-specified targets through the same register_target path, so
         # the allow-list / resolution / dedup is identical for them.
@@ -983,8 +992,10 @@ def collect_sccm(
         # Stage 2 — per-host collection: a worker pool runs each target's phases
         # in order while emit resources stream the tables to disk, looping
         # recursively until the work queue drains.
-        if per_host_ctx is not None and PER_HOST_PHASES:
-            _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
+        per_host_counts: dict[str, int] = {}
+        per_host_expected = bool(per_host_ctx is not None and PER_HOST_PHASES)
+        if per_host_expected:
+            per_host_counts = _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
 
         set_shared_queue(None)
         set_shared_ad_cache(None)
@@ -994,7 +1005,7 @@ def collect_sccm(
         # global section rather than inheriting whatever phase ran last.
         from .log_context import phase_context, target_context
         with target_context(None), phase_context(None):
-            _log_collect_summary(load_info, output_path)
+            _log_collect_summary(discovery_counts, per_host_counts, per_host_expected, output_path)
         return load_info
     finally:
         _oh_logger.setLevel(_oh_original_level)
@@ -1024,46 +1035,111 @@ def collect_sccm(
                     detail,
                 )
 
-def _log_collect_summary(load_info: "Optional[LoadInfo]", output_path: pathlib.Path) -> None:
+def _normalize_row_counts(pipeline) -> dict[str, int]:
+    """Return ``{table_name: rows}`` from *pipeline*'s most recent normalize step.
+
+    dlt records per-run row counts on the pipeline trace. ``last_trace`` is
+    replaced by each multi-step ``pipeline.run``, so callers must read this right
+    after the run whose counts they want — not once at the end. dlt bookkeeping
+    tables (``_dlt_*``) are dropped. Returns ``{}`` when no trace or normalize
+    info is available (e.g. a run that failed before normalize); the summary
+    treats an empty result from an expected stage as a "partial run" signal.
+    """
+    try:
+        trace = pipeline.last_trace
+        if trace is None:
+            # No run has completed on this pipeline object yet.
+            logger.debug("No dlt trace on pipeline; row counts unavailable")
+            return {}
+        info = trace.last_normalize_info
+        if info is None:
+            # Trace exists but the run never reached the normalize step.
+            logger.debug("No dlt normalize info on trace; row counts unavailable")
+            return {}
+        return {
+            table: int(rows)
+            for table, rows in info.row_counts.items()
+            if not table.startswith("_dlt")
+        }
+    except Exception as ex:
+        # A metrics read must never break the collection summary.
+        logger.warning("Could not read dlt row counts for the collection summary: %s", ex)
+        return {}
+
+def _log_collect_summary(
+    discovery_counts: dict[str, int],
+    per_host_counts: dict[str, int],
+    per_host_expected: bool,
+    output_path: pathlib.Path,
+) -> None:
     """Emit an end-of-collection summary at INFO level.
 
-    The final node/edge totals aren't known yet at this phase —
-    those come from ``output.py::package`` after convert. We emit row
-    counts per resource so the operator sees what was extracted before
-    moving on to preprocess/convert.
-
-    Row counts are read by counting JSONL rows on disk under
-    ``<output>/sccm/<table>/``
+    Row counts are a TRUE per-run metric: they come from dlt's normalize step
+    for this run's two passes (discovery + per-host), merged here. This replaces
+    the old on-disk directory scan, which double-counted stale tables left by
+    older code or prior runs. The final node/edge totals aren't known yet — those
+    come from ``output.py::package`` after convert.
     """
     logger.info("Collection complete.")
     logger.info("Raw output directory: %s", output_path)
+
+    # Merge the two stages. Their table sets are disjoint (discovery emits
+    # ldap_*/dns_*/local_*/collection_settings; per-host emits the rest), but sum
+    # on overlap so a future shared table can never silently drop rows.
+    counts: dict[str, int] = dict(discovery_counts)
+    for table, rows in per_host_counts.items():
+        counts[table] = counts.get(table, 0) + rows
+
+    # A stage we expected to run but got no counts from means the numbers below
+    # are partial — e.g. the stage raised before dlt normalized, or its trace was
+    # lost. Surface it rather than silently under-reporting.
+    if not discovery_counts:
+        logger.warning("Discovery stage reported no row counts; the collection summary may be incomplete.")
+    if per_host_expected and not per_host_counts:
+        logger.warning("Per-host stage reported no row counts; the collection summary may be incomplete.")
+
+    if counts:
+        total = sum(counts.values())
+        logger.info("Extracted %d rows across %d resources:", total, len(counts))
+        for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            logger.info("    %-40s %d", name, count)
+    else:
+        # Both stages empty — nothing was extracted at all.
+        logger.warning("No rows were extracted during this collection run.")
+
+    # Flag stale/orphan table folders so an operator notices data left by older
+    # code or earlier runs (e.g. a renamed resource). Compared against the
+    # authoritative table universe (the preproc map) rather than this run's
+    # counts, so a current table that legitimately got 0 rows is never mis-flagged.
     try:
         dataset_dir = output_path / "sccm"
-        if not dataset_dir.is_dir():
-            return
-        per_resource: dict[str, int] = {}
-        import gzip
-        for table_dir in sorted(dataset_dir.iterdir()):
-            if not table_dir.is_dir() or table_dir.name.startswith("_dlt"):
-                continue
-            row_count = 0
-            for f in table_dir.glob("*.jsonl*"):
-                try:
-                    opener = gzip.open if f.suffix == ".gz" else open
-                    with opener(f, "rt", encoding="utf-8", errors="replace") as fh:
-                        row_count += sum(1 for line in fh if line.strip())
-                except OSError:
-                    continue
-            per_resource[table_dir.name] = row_count
-        if per_resource:
-            total = sum(per_resource.values())
-            logger.info("Extracted %d rows across %d resources:", total, len(per_resource))
-            for name, count in sorted(per_resource.items(), key=lambda kv: (-kv[1], kv[0])):
-                logger.info("    %-40s %d", name, count)
-        logger.info("Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then 'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'")
+        if dataset_dir.is_dir():
+            known = set(_preproc_table_map().keys())
+            on_disk = {
+                d.name
+                for d in dataset_dir.iterdir()
+                if d.is_dir() and not d.name.startswith("_dlt")
+            }
+            orphans = sorted(on_disk - known)
+            if orphans:
+                logger.warning(
+                    "Found %d stale table folder(s) under %s not produced by any current "
+                    "collector (likely from older code or prior runs): %s. Preprocess/convert "
+                    "ignore them, but you may want to delete them.",
+                    len(orphans), dataset_dir, ", ".join(orphans),
+                )
+            else:
+                logger.debug("No orphan table folders under %s", dataset_dir)
+        else:
+            logger.debug("Dataset dir %s missing; skipping orphan-folder check", dataset_dir)
     except Exception as ex:
-        # Summary is best-effort — never fail the collect because of a log line.
-        logger.error("Collection-summary emit failed: %s", ex)
+        # Orphan detection is best-effort — never fail collect because of it.
+        logger.error("Orphan-folder check failed: %s", ex)
+
+    logger.info(
+        "Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then "
+        "'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'"
+    )
 
 
 # Set at module scope so `CollectorManager.validate_extension` (which runs at
@@ -1175,31 +1251,53 @@ def _noop_convert_source():
     return _empty
 
 
-# Registry of (table_name, ModelClass) pairs that the convert pipeline iterates.
-# Grows by one entry per task: Task 3 = Computer, Task 4 = User, Task 5 = Group,
-# Task 6 = SCCM_Site, Task 7 = graph_edges (via EDGE_SPECS).
-NODE_SPECS: list[tuple[str, type]] = [
-    ("node_computer", ComputerNode),
-    ("node_user", UserNode),
-    ("node_group", GroupNode),
+# Registry of (table_name, ModelClass) pairs the convert pipeline iterates, split into the
+# two OpenGraph payloads (ARCHITECTURE.md §11f):
+#   - SCCM payload  -> source_kind="SCCM"  (custom SCCM_* kinds only)
+#   - AD payload    -> NO source_kind      (native Computer/User/Group + backfill stubs;
+#                                           BloodHound merges these into its AD graph)
+SCCM_NODE_SPECS: list[tuple[str, type]] = [
     ("node_site", SCCMSite),
     ("node_collection", SCCMCollection),
     ("node_security_role", SCCMSecurityRole),
     ("node_admin_user", SCCMAdminUser),
     ("node_client_device", SCCMClientDevice),
-    # node_backfill is LAST: stubs are only emitted for endpoint ids that have no
-    # real node in any table above. Real nodes win any id overlap via append semantics.
+]
+
+AD_NODE_SPECS: list[tuple[str, type]] = [
+    ("node_computer", ComputerNode),
+    ("node_user", UserNode),
+    ("node_group", GroupNode),
+    # node_backfill is LAST so a real AD node wins any id overlap via append semantics.
+    # Every backfill stub is an AD principal (User/Group/Computer or bare Base).
     ("node_backfill", StubNode),
 ]
 
-EDGE_SPECS: list[tuple[str, type]] = [
-    ("graph_edges", GraphEdge),
-]
+# graph_edges_sccm / graph_edges_ad are the partition built by transforms._graph_edges_split.
+SCCM_EDGE_SPECS: list[tuple[str, type]] = [("graph_edges_sccm", GraphEdge)]
+AD_EDGE_SPECS: list[tuple[str, type]] = [("graph_edges_ad", GraphEdge)]
+
+
+def _emit_split_graph(lookup: SCCMLookup, output_path) -> None:
+    """Emit the SCCM graph as two payloads into the same directory.
+
+    The SCCM payload (sccm_* files) carries source_kind="SCCM"; the AD payload (ad_* files)
+    carries no source_kind so BloodHound merges its Computer/User/Group/stub nodes and the
+    edges touching them into the native AD graph. See ARCHITECTURE.md §11f.
+    """
+    emit_graph_from_duckdb(
+        lookup, output_path, app.source_kind,
+        SCCM_NODE_SPECS, SCCM_EDGE_SPECS, resource_prefix="sccm",
+    )
+    emit_graph_from_duckdb(
+        lookup, output_path, None,
+        AD_NODE_SPECS, AD_EDGE_SPECS, resource_prefix="ad",
+    )
 
 
 @app.convert(lookup=SCCMLookup)
 def convert(ctx: ConvertContext):
-    """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), then hand the
-    framework a no-op source."""
-    emit_graph_from_duckdb(ctx.lookup, ctx.output_path, app.source_kind, NODE_SPECS, EDGE_SPECS)
+    """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), as two
+    payloads (SCCM-tagged + untagged AD), then hand the framework a no-op source."""
+    _emit_split_graph(ctx.lookup, ctx.output_path)
     return _noop_convert_source(), {}

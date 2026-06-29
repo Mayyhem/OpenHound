@@ -48,6 +48,7 @@ Every section follows the same spine:
   - [11c. Traversable allow-list and the generic GraphEdge model](#11c-traversable-allow-list-and-the-generic-graphedge-model)
   - [11d. Stage 4: client-device dedup and host-correlation edges](#11d-stage-4-client-device-dedup-and-host-correlation-edges)
   - [11e. Edge-endpoint stub-node backfill (new divergence category)](#11e-edge-endpoint-stub-node-backfill-new-divergence-category)
+  - [11f. Split output: an untagged AD payload beside the SCCM source](#11f-split-output-an-untagged-ad-payload-beside-the-sccm-source)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -837,6 +838,58 @@ This mirrors CMBP's `Upsert-Node` semantics: **every edge endpoint gets a node**
 
 ---
 
+### 11f. Split output: an untagged AD payload beside the SCCM source
+
+*This is a new category of divergence from a stock OpenHound collector.*
+
+#### The framework baseline
+
+A stock collector emits one OpenGraph dataset under a single `source_kind`. Core's
+`opengraph_file` destination takes `source_kind` as a required `dlt.config.value` and stamps
+`{"metadata": {"source_kind": ...}}` into every file. There is no provision for emitting part
+of the graph under a *different* source — or under *no* source at all.
+
+#### Why it breaks for SCCM
+
+The SCCM graph mixes two ownership domains. `SCCM_*` nodes are genuinely SCCM-owned and should
+register under the `SCCM` source. But `Computer` / `User` / `Group` (and the backfill stubs) are
+**Active Directory** objects — the same objects SharpHound collects. Tagging them with
+`source_kind="SCCM"` makes the SCCM source *own* native AD nodes, so re-ingesting or deleting the
+SCCM source would touch AD data it shouldn't. We want the AD nodes (and the edges touching them)
+to merge into BloodHound's **native AD graph** by SID, augmenting SharpHound rather than shadowing
+it — which means emitting them with **no `source_kind` at all**.
+
+#### The add-on: a second emit pass + an untagged extension destination
+
+- **Node routing needs no preproc step.** The coalesced `node_*` tables are already segregated by type, so the
+  convert spec list is just split into `SCCM_NODE_SPECS` (`node_site`/`collection`/`security_role`/
+  `admin_user`/`client_device`) and `AD_NODE_SPECS` (`node_computer`/`user`/`group`/`backfill`) in
+  [main.py](src/openhound_sccm/main.py).
+- **Edge routing is one preproc step.** `transforms._graph_edges_split` runs *after*
+  `_node_backfill` and partitions `graph_edges` into `graph_edges_ad` (either endpoint id is in
+  `node_computer ∪ node_user ∪ node_group ∪ node_backfill`) and `graph_edges_sccm` (the EXISTS/NOT
+  EXISTS complement). Every backfill stub id counts as AD, so the `SCCM_HasMember` /
+  `SCCM_HasStoredAccount` edges to bare-`Base` principals follow their stub into the AD payload.
+- **Two emit passes.** `_emit_split_graph` calls `emit_graph_from_duckdb` twice into the same
+  directory: the SCCM pass (`source_kind="SCCM"`, `resource_prefix="sccm"`) through core's
+  `opengraph_file`, and the AD pass (`source_kind=None`, `resource_prefix="ad"`) through the
+  extension's [`opengraph_file_untagged`](src/openhound_sccm/opengraph_untagged.py) — a sibling of
+  core's writer that omits the `metadata` block entirely. Distinct resource prefixes give distinct
+  file basenames (`sccm_*` vs `ad_*`), so two pipelines writing to one directory never collide.
+
+#### Trade-offs
+
+- An AD↔SCCM edge lives in the untagged file but references an `SCCM_*` node defined in the tagged
+  file; this is safe only because BloodHound resolves edge endpoints by id across all ingested
+  files — so both file sets must be uploaded together.
+- `opengraph_file_untagged` duplicates core's writer logic (a coupling to watch on OpenHound
+  upgrades), because core's destination can't express "no metadata" and core is off-limits.
+- `_graph_edges_split` must run after `node_backfill`; a future reordering of `transforms()` that
+  breaks that would silently route stub-edges to the wrong file. Guarded by
+  [`graph_edges_split_test.py`](tests/graph_edges_split_test.py).
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -853,6 +906,7 @@ This mirrors CMBP's `Upsert-Node` semantics: **every edge endpoint gets a node**
 | Persist-at-collect / gate-in-preproc (`disable_possible_edges`) | `collection_settings` one-row table written at collect; `_read_disable_possible` reads it in preproc | A first-class CLI flag shared across pipeline phases |
 | Traversable allow-list + collection source | `TRAVERSABLE_EDGE_KINDS` frozenset in `kinds/edges.py`; `GraphEdge` sets `traversable` from it and `collection_source` from the `graph_edges` typed `VARCHAR[]` column; dedup pass array-unions `collection_source` per `(start_id, end_id, kind)` group | A graph-model-level traversability attribute; a typed array column on edges |
 | Edge-endpoint stub-node backfill | `_node_backfill` + `StubNode` synthesise bare nodes for unresolved edge endpoints | An `Upsert-Node`-equivalent that creates nodes on demand |
+| Split output (untagged AD payload) | A second `convert`-time emit pass through an extension `opengraph_file_untagged` destination (no `metadata`); preproc `_graph_edges_split` partitions edges | A `source_kind=None` / multi-source option on `@app.convert` |
 
 ---
 
@@ -877,6 +931,7 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-06-29 | Split output shipped. Added §11f: `convert` now writes two payloads — the SCCM-tagged set (`sccm_*`, `source_kind="SCCM"`) and an untagged AD set (`ad_*`, no `metadata` block) for native AD-graph merge. New preproc step `transforms._graph_edges_split` partitions `graph_edges` into `graph_edges_ad` / `graph_edges_sccm`; new extension destination `opengraph_file_untagged`; `emit_graph_from_duckdb` gained `resource_prefix` + `source_kind=None` (untagged) handling; `NODE_SPECS`/`EDGE_SPECS` split into `SCCM_*`/`AD_*` spec lists. |
 | 2026-06-29 | Stage 4 shipped. Added §11d documenting `_dedup_client_device` (merge real+inferred SCCM_ClientDevice twins by `ad_domain_sid`, runs before all edge builders — deliberate divergence from CMBP's post-edge merge order), `_edge_same_host` (bidirectional `Computer ↔ SCCM_ClientDevice` `SameHostAs`), and `_edge_local_admin_required` (site server → peer site systems `LocalAdminRequired`). Renamed §11d stub-node backfill to §11e. Updated §11b: inferred client rows now use `is_confirmed_active_client = False` (not "possible"); note the Stage 4 `SameHostAs` edge that links them back to AD computer objects. |
 | 2026-06-25 | Stage 3 shipped. Updated §11c: `graph_edges` is now four columns (`start_id`, `end_id`, `kind`, `collection_source VARCHAR[]`); `GraphEdge` sets both `traversable` and `collection_source`; dedup pass groups by `(start_id, end_id, kind)` and array-unions `collection_source` via `list_distinct(flatten(list(...)))`. Updated quick-reference table row. |
 | 2026-06-23 | Stage 2 preproc/convert shipped. Added §11 documenting the four Stage 2 add-ons: `host_object_sid` on RemoteRegistry current-user rows; `collection_settings` one-row flag persistence; `_read_disable_possible` persist-at-collect/gate-in-preproc mechanism; `TRAVERSABLE_EDGE_KINDS` + generic `GraphEdge`; and the new divergence category **edge-endpoint stub-node backfill** (`node_backfill` + `StubNode`). Updated §9 status from "design stage" to "Stages 1–2 shipped". Updated quick-reference table. |

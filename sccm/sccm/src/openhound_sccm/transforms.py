@@ -2507,6 +2507,49 @@ def _node_backfill(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         logger.debug("node_backfill: every edge endpoint has a node")
 
 
+def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Partition graph_edges into an AD-touching set and an SCCM-only set.
+
+    An edge belongs to the AD payload when EITHER endpoint is an AD node id: a
+    Computer/User/Group coalesce row, or a backfill stub (every backfill stub is an
+    unresolved AD principal, including the bare-'Base' ones). The AD payload is emitted to
+    the untagged ad_* OpenGraph files (no source_kind) so BloodHound merges those nodes and
+    relationships into its native AD graph. Every other edge has both ends in the SCCM_*
+    node space and stays in the SCCM-tagged payload.
+
+    Runs LAST, after _node_backfill, so the AD id set includes the stub ids minted there.
+    Reads graph_edges without mutating it (node_backfill has already consumed it). EXISTS /
+    NOT EXISTS make the two output tables an exact complement, NULL-safe even for a malformed
+    edge with a NULL endpoint (it falls to the SCCM-only side deterministically).
+    """
+    # _ad_ids is a session-local TEMP TABLE (DuckDB's temp schema); intentionally unqualified —
+    # do NOT add a {schema}. prefix, that would be invalid for a temp table.
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE _ad_ids AS "
+        f"SELECT sid AS id FROM {schema}.node_computer WHERE sid IS NOT NULL "
+        f"UNION SELECT sid FROM {schema}.node_user WHERE sid IS NOT NULL "
+        f"UNION SELECT sid FROM {schema}.node_group WHERE sid IS NOT NULL "
+        f"UNION SELECT id FROM {schema}.node_backfill WHERE id IS NOT NULL"
+    )
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.graph_edges_ad AS "
+        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source "
+        f"FROM {schema}.graph_edges e "
+        f"WHERE EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
+        f"   OR EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
+    )
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.graph_edges_sccm AS "
+        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source "
+        f"FROM {schema}.graph_edges e "
+        f"WHERE NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
+        f"  AND NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
+    )
+    ad_cnt = con.execute(f"SELECT count(*) FROM {schema}.graph_edges_ad").fetchone()[0]
+    sccm_cnt = con.execute(f"SELECT count(*) FROM {schema}.graph_edges_sccm").fetchone()[0]
+    logger.info("graph_edges split: %d AD-touching, %d SCCM-only", ad_cnt, sccm_cnt)
+
+
 def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     """Top-level transform entrypoint (registered via @app.preproc(transformer=transforms))."""
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
@@ -2568,3 +2611,7 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # that resolved to a SID/smsid not present in any node_* table (graph-integrity
     # decision 2026-06-23). All node_* and graph_edges tables exist by this point.
     _node_backfill(con, schema)
+    # Split the finalised graph_edges into the AD payload (either endpoint is an AD node id,
+    # including the backfill stubs minted just above) and the SCCM-only payload. Must run
+    # after _node_backfill so stub ids are in the AD id set. See ARCHITECTURE.md §11f.
+    _graph_edges_split(con, schema)

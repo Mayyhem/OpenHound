@@ -20,6 +20,7 @@ import dlt
 from openhound.destinations.opengraph.destination import opengraph_file
 
 from .lookup import SCCMLookup
+from .opengraph_untagged import opengraph_file_untagged
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +47,26 @@ def _without_null_properties(content: dict) -> dict:
 def emit_graph_from_duckdb(
     lookup: SCCMLookup,
     output_path,
-    source_kind: str,
+    source_kind: str | None,
     node_specs: list[tuple[str, type]] | None = None,
     edge_specs: list[tuple[str, type]] | None = None,
+    resource_prefix: str = "sccm",
 ) -> None:
     """Read node/edge tables from the lookup DuckDB and write OpenGraph JSON to output_path.
 
-    node_specs and edge_specs are lists of (table_name, ModelClass) pairs. For each
-    row in each table, the model is instantiated with the row dict, given access to the
-    lookup, and its as_node / edges properties are called to produce OpenGraph content.
+    node_specs and edge_specs are lists of (table_name, ModelClass) pairs. For each row in
+    each table, the model is instantiated with the row dict, given access to the lookup, and
+    its as_node / edges properties are called to produce OpenGraph content.
 
-    Passing empty lists for both specs produces an empty but valid OpenGraph output
-    (useful for testing the pipeline plumbing without real data).
+    source_kind controls the writer: a string routes through core's opengraph_file, which
+    stamps {"metadata": {"source_kind": ...}}; None routes through opengraph_file_untagged,
+    which writes no metadata block at all (the AD payload, merged natively by BloodHound).
+
+    resource_prefix names the two dlt resources (<prefix>_nodes / <prefix>_edges), which
+    become the output file basenames, and the dlt pipeline — so two passes into the same
+    output directory never collide.
+
+    Passing empty lists for both specs produces an empty but valid OpenGraph output.
     """
     out = Path(output_path)
     # The opengraph_file destination opens files without creating the dir, and this runs
@@ -68,7 +77,7 @@ def emit_graph_from_duckdb(
     node_specs = node_specs or []
     edge_specs = edge_specs or []
 
-    @dlt.resource(name="sccm_nodes")
+    @dlt.resource(name=f"{resource_prefix}_nodes")
     def nodes():
         for table, model in node_specs:
             for row in lookup.table_rows(table):
@@ -87,7 +96,7 @@ def emit_graph_from_duckdb(
                         table,
                     )
 
-    @dlt.resource(name="sccm_edges")
+    @dlt.resource(name=f"{resource_prefix}_edges")
     def edges():
         for table, model in edge_specs:
             for row in lookup.table_rows(table):
@@ -104,10 +113,19 @@ def emit_graph_from_duckdb(
                         table,
                     )
 
+    destination = (
+        opengraph_file_untagged(output_path=str(out))
+        if source_kind is None
+        else opengraph_file(output_path=str(out), source_kind=source_kind)
+    )
     pipeline = dlt.pipeline(
-        pipeline_name="sccm_convert_graph",
+        pipeline_name=f"sccm_convert_graph_{resource_prefix}",
         dataset_name="sccm",
-        destination=opengraph_file(output_path=str(out), source_kind=source_kind),
+        destination=destination,
     )
     pipeline.run([nodes(), edges()])
-    logger.info("Convert2-Read-DB convert pipeline wrote OpenGraph files to %s", out)
+    kind_label = source_kind if source_kind is not None else "<untagged AD payload>"
+    logger.info(
+        "Convert2-Read-DB convert pipeline wrote OpenGraph files (prefix=%r, source_kind=%s) to %s",
+        resource_prefix, kind_label, out,
+    )
