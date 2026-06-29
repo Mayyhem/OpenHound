@@ -54,8 +54,11 @@ logger = logging.getLogger(__name__)
 # framework's public Typer groups directly so we can add CLI options/flags.
 # ---------------------------------------------------------------------------
 app = OpenHound(
-    "sccm", 
-    source_kind="Kind", 
+    "sccm",
+    # source_kind tags every emitted node/edge as belonging to the SCCM data source in
+    # BloodHound (used for source-scoped re-ingest/deletion). Was the Stage-0 spike
+    # placeholder "Kind"; set to the real collector source name.
+    source_kind="SCCM",
     help="OpenGraph collector for sccm"
 )
 

@@ -68,5 +68,5 @@ def test_node_client_device_filters_and_keys_on_smsid():
                 "('GUID-3','WS03', 9, 'PS1', true,  true,  NULL, NULL, NULL)) "        # obsolete -> dropped
                 "AS t(smsid, name, resource_id, site_code, is_client, is_obsolete, primary_user, current_logon_user, user_name)")
     transforms(con)
-    rows = con.execute("SELECT smsid, name, resource_id_str, possible FROM sccm.node_client_device ORDER BY smsid").fetchall()
-    assert rows == [("GUID-1", "WS01", "7@PS1", False)]
+    rows = con.execute("SELECT smsid, name, resource_id_str, is_confirmed_active_client FROM sccm.node_client_device ORDER BY smsid").fetchall()
+    assert rows == [("GUID-1", "WS01", "7@PS1", True)]

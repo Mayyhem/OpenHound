@@ -11,7 +11,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, and Stages 1–2 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and twenty edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)).
+> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and twenty-two edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)).
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -57,6 +57,8 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [SCCM_SecurityAdministrator](#sccm_securityadministrator)
   - [SCCM_AllPermissions](#sccm_allpermissions)
   - [SCCM_AssignAllPermissions](#sccm_assignallpermissions)
+  - [SameHostAs](#samehostas)
+  - [LocalAdminRequired](#localadminrequired)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -213,14 +215,14 @@ The collector relies on these assumptions about the target environment and how i
 
 # Limitations
 
-- **Graph output covers Stages 1–3.** `convert` now emits eight node kinds and twenty edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, `SameHostAs` dedup, NAA secrets) are planned for later stages.
+- **Graph output covers Stages 1–4.** `convert` now emits eight node kinds and twenty-two edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, NAA secrets) are planned for later stages.
 - **Some node properties are deferred to later collectors or stages.** The following properties appear in ConfigManBearPig but are not yet emitted because the required collector does not exist or the data is coupled to a later pipeline stage:
   - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `SCCMIsPXESupportEnabled`) but not the DHCP/PXE configuration parameters.
   - **NAA flag on `User`** (`is_sccm_network_access_account`) — requires NAA secret decryption (`--enable-bad-opsec`) and a dedicated NAA collector, neither of which is implemented yet.
   - **Group DN / SAM account name** (`distinguishedName`, `samAccountName` on `Group`) — groups are built from name-only lists resolved to SIDs; no LDAP group-object lookup is performed.
   - **Several `SCCM_ClientDevice` fields** (`currentManagementPoint`, `distinguishedName`, `dNSHostName`, `domain`, `previous_smsid`) — not present in the AdminService/WMI device columns collected; would require a collection-phase change.
 - **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, some graph now); DHCP is a placeholder.
-- **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `possible = true`. Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
+- **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `is_confirmed_active_client = false`. Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
 - **`MemberOf` covers direct memberships only.** SCCM's `security_group_name` field carries the direct groups a principal belongs to; group-to-group nesting is not captured. Merge with a SharpHound collection for full nested-group paths (the Group nodes key on AD SID, so the two datasets join cleanly).
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
@@ -472,9 +474,9 @@ A Configuration Manager **site**, coalesced from AdminService/WMI site tables, s
 
 ## SCCM_ClientDevice
 
-An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_System` resource with `is_client = True` and `is_obsolete = False`. Coalesced into `node_client_device` by `preprocess`. Devices that have a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as **possible** clients (inferred from `ldap_cmrc_devices`), unless `--disable-possible-edges` was set at collection time. Model: [models/sccm_client_device.py](src/openhound_sccm/models/sccm_client_device.py).
+An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_System` resource with `is_client = True` and `is_obsolete = False`. Coalesced into `node_client_device` by `preprocess`. Devices that have a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as inferred clients (`is_confirmed_active_client = false`, inferred from `ldap_cmrc_devices`), unless `--disable-possible-edges` was set at collection time. When an inferred client shares an `ADDomainSID` with a confirmed real client, the two are merged in `_dedup_client_device` (Stage 4) and only the confirmed survivor is kept. Model: [models/sccm_client_device.py](src/openhound_sccm/models/sccm_client_device.py).
 
-- **Node id:** the SMSID (uppercased, e.g. `GUID:3F8A...`) for confirmed clients; `<UPPER_OBJECT_SID>@<root_site_code>` for inferred possible clients.
+- **Node id:** the SMSID (uppercased, e.g. `GUID:3F8A...`) for confirmed clients (`is_confirmed_active_client = true`); `<UPPER_OBJECT_SID>@<root_site_code>` for inferred clients (`is_confirmed_active_client = false`).
 - **`environmentid`:** the hierarchy root site code.
 - **Kinds:** `["SCCM_ClientDevice"]`.
 - **`name` / `displayname`:** the device name qualified with site code (e.g. `WORKSTATION1@PS1`).
@@ -494,7 +496,7 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `primaryUser` | string | Primary user name (from SCCM user-device affinity). |
 | `currentLogonUser` | string | Name of the user currently logged on. |
 | `ADLastLogonUser` | string | Name of the last AD-logged-on user. |
-| `possible` | bool | `true` for inferred possible-client nodes (not confirmed enrolled). |
+| `is_confirmed_active_client` | bool | `true` for confirmed real SCCM-managed clients (AdminService/WMI source); `false` for inferred clients seen only via a CmRcService remote-control SPN. |
 | `ADDomainSID` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
 | `ADLastLogonTime` | string | Timestamp of the device's last AD logon as reported by SCCM. |
 | `ADLastLogonUserDomain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
@@ -591,7 +593,7 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 
 # Edge Reference
 
-> **Currently emitted: 20 edge kinds** — 10 from Stages 1–2 and 10 new from Stage 3.
+> **Currently emitted: 22 edge kinds** — 10 from Stages 1–2, 10 new from Stage 3, and 2 new from Stage 4.
 
 Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
 
@@ -768,6 +770,24 @@ Links an SMS Provider computer to every non-secondary `SCCM_Site` in the hierarc
 - **End:** `SCCM_Site`
 - **Traversable:** yes
 - **Abuse note:** Compromise of an SMS Provider host (e.g. via relay to the AdminService REST API) gives an attacker administrative control equivalent to a Full Administrator over the whole hierarchy.
+
+## SameHostAs
+
+Links a `Computer` AD node to its corresponding `SCCM_ClientDevice` record for the same physical host, matched by the client device's `ADDomainSID` equalling the computer's AD SID. Both directions are emitted (one edge `Computer → SCCM_ClientDevice`, one `SCCM_ClientDevice → Computer`). Only deduped real-client or inferred-client survivors (after `_dedup_client_device`) appear here — CmRcService-only twins that were merged into a real client do not produce orphan edges (CMBP `ps1:2314-2320`).
+
+- **Start:** `Computer` or `SCCM_ClientDevice`
+- **End:** `SCCM_ClientDevice` or `Computer` (bidirectional — both rows present)
+- **Traversable:** yes
+- **Source:** `SCCM_Invoke-PostProcessing`
+
+## LocalAdminRequired
+
+Links each site server (`Computer` hosting `SMS Site Server@<site>`) to every other site system in the same non-secondary site. A site server requires local-administrator rights on its peer site systems (CMBP `ps1:1882-1909`). Self-edges and secondary-site computers are excluded.
+
+- **Start:** `Computer` (site server)
+- **End:** `Computer` (peer site system in the same non-secondary site)
+- **Traversable:** yes
+- **Source:** `SCCM_Invoke-PostProcessing`
 
 ---
 

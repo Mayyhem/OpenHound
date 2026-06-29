@@ -218,7 +218,7 @@ class SCCMClientDeviceProperties(NodeProperties):
     currentLogonUser: str | None = field(default=None, kw_only=True)
     ADLastLogonUser: str | None = field(default=None, kw_only=True)
     rootSiteCode: str | None = field(default=None, kw_only=True)
-    possible: bool = field(default=False, kw_only=True)  # port-added (no CMBP key)
+    is_confirmed_active_client: bool = field(default=False, kw_only=True)  # port-added (no CMBP key): real SCCM client vs SPN-inferred
     ADDomainSID: str | None = field(default=None, kw_only=True)
     # Telemetry scalars — Stage 3 C4 (CMBP parity).
     ADLastLogonTime: str | None = field(default=None, kw_only=True)

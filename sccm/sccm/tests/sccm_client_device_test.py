@@ -46,3 +46,11 @@ def test_client_device_c4_fields_mapped():
     assert p.lastReportedMPServerSID == "S-1-5-21-1-2-3-500"
     assert p.collectionIds == ["SMS00001@CAS"]
     assert p.collectionNames == ["All Systems"]
+
+
+def test_client_device_node_exposes_is_confirmed_active_client():
+    from openhound_sccm.models.sccm_client_device import SCCMClientDevice
+    real = SCCMClientDevice(smsid="GUID:ABC", is_confirmed_active_client=True, root_site_code="PS1")
+    inferred = SCCMClientDevice(smsid="S-1-5-21-1-2-3-1@PS1", is_confirmed_active_client=False, root_site_code="PS1")
+    assert real.as_node.properties.is_confirmed_active_client is True
+    assert inferred.as_node.properties.is_confirmed_active_client is False

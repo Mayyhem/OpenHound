@@ -24,6 +24,25 @@ from .lookup import SCCMLookup
 logger = logging.getLogger(__name__)
 
 
+def _without_null_properties(content: dict) -> dict:
+    """Drop keys whose value is None from the content's `properties` dict, in place.
+
+    BloodHound's OpenGraph schema accepts a property value of string/number/boolean/array
+    but NOT null, so an absent attribute must be omitted entirely rather than emitted as
+    JSON null (missing != null is the BloodHound convention). Our models default optional
+    attributes to None, and the dataclasses.asdict() + json.dumps path the destination uses
+    keeps those as null — unlike the framework's Pydantic exclude_none path — so we prune
+    here, the single point every node and edge flows through before being written.
+    """
+    props = content.get("properties")
+    if isinstance(props, dict):
+        dropped = [k for k, v in props.items() if v is None]
+        if dropped:
+            content["properties"] = {k: v for k, v in props.items() if v is not None}
+            logger.debug("Omitted null-valued properties before emit: %s", dropped)
+    return content
+
+
 def emit_graph_from_duckdb(
     lookup: SCCMLookup,
     output_path,
@@ -57,7 +76,8 @@ def emit_graph_from_duckdb(
                 obj._lookup = lookup
                 node = obj.as_node
                 if node is not None:
-                    yield {"graph": {"entity_type": "node", "content": asdict(node)}}
+                    content = _without_null_properties(asdict(node))
+                    yield {"graph": {"entity_type": "node", "content": content}}
                 else:
                     # as_node returns None for rows that can't be keyed (no SID, etc.).
                     # The model logs a warning internally; nothing to emit here.
@@ -74,7 +94,7 @@ def emit_graph_from_duckdb(
                 obj = model(**row)
                 obj._lookup = lookup
                 # Edge content is a LIST: the destination does edges.extend(content).
-                parts = [asdict(e) for e in obj.edges]
+                parts = [_without_null_properties(asdict(e)) for e in obj.edges]
                 if parts:
                     yield {"graph": {"entity_type": "edge", "content": parts}}
                 else:

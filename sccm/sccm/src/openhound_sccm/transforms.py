@@ -1489,9 +1489,28 @@ def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
                   f"FROM {schema}.{_cm} cm JOIN {schema}.{_c} c ON upper(c.collection_id) = upper(cm.collection_id) "
                   f"WHERE cm.resource_id IS NOT NULL AND cm.collection_id IS NOT NULL")
 
+    # Real-client ADDomainSID (CMBP :7388-7392): SMS_R_System stamps the AD computer
+    # SID onto the existing SMSID-keyed client device. Build a smsid -> SID map here,
+    # keyed on SMSUniqueIdentifier == smsid (both uppercased). Obsolete r_system rows
+    # are skipped (they keep stale duplicate machine records).
+    con.execute("CREATE OR REPLACE TEMP TABLE _dev_sid (smsid VARCHAR, sid VARCHAR)")
+    for _rs in ("adminservice_r_system", "wmi_r_system"):
+        _ensure_columns(con, schema, _rs, {"sms_unique_identifier": "VARCHAR", "sid": "VARCHAR", "obsolete": "BOOLEAN"})
+        _safe(con, f"_dev_sid<-{_rs}",
+              f"INSERT INTO _dev_sid "
+              f"SELECT upper(sms_unique_identifier), upper(sid) "
+              f"FROM {schema}.{_rs} "
+              f"WHERE sms_unique_identifier IS NOT NULL AND sid IS NOT NULL "
+              f"  AND NOT coalesce(obsolete, false)")
+
     # Rebuild node_client_device with SID columns and collection list columns appended.
+    # ad_domain_sid: preserve any value already set (inferred clients carry
+    # upper(object_sid)); fill NULLs (real clients) from the _dev_sid map above.
     con.execute(
-        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS SELECT d.*, "
+        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS SELECT d.* REPLACE ("
+        f"  coalesce(d.ad_domain_sid, "
+        f"           (SELECT s.sid FROM _dev_sid s WHERE s.smsid = d.smsid LIMIT 1)) AS ad_domain_sid"
+        f"), "
         f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
         f" WHERE upper(pbn.name) = upper(trim(d.primary_user_name)) LIMIT 1) AS primary_user_sid, "
         f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
@@ -1506,7 +1525,46 @@ def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"         CAST([] AS VARCHAR[])) AS collection_names "
         f"FROM {schema}.node_client_device d"
     )
-    logger.info("node_client_device resolved SIDs + collection lists enriched in schema %r", schema)
+    logger.info("node_client_device resolved SIDs (incl. ad_domain_sid) + collection lists enriched in schema %r", schema)
+
+
+def _dedup_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Collapse SCCM_ClientDevice rows that share an ad_domain_sid (CMBP ps1:2269-2311).
+
+    CMBP merges duplicate client-device nodes found with the same ADDomainSID,
+    preferring the authoritative node and unioning array properties. In the port the
+    duplicate is a real client (is_confirmed_active_client=true, id=smsid) and its
+    inferred twin (is_confirmed_active_client=false, id=<SID>@root) discovered via
+    CmRcService SPN. The inferred row is a strict subset, so the merge keeps the real
+    survivor's scalars and unions the array columns across the whole ad_domain_sid group.
+
+    Runs BEFORE the edge builders (locked decision), so every edge is built from the
+    deduped table and references only survivors — no graph_edges rewrite is needed.
+
+    NULL ad_domain_sid rows (real clients whose SID could not be resolved) are never
+    grouped: the composite partition key isolates each by smsid, so distinct unresolved
+    devices are preserved (and simply won't get a SameHostAs edge — matches CMBP).
+    """
+    before = (con.execute(f"SELECT count(*) FROM {schema}.node_client_device").fetchone() or (0,))[0]
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS "
+        f"WITH ranked AS ("
+        f"  SELECT d.* EXCLUDE (collection_ids, collection_names), "
+        f"    list_distinct(flatten(array_agg(d.collection_ids) OVER w)) AS collection_ids, "
+        f"    list_distinct(flatten(array_agg(d.collection_names) OVER w)) AS collection_names, "
+        f"    row_number() OVER ("
+        f"      PARTITION BY d.ad_domain_sid, (CASE WHEN d.ad_domain_sid IS NULL THEN d.smsid END) "
+        f"      ORDER BY d.is_confirmed_active_client DESC, d.smsid ASC) AS _rn "
+        f"  FROM {schema}.node_client_device d "
+        f"  WINDOW w AS (PARTITION BY d.ad_domain_sid, (CASE WHEN d.ad_domain_sid IS NULL THEN d.smsid END))"
+        f") "
+        f"SELECT * EXCLUDE (_rn) FROM ranked WHERE _rn = 1"
+    )
+    after = (con.execute(f"SELECT count(*) FROM {schema}.node_client_device").fetchone() or (0,))[0]
+    if before != after:
+        logger.info("node_client_device dedup: merged %d duplicate client-device row(s)", before - after)
+    else:
+        logger.debug("node_client_device dedup: no duplicate ad_domain_sid rows found")
 
 
 def _enrich_site_lists(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -1689,8 +1747,9 @@ def _node_admin_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
 def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """One row per smsid from adminservice/wmi client_devices (real clients only:
-    is_client AND NOT is_obsolete). possible/ad_domain_sid are placeholders for the
-    possible-client rows added in Task E2.
+    is_client AND NOT is_obsolete). is_confirmed_active_client is True for these real-client
+    rows; inferred-client rows (from CmRcService SPNs) are appended by _node_client_device_possible
+    with is_confirmed_active_client=False. ad_domain_sid is NULL here and resolved later from SMS_R_System.
 
     Telemetry scalars added in Stage 3 C4 (CMBP parity):
       ad_last_logon_time, ad_last_logon_user_domain, source_site_code (from brief)
@@ -1705,7 +1764,7 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "primary_user_name VARCHAR, current_logon_user_name VARCHAR, ad_last_logon_user_name VARCHAR, "
         "ad_last_logon_time VARCHAR, ad_last_logon_user_domain VARCHAR, source_site_code VARCHAR, "
         "last_active_time VARCHAR, last_online_time VARCHAR, last_offline_time VARCHAR, "
-        "possible BOOLEAN, ad_domain_sid VARCHAR)"
+        "is_confirmed_active_client BOOLEAN, ad_domain_sid VARCHAR)"
     )
     _optional = {
         "name": "VARCHAR", "site_code": "VARCHAR", "resource_id": "BIGINT",
@@ -1737,7 +1796,7 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"ad_last_logon_time, user_domain_name AS ad_last_logon_user_domain, source_site_code, "
               f"last_active_time, c_n_last_online_time AS last_online_time, "
               f"c_n_last_offline_time AS last_offline_time, "
-              f"false AS possible, NULL AS ad_domain_sid "
+              f"true AS is_confirmed_active_client, NULL AS ad_domain_sid "
               f"FROM {schema}.{_src} "
               f"WHERE smsid IS NOT NULL AND coalesce(is_client, false) AND NOT coalesce(is_obsolete, false)")
     root = _root_code(con, schema)
@@ -1757,7 +1816,7 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(last_active_time) AS last_active_time, "
         f"any_value(last_online_time) AS last_online_time, "
         f"any_value(last_offline_time) AS last_offline_time, "
-        f"bool_or(possible) AS possible, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
+        f"bool_or(is_confirmed_active_client) AS is_confirmed_active_client, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
         f"FROM {schema}.node_client_device GROUP BY smsid", [root])
     logger.info("node_client_device built in schema %r", schema)
 
@@ -1785,7 +1844,7 @@ def _node_client_device_possible(
     _safe(con, "node_client_device_possible<-ldap_cmrc_devices",
           f"INSERT INTO {schema}.node_client_device BY NAME "
           f"SELECT upper(object_sid) || '@{root}' AS smsid, name, '{root}' AS site_code, "
-          f"true AS possible, upper(object_sid) AS ad_domain_sid, '{root}' AS root_site_code "
+          f"false AS is_confirmed_active_client, upper(object_sid) AS ad_domain_sid, '{root}' AS root_site_code "
           f"FROM {schema}.ldap_cmrc_devices WHERE object_sid IS NOT NULL")
     logger.info("node_client_device_possible built in schema %r", schema)
 
@@ -2315,6 +2374,68 @@ def _edge_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) ->
           f"  AND len(list_filter(computer.site_system_roles, x -> x LIKE '%SMS Provider%')) > 0")
 
 
+def _edge_same_host(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Computer <-> SCCM_ClientDevice SameHostAs, both directions (CMBP ps1:2314-2320).
+
+    Join the Computer node id (sid) to the deduped client device's ad_domain_sid.
+    Two rows per match. CMBP set no collectionSource; the port tags
+    'SCCM_Invoke-PostProcessing' for entity-panel provenance.
+    """
+    from .kinds.edges import SAME_HOST_AS
+    _safe(con, "edge_same_host",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT computer.sid AS start_id, dev.smsid AS end_id, "
+          f"'{SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM {schema}.node_computer computer "
+          f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
+          f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL "
+          f"UNION ALL "
+          f"SELECT dev.smsid AS start_id, computer.sid AS end_id, "
+          f"'{SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM {schema}.node_computer computer "
+          f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
+          f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL")
+
+
+def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Site server -> every other site system in the same non-secondary site
+    (CMBP ps1:1882-1909).
+
+    CMBP's two branches (non-server site systems seen from the server, and the
+    server iterating its peers) collapse to one set-based rule: start = computers
+    hosting 'SMS Site Server@<site>'; end = computers hosting ANY role at that site;
+    start != end. Site servers are thus mutually local-admin when a site has more
+    than one. Sites are restricted to non-secondary (site_type != 1), matching
+    CMBP's `Type -ne "Secondary Site"`.
+
+    Site codes are extracted from the 'Role@SiteCode' strings the same way CMBP did
+    (everything after the first '@'); both sides are uppercased for a robust join.
+    """
+    from .kinds.edges import LOCAL_ADMIN_REQUIRED
+    _safe(con, "edge_local_admin_required",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"WITH roles AS ("
+          f"  SELECT c.sid, role, upper(regexp_extract(role, '@(.+)$', 1)) AS site "
+          f"  FROM {schema}.node_computer c, UNNEST(c.site_system_roles) AS t(role) "
+          f"  WHERE c.sid IS NOT NULL AND role IS NOT NULL AND role LIKE '%@%'"
+          f"), "
+          f"nonsec AS ("
+          f"  SELECT upper(site_code) AS site FROM {schema}.site_hierarchy "
+          f"  WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL"
+          f"), "
+          f"site_servers AS ("
+          f"  SELECT DISTINCT sid, site FROM roles WHERE role LIKE 'SMS Site Server@%' AND site != ''"
+          f"), "
+          f"site_systems AS ("
+          f"  SELECT DISTINCT sid, site FROM roles WHERE site != ''"
+          f") "
+          f"SELECT ss.sid AS start_id, sys.sid AS end_id, "
+          f"'{LOCAL_ADMIN_REQUIRED}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"FROM site_servers ss "
+          f"JOIN site_systems sys ON ss.site = sys.site AND ss.sid != sys.sid "
+          f"JOIN nonsec n ON n.site = ss.site")
+
+
 def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Collapse duplicate (start_id, end_id, kind) rows into one row per unique triple.
 
@@ -2339,16 +2460,16 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 def _edge_has_client(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Append SCCM_HasClient edges: Site -> ClientDevice (CMBP ps1:7257/7394).
     start = device.site_code (the site that owns the client), end = smsid.
-    Possible-client rows (added in Task E2) carry site_code='root' so they also
-    get a HasClient edge automatically once E2 runs. _safe() skips+logs if
+    Inferred-client rows (added in _node_client_device_possible) carry site_code='root' so
+    they also get a HasClient edge automatically. _safe() skips+logs if
     node_client_device is missing."""
     from .kinds.edges import SCCM_HAS_CLIENT
     _safe(
         con, "edge_has_client",
         f"INSERT INTO {schema}.graph_edges BY NAME "
         f"SELECT site_code AS start_id, smsid AS end_id, '{SCCM_HAS_CLIENT}' AS kind, "
-        f"CASE WHEN coalesce(possible, false) THEN ['LDAP-CmRcService'] "
-        f"     ELSE ['AdminService-ClientDevices'] END AS collection_source "
+        f"CASE WHEN coalesce(is_confirmed_active_client, true) THEN ['AdminService-ClientDevices'] "
+        f"     ELSE ['LDAP-CmRcService'] END AS collection_source "
         f"FROM {schema}.node_client_device "
         f"WHERE site_code IS NOT NULL AND smsid IS NOT NULL"
     )
@@ -2416,6 +2537,9 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _enrich_role_members(con, schema)
     _enrich_admin_assignments(con, schema)
     _enrich_client_device(con, schema)
+    # Stage 4: collapse real+inferred ClientDevice twins by ad_domain_sid BEFORE edges,
+    # so every edge builder references survivors (no graph_edges rewrite needed).
+    _dedup_client_device(con, schema)
     _enrich_site_lists(con, schema)
     # _graph_edges_init must run before all edge builders; _edge_replication and future
     # edge builders all INSERT into the table created here.
@@ -2433,6 +2557,9 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _edge_rbac_role_grants(con, schema)
     _edge_all_permissions(con, schema)
     _edge_assign_all_permissions(con, schema)
+    # Stage 4 edges.
+    _edge_same_host(con, schema)
+    _edge_local_admin_required(con, schema)
     # Dedup after all edge builders: both adminservice and wmi sources can contribute the
     # same edge, and name fan-out (collection_by_name, role_by_name) can match the same
     # id twice. CMBP's Upsert-Edge dedupes at insert time; we do it once here.

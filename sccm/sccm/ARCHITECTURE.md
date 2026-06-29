@@ -46,7 +46,8 @@ Every section follows the same spine:
   - [11a. Collect-side additions](#11a-collect-side-additions)
   - [11b. Persist-at-collect / gate-in-preproc for "possible" nodes](#11b-persist-at-collect--gate-in-preproc-for-possible-nodes)
   - [11c. Traversable allow-list and the generic GraphEdge model](#11c-traversable-allow-list-and-the-generic-graphedge-model)
-  - [11d. Edge-endpoint stub-node backfill (new divergence category)](#11d-edge-endpoint-stub-node-backfill-new-divergence-category)
+  - [11d. Stage 4: client-device dedup and host-correlation edges](#11d-stage-4-client-device-dedup-and-host-correlation-edges)
+  - [11e. Edge-endpoint stub-node backfill (new divergence category)](#11e-edge-endpoint-stub-node-backfill-new-divergence-category)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -744,6 +745,25 @@ Given how much SCCM environments vary, the tolerant approach is the safer defaul
   collected — usually a method you simply didn't run, which is normal. `ERROR … failed` means a table that
   *was* collected but still didn't load — that's the one worth chasing.
 
+### The downstream consequence: convert must omit null properties on output
+
+The NULL handling above is deliberate — `_ensure_columns` *creates* all-NULL columns on purpose so the SQL
+compiles, and many optional attributes (`disable_loopback_check`, `dNSHostName`, the SCCM client flags) are
+genuinely NULL on most rows. Those NULL columns flow into the typed node/edge models, whose optional fields
+default to `None`. If we emitted them as-is, `dataclasses.asdict()` + the destination's plain `json.dumps`
+would write each as JSON `null`.
+
+**BloodHound's OpenGraph ingest rejects that.** A property value must be `string`/`number`/`boolean`/`array`
+(an `anyOf` over those four) — `null` is not a member, so a single null-valued property fails the *entire*
+file's schema validation and the ingest is refused. (The framework's other, Pydantic, serialization path
+strips nulls via `exclude_none=True`; the dataclass + `asdict` path the convert pipeline uses does not, so
+the responsibility lands here.)
+
+So the convert emit step omits any property whose value is `None` before writing —
+[`_without_null_properties`](src/openhound_sccm/convert_pipeline.py) runs on every node and every edge, the
+single point all graph content flows through. This matches BloodHound's convention that an absent attribute
+is *missing*, not `null`. Empty lists are kept (an array is a valid value); only `None` is dropped.
+
 ---
 
 ## 11. Stage 2 preproc/convert add-ons
@@ -758,11 +778,11 @@ Two small additions land in the `collect` phase to carry information forward to 
 
 **`collection_settings` table — one-row flag persistence** ([collectors/local.py](src/openhound_sccm/collectors/local.py)). A discovery-phase resource called `collection_settings` writes a single row carrying `disable_possible_edges` and `enable_bad_opsec` — the two CLI flags whose effects are decided at collect time but must be respected by the separate `preprocess` run. The `preprocess` step reads this row via `_read_disable_possible` ([transforms.py](src/openhound_sccm/transforms.py)) and uses it to gate possible-client rows and future Stage 6 relay edges. If the table is absent (older collection without the row), `_read_disable_possible` defaults to `False` — possible nodes are emitted.
 
-### 11b. Persist-at-collect / gate-in-preproc for "possible" nodes
+### 11b. Persist-at-collect / gate-in-preproc for inferred client nodes
 
 CMBP emits "possible" client nodes for devices that have a `CmRcService` SPN in AD (indicating the Remote Control client) but no confirmed SCCM enrollment (`SMS_R_System is_client = True`). The flag that gates this behaviour (`--disable-possible-edges`) is a CLI argument on `openhound collect sccm`, but the separate `openhound preprocess sccm` run has no access to the CLI that produced the raw data.
 
-The solution is the `collection_settings` table described above. `_read_disable_possible` in [transforms.py](src/openhound_sccm/transforms.py) reads `bool_or(disable_possible_edges)` from that table and passes the result to `_node_client_device_possible`, which appends inferred possible-client rows to `node_client_device` only when the flag is `False`. The possible-client node id is `upper(object_sid)@root_site_code` — a deterministic, namespaced id that avoids merging with the `Computer` node (raw SID) yet allows a future Stage 4 `SameHostAs` edge to deduplicate them.
+The solution is the `collection_settings` table described above. `_read_disable_possible` in [transforms.py](src/openhound_sccm/transforms.py) reads `bool_or(disable_possible_edges)` from that table and passes the result to `_node_client_device_possible`, which appends inferred client rows (`is_confirmed_active_client = False`) to `node_client_device` only when the flag is `False`. The inferred-client node id is `upper(object_sid)@root_site_code` — a deterministic, namespaced id that avoids merging with the `Computer` node (raw SID) yet allows the Stage 4 `SameHostAs` edge to link it back to the AD computer object.
 
 CMBP used a random GUID as the id for possible-client nodes; we use `object_sid@root_site_code` instead so id assignment is stable across repeated collections.
 
@@ -776,7 +796,17 @@ All edges — regardless of kind — are emitted by the single generic [`GraphEd
 
 A final dedup pass (`_graph_edges_dedup`) in the `graph_edges` preproc query groups by `(start_id, end_id, kind)` and array-unions the `collection_source` values across the group via `list_distinct(flatten(list(collection_source)))`, replacing the old `SELECT DISTINCT` that could only deduplicate identical triples.
 
-### 11d. Edge-endpoint stub-node backfill (new divergence category)
+### 11d. Stage 4: client-device dedup and host-correlation edges
+
+Stage 4 adds two new edge kinds and a pre-edge dedup pass, all of which interact closely with the `node_client_device` table built by Stages 2–3.
+
+**`_dedup_client_device` — merge real+inferred twins before edges are built.** After `_enrich_client_device` resolves `ad_domain_sid` on real clients (from `SMS_R_System`) and inferred clients carry it from the CmRcService SPN's `object_sid`, the table can contain two rows for the same physical host: a real client (`is_confirmed_active_client = True`, id = SMSID) and its inferred twin (`is_confirmed_active_client = False`, id = `<SID>@root`). `_dedup_client_device` ([transforms.py:1531](src/openhound_sccm/transforms.py#L1531)) groups by `ad_domain_sid` (with a NULL-isolation guard so unresolved real clients are never grouped together), ranks the real client first, and keeps only the top-ranked row. Array columns (`collection_ids`, `collection_names`) are unioned across the group before the inferred row is discarded, so no data is lost. Critically, this runs **before** `_graph_edges_init` and all edge builders — so every edge is built from the deduped table and references only survivors, with no `graph_edges` rewrite needed afterward. This is a deliberate divergence from CMBP's order, where the merge happens after edges are built (`ps1:2269-2311`).
+
+**`_edge_same_host` — bidirectional Computer ↔ SCCM_ClientDevice.** After dedup, each surviving `SCCM_ClientDevice` row whose `ad_domain_sid` matches a `Computer` node's `sid` gets two `SameHostAs` edges (one in each direction). This gives BloodHound paths in both directions (CMBP `ps1:2314-2320`). Because dedup runs first, the edge builder always sees the canonical survivor, never the discarded inferred twin.
+
+**`_edge_local_admin_required` — site server → peer site systems.** A computer hosting `SMS Site Server@<site>` is granted local-administrator rights on every other site system in that site. The edge is built set-based from `site_system_roles`, with self-edges and secondary sites excluded (CMBP `ps1:1882-1909`). Both edge kinds carry `collection_source = ['SCCM_Invoke-PostProcessing']` for entity-panel provenance.
+
+### 11e. Edge-endpoint stub-node backfill (new divergence category)
 
 *This is a new category of divergence from a stock OpenHound collector.*
 
@@ -847,5 +877,6 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-06-29 | Stage 4 shipped. Added §11d documenting `_dedup_client_device` (merge real+inferred SCCM_ClientDevice twins by `ad_domain_sid`, runs before all edge builders — deliberate divergence from CMBP's post-edge merge order), `_edge_same_host` (bidirectional `Computer ↔ SCCM_ClientDevice` `SameHostAs`), and `_edge_local_admin_required` (site server → peer site systems `LocalAdminRequired`). Renamed §11d stub-node backfill to §11e. Updated §11b: inferred client rows now use `is_confirmed_active_client = False` (not "possible"); note the Stage 4 `SameHostAs` edge that links them back to AD computer objects. |
 | 2026-06-25 | Stage 3 shipped. Updated §11c: `graph_edges` is now four columns (`start_id`, `end_id`, `kind`, `collection_source VARCHAR[]`); `GraphEdge` sets both `traversable` and `collection_source`; dedup pass groups by `(start_id, end_id, kind)` and array-unions `collection_source` via `list_distinct(flatten(list(...)))`. Updated quick-reference table row. |
 | 2026-06-23 | Stage 2 preproc/convert shipped. Added §11 documenting the four Stage 2 add-ons: `host_object_sid` on RemoteRegistry current-user rows; `collection_settings` one-row flag persistence; `_read_disable_possible` persist-at-collect/gate-in-preproc mechanism; `TRAVERSABLE_EDGE_KINDS` + generic `GraphEdge`; and the new divergence category **edge-endpoint stub-node backfill** (`node_backfill` + `StubNode`). Updated §9 status from "design stage" to "Stages 1–2 shipped". Updated quick-reference table. |

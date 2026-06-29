@@ -30,6 +30,10 @@ SCCM_SECURITY_ADMINISTRATOR = "SCCM_SecurityAdministrator"
 SCCM_ALL_PERMISSIONS = "SCCM_AllPermissions"
 SCCM_ASSIGN_ALL_PERMISSIONS = "SCCM_AssignAllPermissions"
 
+# Stage 4 edge kinds (host correlation + local-admin mesh)
+SAME_HOST_AS = "SameHostAs"
+LOCAL_ADMIN_REQUIRED = "LocalAdminRequired"
+
 # CMBP traversable allow-list (ConfigManBearPig.ps1:2216-2249, uncommented entries only).
 # Edges whose kind is in this set get properties.traversable = True. Includes future
 # (Stage 3-6) kinds so later stages reuse this one source of truth.

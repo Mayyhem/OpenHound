@@ -71,6 +71,43 @@ def test_emit_writes_computer_node(tmp_path):
     assert edges == []
 
 
+def test_emit_omits_null_properties(tmp_path):
+    """Properties with no value must be omitted, not written as JSON null.
+
+    BloodHound's OpenGraph property schema is an anyOf over string/number/boolean/array
+    and rejects null, so a single null-valued property fails the whole file's schema
+    validation on ingest. The seeded node_computer row leaves disable_loopback_check,
+    restrict_receiving_ntlm_traffic, sccm_client_certificate_required, etc. NULL — those
+    optional attributes must be absent from the emitted properties, never present as null.
+    """
+    client = duckdb.connect(_db_with_computer(tmp_path), read_only=True)
+    lookup = SCCMLookup(client)
+    out = tmp_path / "graph"
+
+    emit_graph_from_duckdb(
+        lookup,
+        out,
+        "Kind",
+        node_specs=[("node_computer", ComputerNode)],
+        edge_specs=[],
+    )
+
+    props = None
+    for f in out.glob("*.json"):
+        doc = json.loads(f.read_text())
+        for node in doc["graph"]["nodes"]:
+            props = node["properties"]
+
+    assert props is not None, "expected one emitted node"
+    null_keys = [k for k, v in props.items() if v is None]
+    assert null_keys == [], f"null-valued properties must be omitted, found: {null_keys}"
+    # The known-absent (NULL) columns must not appear as keys at all.
+    assert "disableLoopbackCheck" not in props
+    assert "SCCMClientCertificateRequired" not in props
+    # A present value is still emitted.
+    assert props["SMBSigningRequired"] is True
+
+
 def test_emit_empty_specs_produces_no_nodes(tmp_path):
     """Empty node_specs/edge_specs should run without error and produce no graph content."""
     # DB with no tables needed — empty specs skip all table reads.

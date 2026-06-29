@@ -15,9 +15,9 @@ def _seed(con, disable):
 
 def test_possible_client_emitted_when_enabled():
     con = duckdb.connect(":memory:"); _seed(con, disable=False); transforms(con)
-    rows = con.execute("SELECT smsid, possible, ad_domain_sid, root_site_code "
-                       "FROM sccm.node_client_device WHERE possible").fetchall()
-    assert rows == [("S-1-5-21-1-2-3-1104@CAS", True, "S-1-5-21-1-2-3-1104", "CAS")]
+    rows = con.execute("SELECT smsid, is_confirmed_active_client, ad_domain_sid, root_site_code "
+                       "FROM sccm.node_client_device WHERE NOT is_confirmed_active_client").fetchall()
+    assert rows == [("S-1-5-21-1-2-3-1104@CAS", False, "S-1-5-21-1-2-3-1104", "CAS")]
     # C2's HasClient picks it up automatically (start = root site)
     hc = con.execute("SELECT start_id, end_id FROM sccm.graph_edges "
                      "WHERE kind='SCCM_HasClient' AND end_id='S-1-5-21-1-2-3-1104@CAS'").fetchall()
@@ -26,5 +26,5 @@ def test_possible_client_emitted_when_enabled():
 
 def test_possible_client_suppressed_when_disabled():
     con = duckdb.connect(":memory:"); _seed(con, disable=True); transforms(con)
-    cnt = con.execute("SELECT count(*) FROM sccm.node_client_device WHERE possible").fetchone()[0]
+    cnt = con.execute("SELECT count(*) FROM sccm.node_client_device WHERE NOT is_confirmed_active_client").fetchone()[0]
     assert cnt == 0

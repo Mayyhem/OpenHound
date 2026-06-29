@@ -1,11 +1,11 @@
 # src/openhound_sccm/models/sccm_client_device.py
 """SCCMClientDevice: converts a node_client_device coalesced row into an SCCMNode.
 
-Each row in node_client_device represents one real SCCM-managed client device
-(AdminService or WMI source; is_client=True AND NOT is_obsolete), keyed by
-upper(smsid). The `possible` and `ad_domain_sid` columns exist on the row now
-but are placeholder values (False/NULL); inferred "possible-client" rows are
-added in Task E2.
+Each row in node_client_device represents one SCCM client device, keyed by upper(smsid).
+Real SCCM-managed clients (AdminService or WMI source; is_client=True AND NOT is_obsolete)
+have is_confirmed_active_client=True. Inferred clients discovered via CmRcService SPNs
+have is_confirmed_active_client=False. The ad_domain_sid column is NULL for real clients
+and resolved later from SMS_R_System; inferred clients carry it from the SPN object_sid.
 """
 import logging
 
@@ -43,7 +43,7 @@ class SCCMClientDevice(BaseAsset):
     current_logon_user_name: str | None = None
     ad_last_logon_user_name: str | None = None
     root_site_code: str | None = None
-    possible: bool = False
+    is_confirmed_active_client: bool = False
     ad_domain_sid: str | None = None
     # Telemetry scalars — Stage 3 C4 (CMBP parity).
     ad_last_logon_time: str | None = None
@@ -93,7 +93,7 @@ class SCCMClientDevice(BaseAsset):
                 currentLogonUser=self.current_logon_user_name,
                 ADLastLogonUser=self.ad_last_logon_user_name,
                 rootSiteCode=self.root_site_code,
-                possible=self.possible,
+                is_confirmed_active_client=self.is_confirmed_active_client,
                 ADDomainSID=self.ad_domain_sid,
                 # Telemetry scalars (Stage 3 C4).
                 ADLastLogonTime=self.ad_last_logon_time,
