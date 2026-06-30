@@ -236,3 +236,75 @@ class SCCMClientDeviceProperties(NodeProperties):
     collectionIds: list[str] = field(default_factory=list, kw_only=True)
     collectionNames: list[str] = field(default_factory=list, kw_only=True)
     SCCMInfra: bool = field(default=False, kw_only=True)
+
+
+# ----------------------------------------------------------------------------
+# MSSQL node properties (Stage 5). Field names mirror ConfigManBearPig.ps1's
+# Add-MSSQLServerNodesAndEdges / Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer
+# Upsert-Node calls verbatim. `environmentid` is the AD-domain SID of the SQL host
+# (spec §2). `strictEncryption` / `instanceNames` are port-added (no CMBP key).
+# ----------------------------------------------------------------------------
+@dataclass
+class MSSQLServerProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    dnsHostName: str | None = field(default=None, kw_only=True)
+    SQLServicePort: str | None = field(default=None, kw_only=True)
+    SCCMInfra: bool = field(default=False, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    databases: list[str] = field(default_factory=list, kw_only=True)
+    forceEncryption: bool | None = field(default=None, kw_only=True)
+    extendedProtection: str | None = field(default=None, kw_only=True)
+    SQLServiceAccountDomainSID: str | None = field(default=None, kw_only=True)
+    SQLServiceAccountName: str | None = field(default=None, kw_only=True)
+    # port-added (no CMBP key)
+    strictEncryption: bool | None = field(default=None, kw_only=True)
+    instanceNames: list[str] = field(default_factory=list, kw_only=True)
+
+
+@dataclass
+class MSSQLDatabaseProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    isTrustworthy: bool = field(default=True, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    SQLServer: str | None = field(default=None, kw_only=True)
+
+
+@dataclass
+class MSSQLServerRoleProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    isFixedRole: bool = field(default=True, kw_only=True)
+    members: list[str] = field(default_factory=list, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    SQLServer: str | None = field(default=None, kw_only=True)
+
+
+@dataclass
+class MSSQLDatabaseRoleProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    database: str | None = field(default=None, kw_only=True)
+    isFixedRole: bool = field(default=True, kw_only=True)
+    members: list[str] = field(default_factory=list, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    SQLServer: str | None = field(default=None, kw_only=True)
+
+
+@dataclass
+class MSSQLLoginProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    loginType: str | None = field(default=None, kw_only=True)
+    memberOfRoles: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    SQLServer: str | None = field(default=None, kw_only=True)
+
+
+@dataclass
+class MSSQLDatabaseUserProperties(NodeProperties):
+    collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    database: str | None = field(default=None, kw_only=True)
+    login: str | None = field(default=None, kw_only=True)
+    memberOfRoles: list[str] = field(default_factory=list, kw_only=True)
+    SCCMInfra: bool = field(default=True, kw_only=True)
+    SCCMSite: str | None = field(default=None, kw_only=True)
+    SQLServer: str | None = field(default=None, kw_only=True)

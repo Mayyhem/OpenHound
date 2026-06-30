@@ -34,6 +34,20 @@ SCCM_ASSIGN_ALL_PERMISSIONS = "SCCM_AssignAllPermissions"
 SAME_HOST_AS = "SameHostAs"
 LOCAL_ADMIN_REQUIRED = "LocalAdminRequired"
 
+# Stage 5 edge kinds (MSSQL). The string values are already in TRAVERSABLE_EDGE_KINDS,
+# except MSSQL_ServiceAccountFor which CMBP comments out (ps1:2233 — not traversable).
+MSSQL_CONTAINS = "MSSQL_Contains"
+MSSQL_CONTROL_SERVER = "MSSQL_ControlServer"
+MSSQL_CONTROL_DB = "MSSQL_ControlDB"
+MSSQL_HOST_FOR = "MSSQL_HostFor"
+MSSQL_EXECUTE_ON_HOST = "MSSQL_ExecuteOnHost"
+MSSQL_HAS_LOGIN = "MSSQL_HasLogin"
+MSSQL_IS_MAPPED_TO = "MSSQL_IsMappedTo"
+MSSQL_MEMBER_OF = "MSSQL_MemberOf"
+MSSQL_SERVICE_ACCOUNT_FOR = "MSSQL_ServiceAccountFor"
+MSSQL_GET_ADMIN_TGS = "MSSQL_GetAdminTGS"
+MSSQL_GET_TGS = "MSSQL_GetTGS"
+
 # CMBP traversable allow-list (ConfigManBearPig.ps1:2216-2249, uncommented entries only).
 # Edges whose kind is in this set get properties.traversable = True. Includes future
 # (Stage 3-6) kinds so later stages reuse this one source of truth.

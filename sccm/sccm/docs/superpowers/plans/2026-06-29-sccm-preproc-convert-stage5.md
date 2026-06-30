@@ -331,7 +331,7 @@ class MSSQLDatabaseUserProperties(NodeProperties):
 
 **Interfaces:**
 - Consumes: `adminservice_site_definitions_computers` / `wmi_site_definitions_computers` (`object_sid`, `dns_host_name`, `sccm_site_system_roles` — role `'SMS SQL Server@<site>'`), `node_site` (`site_code`, `root_site_code`, `sql_database_name`, `sql_service_port`, `sql_service_account_name`, `sql_service_account_domain_sid`).
-- Produces: TEMP table `_mssql_sql_servers(site_code, root_site_code, host_sid, dns_host_name, port, db_name, service_account_name, service_account_sid)` — one row per `(site, SQL-host computer)`. Keyed-but-not-unique (a site with two SQL hosts yields two rows). Consumed by `_node_mssql_server`, `_node_mssql_database`, the login/user builders, and the edge builders.
+- Produces: persistent table `{schema}._mssql_sql_servers(site_code, root_site_code, host_sid, dns_host_name, port, db_name, service_account_name, service_account_sid)` — one row per `(site, SQL-host computer)`. Keyed-but-not-unique (a site with two SQL hosts yields two rows). **Schema-qualified, not TEMP** (DuckDB TEMP tables live in the `temp` schema and aren't reachable as `sccm.*`; the test + all downstream builders reference `{schema}._mssql_sql_servers`). Consumed by `_node_mssql_server`, `_node_mssql_database`, the login/user builders, and the edge builders.
 
 - [ ] **Step 1: Write the failing test** — create `tests/node_mssql_server_test.py`:
 
@@ -383,8 +383,12 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     service account) are shared across a site's SQL hosts, so they are joined from
     node_site. The database name falls back to CM_<siteCode> (CMBP :6082).
     """
+    # Persistent schema-qualified table (NOT a TEMP table): the validation test and the
+    # downstream builders reference it as {schema}._mssql_sql_servers, and DuckDB TEMP tables
+    # live in the `temp` schema (unreachable as sccm.*). The inner _mssql_sql_hosts staging
+    # table stays TEMP (only used within this function).
     con.execute(
-        "CREATE OR REPLACE TEMP TABLE _mssql_sql_servers ("
+        f"CREATE OR REPLACE TABLE {schema}._mssql_sql_servers ("
         "site_code VARCHAR, root_site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR, "
         "port VARCHAR, db_name VARCHAR, service_account_name VARCHAR, service_account_sid VARCHAR)"
     )
@@ -401,7 +405,7 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"WHERE object_sid IS NOT NULL AND sccm_site_system_roles LIKE 'SMS SQL Server@%'")
     # Collapse duplicate (site, host) rows, then attach the site-level SQL attributes.
     con.execute(
-        f"INSERT INTO _mssql_sql_servers "
+        f"INSERT INTO {schema}._mssql_sql_servers "
         f"SELECT h.site_code, ns.root_site_code, h.host_sid, any_value(h.dns_host_name) AS dns_host_name, "
         f"  coalesce(any_value(ns.sql_service_port), '1433') AS port, "
         f"  coalesce(any_value(ns.sql_database_name), 'CM_' || h.site_code) AS db_name, "
@@ -411,7 +415,7 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"LEFT JOIN {schema}.node_site ns ON upper(ns.site_code) = h.site_code "
         f"GROUP BY h.site_code, ns.root_site_code, h.host_sid"
     )
-    n = con.execute("SELECT count(*) FROM _mssql_sql_servers").fetchone()[0]
+    n = con.execute(f"SELECT count(*) FROM {schema}._mssql_sql_servers").fetchone()[0]
     logger.info("_mssql_sql_servers resolved %d (site, SQL-host) pair(s) in schema %r", n, schema)
 ```
 
@@ -532,7 +536,7 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
           f"  CAST([] AS VARCHAR[]) AS instance_names, "
           f"  service_account_name, service_account_sid AS service_account_domain_sid, "
           f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
-          f"FROM _mssql_sql_servers WHERE host_sid IS NOT NULL")
+          f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL")
     # Arm 2: EPA scan.
     _ensure_columns(con, schema, "mssql_server_instances", {
         "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR",
@@ -654,7 +658,7 @@ def _node_mssql_database(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  upper(host_sid) AS host_sid, coalesce(port, '1433') AS port, "
         f"  db_name AS name, site_code AS sccm_site, dns_host_name AS sql_server, "
         f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
-        f"FROM _mssql_sql_servers WHERE host_sid IS NOT NULL AND db_name IS NOT NULL"
+        f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL AND db_name IS NOT NULL"
     )
     n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database").fetchone()[0]
     logger.info("node_mssql_database built (%d database(s)) in schema %r", n, schema)
@@ -776,7 +780,7 @@ def _node_mssql_login(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  s.dns_host_name AS sql_server, s.site_code AS sccm_site, "
         f"  c.sid AS sysadmin_computer_sid, "
         f"  ['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'] AS collection_source "
-        f"FROM _mssql_sql_servers s "
+        f"FROM {schema}._mssql_sql_servers s "
         f"JOIN {schema}.node_computer c "
         f"  ON c.sid != upper(s.host_sid) "
         f"  AND c.sam_account_name IS NOT NULL AND c.dnshostname LIKE '%.%' "

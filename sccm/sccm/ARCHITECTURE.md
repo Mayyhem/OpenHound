@@ -49,6 +49,7 @@ Every section follows the same spine:
   - [11d. Stage 4: client-device dedup and host-correlation edges](#11d-stage-4-client-device-dedup-and-host-correlation-edges)
   - [11e. Edge-endpoint stub-node backfill (new divergence category)](#11e-edge-endpoint-stub-node-backfill-new-divergence-category)
   - [11f. Split output: an untagged AD payload beside the SCCM source](#11f-split-output-an-untagged-ad-payload-beside-the-sccm-source)
+  - [11g. Stage 5: MSSQL node merge and topology inference](#11g-stage-5-mssql-node-merge-and-topology-inference)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -890,6 +891,64 @@ it — which means emitting them with **no `source_kind` at all**.
 
 ---
 
+### 11g. Stage 5: MSSQL node merge and topology inference
+
+Stage 5 adds six `MSSQL_*` node tables and ~15 edge kinds, all built entirely in `preproc`
+(`transforms.py`) and emitted through the existing Convert2-Read-DB pipeline. No new framework
+divergence categories are introduced; the MSSQL work is an extension of the preproc node-coalesce
+design from §9 and the output-split routing from §11f.
+
+**`MSSQL_Server` merge — one row per `host_sid:port`.** `node_mssql_server` is built like
+`node_computer`: three `INSERT` arms into a staging table, then collapsed by
+`GROUP BY upper(host_sid), host_sid, port` with `any_value` for scalars (the raw `host_sid`
+is carried alongside `upper(host_sid)` in the GROUP BY so the non-uppercased value stays
+selectable):
+
+- `mssql_server_instances` — the EPA scan; supplies `extendedProtection`, `forceEncryption`,
+  `strictEncryption`.
+- `remoteregistry_mssql_servers` — the registry walk; supplies port, `forceEncryption`,
+  `instanceNames`.
+- `_mssql_sql_servers` — a staging table resolved per `(site, SQL-host)` role row from
+  `sccm_site_system_roles` joined through `node_computer`; supplies `SCCMSite`, `SCCMInfra`,
+  `dnsHostName`, `SQLServicePort`, and the SQL service-account fields.
+
+Using the per-`(site, SQL-host)` role rows (not `node_site`'s single `any_value` per site) means
+a site with **multiple SQL hosts** gets one `MSSQL_Server` row per host. Scan/registry rows with
+no SCCM match still produce a bare `MSSQL_Server` (plus `MSSQL_HostFor` / `MSSQL_ExecuteOnHost`);
+their `SCCMSite` / `SCCMInfra` columns stay null/false. This directly mirrors CMBP's
+`Add-MSSQLServerNodesAndEdges` (ps1:6050-6186) while capturing non-SCCM SQL servers that CMBP
+skips.
+
+**Login / DatabaseUser topology inference.** CMBP never queries SQL for user identity.
+Instead it infers the `sysadmin` logins from the machine accounts of the site's Primary Site
+Server and SMS Provider computers — the hosts SCCM architecturally grants `sysadmin` on the site
+database (`Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer`, ps1:6187-6292). The port uses the
+same pattern: login name and id use `upper(split_part(dnshostname, '.', 2)) || '\' || sam_account_name`
+from the **sysadmin computer's own** DNS domain (`dnshostname` second label), which is correct for
+cross-domain Site Server / SMS Provider hosts (a refinement over CMBP's `$Domain.Split('.')[0]`
+which read the **collector's** domain). Database, `sysadmin` ServerRole, and `db_owner`
+DatabaseRole nodes follow from the same SCCM topology: the database is always `CM_<siteCode>` and
+the roles always exist. Stage 5 fixes one CMBP scope bug: CMBP left `sysadmin`/`db_owner` `members`
+arrays empty (undefined variable, ps1:6105/6155); the set-based port fills them from the joined
+logins/database-users.
+
+**`environmentid`.** All six MSSQL node kinds use `domain_environment_id(host_sid)` — the
+AD-domain SID of the SQL host — the same derivation as `Computer` / `User` / `Group` nodes
+(see §9 "Group identity" and [graph.py](src/openhound_sccm/graph.py) for `domain_environment_id`).
+This ensures MSSQL nodes merge correctly with a future `MSSQLHound` collection keyed on the same
+domain SID.
+
+**Output routing.** MSSQL nodes register in `SCCM_NODE_SPECS` (they are SCCM-owned,
+`source_kind="SCCM"`). MSSQL edges insert into the single `graph_edges` table and are then
+auto-routed by `_graph_edges_split` (§11f): edges whose Computer-SID or service-account-SID
+endpoint is an AD node (`MSSQL_HostFor`, `MSSQL_ExecuteOnHost`, `MSSQL_HasLogin`,
+`MSSQL_GetTGS`, `MSSQL_ServiceAccountFor`, `MSSQL_GetAdminTGS`) go to `graph_edges_ad` (untagged
+AD payload); all-MSSQL/SCCM edges (`MSSQL_Contains`, `MSSQL_ControlServer`, `MSSQL_ControlDB`,
+`MSSQL_MemberOf`, `MSSQL_IsMappedTo`, `SCCM_AssignAllPermissions`) go to `graph_edges_sccm`.
+No change to `_graph_edges_split` is needed — MSSQL node ids are deliberately not in its AD id set.
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -907,6 +966,7 @@ it — which means emitting them with **no `source_kind` at all**.
 | Traversable allow-list + collection source | `TRAVERSABLE_EDGE_KINDS` frozenset in `kinds/edges.py`; `GraphEdge` sets `traversable` from it and `collection_source` from the `graph_edges` typed `VARCHAR[]` column; dedup pass array-unions `collection_source` per `(start_id, end_id, kind)` group | A graph-model-level traversability attribute; a typed array column on edges |
 | Edge-endpoint stub-node backfill | `_node_backfill` + `StubNode` synthesise bare nodes for unresolved edge endpoints | An `Upsert-Node`-equivalent that creates nodes on demand |
 | Split output (untagged AD payload) | A second `convert`-time emit pass through an extension `opengraph_file_untagged` destination (no `metadata`); preproc `_graph_edges_split` partitions edges | A `source_kind=None` / multi-source option on `@app.convert` |
+| MSSQL node merge + topology inference | `_mssql_sql_servers` temp table + three-source `UNION`/`GROUP BY` coalesce in `_node_mssql_server`; Login/DatabaseUser inferred from SCCM sysadmin-computer topology in `_node_mssql_login` / `_node_mssql_database_user`; MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split` | No new framework extension point — extends the existing Convert2-Read-DB pipeline and output-split (§11f) |
 
 ---
 
@@ -931,6 +991,7 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-06-30 | Stage 5 (MSSQL) shipped. Added §11g: `MSSQL_Server` is a three-source coalesce (`mssql_server_instances` + `remoteregistry_mssql_servers` + `_mssql_sql_servers`), keyed on `upper(host_sid):port`, capturing multiple SQL hosts per site and non-SCCM servers. Six MSSQL node kinds inferred from SCCM topology (no live SQL enumeration). `environmentid` = AD-domain SID of the SQL host via `domain_environment_id`. MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split`. Quick-reference table updated. |
 | 2026-06-29 | Split output shipped. Added §11f: `convert` now writes two payloads — the SCCM-tagged set (`sccm_*`, `source_kind="SCCM"`) and an untagged AD set (`ad_*`, no `metadata` block) for native AD-graph merge. New preproc step `transforms._graph_edges_split` partitions `graph_edges` into `graph_edges_ad` / `graph_edges_sccm`; new extension destination `opengraph_file_untagged`; `emit_graph_from_duckdb` gained `resource_prefix` + `source_kind=None` (untagged) handling; `NODE_SPECS`/`EDGE_SPECS` split into `SCCM_*`/`AD_*` spec lists. |
 | 2026-06-29 | Stage 4 shipped. Added §11d documenting `_dedup_client_device` (merge real+inferred SCCM_ClientDevice twins by `ad_domain_sid`, runs before all edge builders — deliberate divergence from CMBP's post-edge merge order), `_edge_same_host` (bidirectional `Computer ↔ SCCM_ClientDevice` `SameHostAs`), and `_edge_local_admin_required` (site server → peer site systems `LocalAdminRequired`). Renamed §11d stub-node backfill to §11e. Updated §11b: inferred client rows now use `is_confirmed_active_client = False` (not "possible"); note the Stage 4 `SameHostAs` edge that links them back to AD computer objects. |
 | 2026-06-25 | Stage 3 shipped. Updated §11c: `graph_edges` is now four columns (`start_id`, `end_id`, `kind`, `collection_source VARCHAR[]`); `GraphEdge` sets both `traversable` and `collection_source`; dedup pass groups by `(start_id, end_id, kind)` and array-unions `collection_source` via `list_distinct(flatten(list(...)))`. Updated quick-reference table row. |

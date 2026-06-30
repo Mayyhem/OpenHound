@@ -1963,6 +1963,256 @@ def _role_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     logger.info("role_by_name built in schema %r", schema)
 
 
+# ---------------------------------------------------------------------------
+# Stage 5: MSSQL — per-(site, SQL-host) SCCM resolution temp
+# ---------------------------------------------------------------------------
+
+
+def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Resolve every (site, SQL-host computer) pair that runs the site database.
+
+    The privileged collector tagged each site-system computer with its role
+    ("SMS SQL Server@<site>") in *_site_definitions_computers (same source the
+    Stage-4 site-server resolution reads at transforms.py:1199). One row per
+    (site, SQL host) preserves the multiple-site-database-per-site case (grilled
+    2026-06-29) — node_site collapses to one SQL host via any_value, so we read the
+    role rows directly here instead. Site-level SQL attributes (db name, port,
+    service account) are shared across a site's SQL hosts, so they are joined from
+    node_site. The database name falls back to CM_<siteCode> (CMBP :6082).
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}._mssql_sql_servers ("
+        "site_code VARCHAR, root_site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR, "
+        "port VARCHAR, db_name VARCHAR, service_account_name VARCHAR, service_account_sid VARCHAR)"
+    )
+    # Staging temp: collect (site, SQL host) pairs from all available sources.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _mssql_sql_hosts "
+        "(site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR)"
+    )
+    for _sdc in ("adminservice_site_definitions_computers", "wmi_site_definitions_computers"):
+        _ensure_columns(con, schema, _sdc, {
+            "object_sid": "VARCHAR", "dns_host_name": "VARCHAR", "sccm_site_system_roles": "VARCHAR",
+        })
+        _safe(con, f"_mssql_sql_hosts<-{_sdc}",
+              f"INSERT INTO _mssql_sql_hosts "
+              f"SELECT upper(split_part(sccm_site_system_roles, '@', 2)) AS site_code, "
+              f"  upper(object_sid) AS host_sid, dns_host_name "
+              f"FROM {schema}.{_sdc} "
+              f"WHERE object_sid IS NOT NULL AND sccm_site_system_roles LIKE 'SMS SQL Server@%'")
+
+    # Collapse duplicate (site, host) rows, then attach the site-level SQL attributes.
+    con.execute(
+        f"INSERT INTO {schema}._mssql_sql_servers "
+        f"SELECT h.site_code, ns.root_site_code, h.host_sid, any_value(h.dns_host_name) AS dns_host_name, "
+        f"  coalesce(any_value(ns.sql_service_port), '1433') AS port, "
+        f"  coalesce(any_value(ns.sql_database_name), 'CM_' || h.site_code) AS db_name, "
+        f"  any_value(ns.sql_service_account_name) AS service_account_name, "
+        f"  any_value(ns.sql_service_account_domain_sid) AS service_account_sid "
+        f"FROM _mssql_sql_hosts h "
+        f"LEFT JOIN {schema}.node_site ns ON upper(ns.site_code) = h.site_code "
+        f"GROUP BY h.site_code, ns.root_site_code, h.host_sid"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}._mssql_sql_servers").fetchone()[0]
+    logger.info("_mssql_sql_servers resolved %d (site, SQL-host) pair(s) in schema %r", n, schema)
+
+
+def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Coalesce one MSSQL_Server per host_sid:port (CMBP Add-MSSQLServerNodesAndEdges :6088).
+
+    MERGE of three sources (grilled 2026-06-29):
+      - _mssql_sql_servers  (SCCM site DB; supplies SCCMSite/db/service-account/dnsHostName)
+      - mssql_server_instances     (EPA scan; supplies extendedProtection/forceEncryption/strictEncryption)
+      - remoteregistry_mssql_servers (registry; supplies port/forceEncryption/instanceNames)
+    Key = upper(host_sid) || ':' || port, so multiple site DBs per site AND non-SCCM SQL
+    servers are both captured. Non-SCCM rows have NULL SCCMSite / false SCCMInfra.
+
+    EPA value vocabularies differ (scan: Off/Allowed/Required/Unknown; registry: On/Off);
+    Stage 5 carries them as-is (Stage 6 interprets them). extended_protection prefers the
+    scan's richer value, then registry. The port is a VARCHAR throughout (matches node_site).
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_server ("
+        "host_sid VARCHAR, port VARCHAR, name VARCHAR, dns_host_name VARCHAR, "
+        "sccm_site VARCHAR, sccm_infra BOOLEAN, databases VARCHAR[], "
+        "force_encryption BOOLEAN, extended_protection VARCHAR, strict_encryption BOOLEAN, "
+        "instance_names VARCHAR[], service_account_name VARCHAR, service_account_domain_sid VARCHAR, "
+        "collection_source VARCHAR[])"
+    )
+    # Arm 1: SCCM-resolved site databases.
+    _safe(con, "node_mssql_server<-_mssql_sql_servers",
+          f"INSERT INTO {schema}.node_mssql_server BY NAME "
+          f"SELECT host_sid, coalesce(port, '1433') AS port, dns_host_name AS name, dns_host_name, "
+          f"  site_code AS sccm_site, true AS sccm_infra, "
+          f"  CASE WHEN db_name IS NULL THEN CAST([] AS VARCHAR[]) ELSE [db_name] END AS databases, "
+          f"  NULL AS force_encryption, NULL AS extended_protection, NULL AS strict_encryption, "
+          f"  CAST([] AS VARCHAR[]) AS instance_names, "
+          f"  service_account_name, service_account_sid AS service_account_domain_sid, "
+          f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+          f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL")
+    # Arm 2: EPA scan.
+    _ensure_columns(con, schema, "mssql_server_instances", {
+        "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR",
+        "extended_protection": "VARCHAR", "force_encryption": "BOOLEAN", "strict_encryption": "BOOLEAN",
+    })
+    _safe(con, "node_mssql_server<-mssql_server_instances",
+          f"INSERT INTO {schema}.node_mssql_server BY NAME "
+          f"SELECT upper(domain_computer_sid) AS host_sid, CAST(coalesce(port, 1433) AS VARCHAR) AS port, "
+          f"  name, name AS dns_host_name, NULL AS sccm_site, false AS sccm_infra, "
+          f"  CAST([] AS VARCHAR[]) AS databases, force_encryption, extended_protection, strict_encryption, "
+          f"  CAST([] AS VARCHAR[]) AS instance_names, NULL AS service_account_name, "
+          f"  NULL AS service_account_domain_sid, ['MSSQL-ScanForEPA'] AS collection_source "
+          f"FROM {schema}.mssql_server_instances WHERE domain_computer_sid IS NOT NULL")
+    # Arm 3: remote-registry.
+    _ensure_columns(con, schema, "remoteregistry_mssql_servers", {
+        "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR",
+        "extended_protection": "VARCHAR", "force_encryption": "BOOLEAN", "instance_names": "VARCHAR",
+    })
+    _safe(con, "node_mssql_server<-remoteregistry_mssql_servers",
+          f"INSERT INTO {schema}.node_mssql_server BY NAME "
+          f"SELECT upper(domain_computer_sid) AS host_sid, CAST(coalesce(port, 1433) AS VARCHAR) AS port, "
+          f"  name, name AS dns_host_name, NULL AS sccm_site, false AS sccm_infra, "
+          f"  CAST([] AS VARCHAR[]) AS databases, force_encryption, extended_protection, NULL AS strict_encryption, "
+          f"  {_arr('instance_names')} AS instance_names, NULL AS service_account_name, "
+          f"  NULL AS service_account_domain_sid, ['RemoteRegistry-MSSQL'] AS collection_source "
+          f"FROM {schema}.remoteregistry_mssql_servers WHERE domain_computer_sid IS NOT NULL")
+    # Collapse to one row per host_sid:port. SCCM scalars win via any_value-skip-null ordering;
+    # EPA prefers any non-null. server_id minted final here.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_server AS "
+        f"SELECT upper(host_sid) || ':' || port AS server_id, "
+        f"  host_sid, port, any_value(name) AS name, any_value(dns_host_name) AS dns_host_name, "
+        f"  any_value(sccm_site) AS sccm_site, bool_or(sccm_infra) AS sccm_infra, "
+        f"  list_distinct(flatten(list(databases))) AS databases, "
+        f"  bool_or(force_encryption) AS force_encryption, "
+        f"  any_value(extended_protection) AS extended_protection, "
+        f"  bool_or(strict_encryption) AS strict_encryption, "
+        f"  list_distinct(flatten(list(instance_names))) AS instance_names, "
+        f"  any_value(service_account_name) AS service_account_name, "
+        f"  any_value(service_account_domain_sid) AS service_account_domain_sid, "
+        f"  list_distinct(flatten(list(collection_source))) AS collection_source "
+        f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL AND port IS NOT NULL "
+        f"GROUP BY upper(host_sid), host_sid, port"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_server").fetchone()[0]
+    logger.info("node_mssql_server built (%d server(s)) in schema %r", n, schema)
+
+
+def _node_mssql_database(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """One MSSQL_Database per SCCM site DB (CMBP :6140). id = <server_id>\\<db_name>.
+
+    Built only from _mssql_sql_servers (the SCCM-linked servers) — CMBP never creates a
+    database for a SQL server it didn't reach via site processing, and non-SCCM scan-only
+    servers expose no database name. db_name defaults to CM_<siteCode> in _mssql_sql_servers.
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_database AS "
+        f"SELECT DISTINCT "
+        f"  upper(host_sid) || ':' || coalesce(port, '1433') || '\\' || db_name AS database_id, "
+        f"  upper(host_sid) || ':' || coalesce(port, '1433') AS server_id, "
+        f"  upper(host_sid) AS host_sid, coalesce(port, '1433') AS port, "
+        f"  db_name AS name, site_code AS sccm_site, dns_host_name AS sql_server, "
+        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL AND db_name IS NOT NULL"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database").fetchone()[0]
+    logger.info("node_mssql_database built (%d database(s)) in schema %r", n, schema)
+
+
+def _node_mssql_login(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """One MSSQL_Login per (SCCM SQL host, sysadmin computer) (CMBP :6232).
+
+    Sysadmin computer = a Site Server / SMS Provider for the SAME site as the SQL host,
+    EXCLUDING the SQL host itself (CMBP :1912-1920). Login id/name use the computer's OWN
+    DNS domain first label as NETBIOS (grilled 2026-06-29): <NETBIOS>\\<sam>@<server_id>.
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_login AS "
+        f"SELECT DISTINCT "
+        f"  upper(split_part(c.dnshostname, '.', 2)) || '\\' || c.sam_account_name "
+        f"    || '@' || (upper(s.host_sid) || ':' || coalesce(s.port, '1433')) AS login_id, "
+        f"  upper(split_part(c.dnshostname, '.', 2)) || '\\' || c.sam_account_name AS login_name, "
+        f"  upper(s.host_sid) || ':' || coalesce(s.port, '1433') AS server_id, "
+        f"  upper(s.host_sid) AS host_sid, coalesce(s.port, '1433') AS port, "
+        f"  s.dns_host_name AS sql_server, s.site_code AS sccm_site, "
+        f"  c.sid AS sysadmin_computer_sid, "
+        f"  ['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'] AS collection_source "
+        f"FROM {schema}._mssql_sql_servers s "
+        f"JOIN {schema}.node_computer c "
+        f"  ON c.sid != upper(s.host_sid) "
+        f"  AND c.sam_account_name IS NOT NULL AND c.dnshostname LIKE '%.%' "
+        f"  AND len(list_filter(c.site_system_roles, x -> "
+        f"        upper(x) = 'SMS SITE SERVER@' || s.site_code "
+        f"        OR upper(x) = 'SMS PROVIDER@' || s.site_code)) > 0 "
+        f"WHERE s.host_sid IS NOT NULL"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_login").fetchone()[0]
+    logger.info("node_mssql_login built (%d login(s)) in schema %r", n, schema)
+
+
+def _node_mssql_database_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """One MSSQL_DatabaseUser per (login, database on the same server) (CMBP :6247).
+
+    The sysadmin computer's login is mapped into the site database as a db user with the
+    same DOMAIN\\sam name. id = <login_name>@<database_id>. `database` is the db name; `login`
+    is the source login name (CMBP sets both).
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_database_user AS "
+        f"SELECT DISTINCT "
+        f"  l.login_name || '@' || d.database_id AS dbuser_id, "
+        f"  l.login_name AS dbuser_name, l.login_id, l.login_name, "
+        f"  d.database_id, d.name AS database, l.server_id, l.host_sid, l.port, "
+        f"  l.sql_server, l.sccm_site, "
+        f"  ['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'] AS collection_source "
+        f"FROM {schema}.node_mssql_login l "
+        f"JOIN {schema}.node_mssql_database d ON d.server_id = l.server_id"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database_user").fetchone()[0]
+    logger.info("node_mssql_database_user built (%d user(s)) in schema %r", n, schema)
+
+
+def _node_mssql_server_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """The fixed `sysadmin` server role, one per SCCM-linked MSSQL_Server (CMBP :6101).
+
+    members is populated from the logins on the server (fix for CMBP's empty-array scope
+    bug at :6105, grilled 2026-06-29). Only SCCM-linked servers get the role — non-SCCM
+    scan-only servers are bare (CMBP builds the role inside the per-site server function).
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_server_role AS "
+        f"SELECT 'sysadmin@' || s.server_id AS role_id, s.server_id, s.host_sid, "
+        f"  'sysadmin' AS name, "
+        f"  coalesce((SELECT list_distinct(list(l.login_id)) FROM {schema}.node_mssql_login l "
+        f"            WHERE l.server_id = s.server_id), CAST([] AS VARCHAR[])) AS members, "
+        f"  s.sccm_site, s.dns_host_name AS sql_server, "
+        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"FROM {schema}.node_mssql_server s WHERE s.sccm_infra"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_server_role").fetchone()[0]
+    logger.info("node_mssql_server_role built (%d sysadmin role(s)) in schema %r", n, schema)
+
+
+def _node_mssql_database_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """The fixed `db_owner` database role, one per MSSQL_Database (CMBP :6151).
+
+    members populated from the database users in the database (fix for CMBP's empty-array
+    scope bug at :6155, grilled 2026-06-29).
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_mssql_database_role AS "
+        f"SELECT 'db_owner@' || d.database_id AS role_id, d.database_id, d.server_id, d.host_sid, "
+        f"  'db_owner' AS name, d.name AS database, "
+        f"  coalesce((SELECT list_distinct(list(u.dbuser_id)) FROM {schema}.node_mssql_database_user u "
+        f"            WHERE u.database_id = d.database_id), CAST([] AS VARCHAR[])) AS members, "
+        f"  d.sccm_site, d.sql_server, "
+        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"FROM {schema}.node_mssql_database d"
+    )
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database_role").fetchone()[0]
+    logger.info("node_mssql_database_role built (%d db_owner role(s)) in schema %r", n, schema)
+
+
 def _graph_edges_init(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Create the empty graph_edges table that every edge builder INSERTs into.
     Always runs (even with no site/edge data) so convert can read the table."""
@@ -2436,6 +2686,131 @@ def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> N
           f"JOIN nonsec n ON n.site = ss.site")
 
 
+def _edge_mssql_structural(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """MSSQL server/database containment + control + host edges (CMBP :6111-6172).
+
+    #1 Server -Contains-> sysadmin role; #2 sysadmin -ControlServer-> Server;
+    #3 host Computer -HostFor-> Server; #4 Server -ExecuteOnHost-> host Computer;
+    #5 Server -Contains-> Database; #6 Database -Contains-> db_owner role;
+    #7 db_owner -ControlDB-> Database. The host Computer node id is the raw host SID.
+    """
+    from .kinds.edges import (MSSQL_CONTAINS, MSSQL_CONTROL_DB, MSSQL_CONTROL_SERVER,
+                              MSSQL_EXECUTE_ON_HOST, MSSQL_HOST_FOR)
+    src = "['SCCM_Add-MSSQLServerNodesAndEdges']"
+    # #1 + #2 server <-> sysadmin role
+    _safe(con, "edge_mssql_server_role",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT server_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_server_role "
+          f"UNION ALL "
+          f"SELECT role_id, server_id, '{MSSQL_CONTROL_SERVER}', {src} FROM {schema}.node_mssql_server_role")
+    # #3 + #4 host computer <-> server
+    _safe(con, "edge_mssql_host",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT host_sid AS start_id, server_id AS end_id, '{MSSQL_HOST_FOR}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL "
+          f"UNION ALL "
+          f"SELECT server_id, host_sid, '{MSSQL_EXECUTE_ON_HOST}', {src} "
+          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL")
+    # #5 server -> database
+    _safe(con, "edge_mssql_server_db",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT server_id AS start_id, database_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_database")
+    # #6 + #7 database <-> db_owner role
+    _safe(con, "edge_mssql_db_role",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT database_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_database_role "
+          f"UNION ALL "
+          f"SELECT role_id, database_id, '{MSSQL_CONTROL_DB}', {src} FROM {schema}.node_mssql_database_role")
+
+
+def _edge_mssql_membership(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Login/DatabaseUser membership + containment + host-login edges (CMBP :6262-6286).
+
+    #9  Login -MemberOf-> sysadmin role; #10 Server -Contains-> Login;
+    #11 sysadmin Computer -HasLogin-> Login; #12 Login -IsMappedTo-> DatabaseUser;
+    #13 DatabaseUser -MemberOf-> db_owner role; #14 Database -Contains-> DatabaseUser.
+    """
+    from .kinds.edges import MSSQL_CONTAINS, MSSQL_HAS_LOGIN, MSSQL_IS_MAPPED_TO, MSSQL_MEMBER_OF
+    src = "['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer']"
+    # #9 + #10 + #11 from logins
+    _safe(con, "edge_mssql_login",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT login_id AS start_id, 'sysadmin@' || server_id AS end_id, '{MSSQL_MEMBER_OF}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_login "
+          f"UNION ALL SELECT server_id, login_id, '{MSSQL_CONTAINS}', {src} FROM {schema}.node_mssql_login "
+          f"UNION ALL SELECT sysadmin_computer_sid, login_id, '{MSSQL_HAS_LOGIN}', {src} "
+          f"  FROM {schema}.node_mssql_login WHERE sysadmin_computer_sid IS NOT NULL")
+    # #12 + #13 + #14 from database users
+    _safe(con, "edge_mssql_dbuser",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT login_id AS start_id, dbuser_id AS end_id, '{MSSQL_IS_MAPPED_TO}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_database_user "
+          f"UNION ALL SELECT dbuser_id, 'db_owner@' || database_id, '{MSSQL_MEMBER_OF}', {src} FROM {schema}.node_mssql_database_user "
+          f"UNION ALL SELECT database_id, dbuser_id, '{MSSQL_CONTAINS}', {src} FROM {schema}.node_mssql_database_user")
+
+
+def _edge_mssql_service_account(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """SQL service-account edges (CMBP post-proc :1975 + :8013-8016).
+
+    #15a MSSQL_GetTGS: service acct -> EACH login on the server (no acct!=host gate).
+    #15b MSSQL_ServiceAccountFor + #15c MSSQL_GetAdminTGS: service acct -> server, only
+         when the service account differs from the SQL host computer (CMBP :8012). Uses the
+         COLLECTED port (server_id), not CMBP's hardcoded :1433 (fold-in fix, grilled).
+    Resolve-or-drop: the service account SID must exist as a node_computer / node_user row
+    (decision #7); else the row is skipped (the WHERE EXISTS guard) and nothing is emitted.
+    """
+    from .kinds.edges import MSSQL_GET_ADMIN_TGS, MSSQL_GET_TGS, MSSQL_SERVICE_ACCOUNT_FOR
+    src = "['AdminService-SMS_SCI_SysResUse']"
+    acct_exists = (
+        f"EXISTS (SELECT 1 FROM {schema}.node_computer c WHERE c.sid = s.service_account_domain_sid) "
+        f"OR EXISTS (SELECT 1 FROM {schema}.node_user u WHERE u.sid = s.service_account_domain_sid)"
+    )
+    # #15a GetTGS: service acct -> each login on the server.
+    _safe(con, "edge_mssql_gettgs",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT s.service_account_domain_sid AS start_id, l.login_id AS end_id, "
+          f"  '{MSSQL_GET_TGS}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_server s "
+          f"JOIN {schema}.node_mssql_login l ON l.server_id = s.server_id "
+          f"WHERE s.service_account_domain_sid IS NOT NULL AND ({acct_exists})")
+    # #15b + #15c: service acct -> server, only when acct != host (CMBP :8012 gate).
+    _safe(con, "edge_mssql_svcacct_server",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT s.service_account_domain_sid AS start_id, s.server_id AS end_id, "
+          f"  '{MSSQL_SERVICE_ACCOUNT_FOR}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_server s "
+          f"WHERE s.service_account_domain_sid IS NOT NULL "
+          f"  AND s.service_account_domain_sid != s.host_sid AND ({acct_exists}) "
+          f"UNION ALL "
+          f"SELECT s.service_account_domain_sid, s.server_id, '{MSSQL_GET_ADMIN_TGS}', {src} "
+          f"FROM {schema}.node_mssql_server s "
+          f"WHERE s.service_account_domain_sid IS NOT NULL "
+          f"  AND s.service_account_domain_sid != s.host_sid AND ({acct_exists})")
+
+
+def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Database -SCCM_AssignAllPermissions-> every non-secondary site (CMBP :6173-6180).
+
+    The site DB has full control of the hierarchy. Mirrors the non-secondary site set used
+    by _edge_assign_all_permissions (coalesce(site_type, 0) != 1; site_code IS NOT NULL).
+    The site node id is the bare site_code (SCCMSite model id), matching the existing
+    assign-all builder.
+    """
+    from .kinds.edges import SCCM_ASSIGN_ALL_PERMISSIONS
+    nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
+              f"WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL)")
+    _safe(con, "edge_mssql_db_assign_all",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT d.database_id AS start_id, site.site_code AS end_id, "
+          f"  '{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, "
+          f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+          f"FROM {schema}.node_mssql_database d "
+          f"CROSS JOIN {nonsec} site")
+
+
 def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Collapse duplicate (start_id, end_id, kind) rows into one row per unique triple.
 
@@ -2584,6 +2959,14 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # so every edge builder references survivors (no graph_edges rewrite needed).
     _dedup_client_device(con, schema)
     _enrich_site_lists(con, schema)
+    # Stage 5: MSSQL nodes (built from SCCM topology + EPA scan; spec §6 Stage 5).
+    _mssql_sql_servers(con, schema)
+    _node_mssql_server(con, schema)
+    _node_mssql_database(con, schema)
+    _node_mssql_login(con, schema)
+    _node_mssql_database_user(con, schema)
+    _node_mssql_server_role(con, schema)
+    _node_mssql_database_role(con, schema)
     # _graph_edges_init must run before all edge builders; _edge_replication and future
     # edge builders all INSERT into the table created here.
     _graph_edges_init(con, schema)
@@ -2603,6 +2986,11 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # Stage 4 edges.
     _edge_same_host(con, schema)
     _edge_local_admin_required(con, schema)
+    # Stage 5 MSSQL edges.
+    _edge_mssql_structural(con, schema)
+    _edge_mssql_membership(con, schema)
+    _edge_mssql_service_account(con, schema)
+    _edge_mssql_db_assign_all(con, schema)
     # Dedup after all edge builders: both adminservice and wmi sources can contribute the
     # same edge, and name fan-out (collection_by_name, role_by_name) can match the same
     # id twice. CMBP's Upsert-Edge dedupes at insert time; we do it once here.

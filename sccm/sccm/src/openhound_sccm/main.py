@@ -35,6 +35,12 @@ from .lookup import SCCMLookup
 from .models.computer import ComputerNode
 from .models.group import GroupNode
 from .models.graph_edge import GraphEdge
+from .models.mssql_database import MSSQLDatabase
+from .models.mssql_database_role import MSSQLDatabaseRole
+from .models.mssql_database_user import MSSQLDatabaseUser
+from .models.mssql_login import MSSQLLogin
+from .models.mssql_server import MSSQLServer
+from .models.mssql_server_role import MSSQLServerRole
 from .models.sccm_admin_user import SCCMAdminUser
 from .models.sccm_client_device import SCCMClientDevice
 from .models.sccm_collection import SCCMCollection
@@ -1262,6 +1268,14 @@ SCCM_NODE_SPECS: list[tuple[str, type]] = [
     ("node_security_role", SCCMSecurityRole),
     ("node_admin_user", SCCMAdminUser),
     ("node_client_device", SCCMClientDevice),
+    # MSSQL nodes are SCCM-owned (source_kind="SCCM") — they are not AD principals and
+    # must not appear in the AD payload. node_backfill lives in AD_NODE_SPECS.
+    ("node_mssql_server", MSSQLServer),
+    ("node_mssql_database", MSSQLDatabase),
+    ("node_mssql_server_role", MSSQLServerRole),
+    ("node_mssql_database_role", MSSQLDatabaseRole),
+    ("node_mssql_login", MSSQLLogin),
+    ("node_mssql_database_user", MSSQLDatabaseUser),
 ]
 
 AD_NODE_SPECS: list[tuple[str, type]] = [

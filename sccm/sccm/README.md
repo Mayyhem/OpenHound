@@ -8,10 +8,10 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 
 > ## 🚧 Work in progress
 >
-> This port is **mid-migration**. The collection side is broad, and Stages 1–2 of the graph pipeline are now shipping. As of today:
+> This port is **mid-migration**. The collection side is broad, and Stages 1–5 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits eight node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), and [`SCCM_SecurityRole`](#sccm_securityrole) — and twenty-two edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)).
+> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-three edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto-1), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -37,6 +37,12 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [SCCM_Collection](#sccm_collection)
   - [SCCM_AdminUser](#sccm_adminuser)
   - [SCCM_SecurityRole](#sccm_securityrole)
+  - [MSSQL_Server](#mssql_server)
+  - [MSSQL_Database](#mssql_database)
+  - [MSSQL_ServerRole](#mssql_serverrole)
+  - [MSSQL_DatabaseRole](#mssql_databaserole)
+  - [MSSQL_Login](#mssql_login)
+  - [MSSQL_DatabaseUser](#mssql_databaseuser)
 - [Edge Reference](#edge-reference)
   - [SCCM_AdminsReplicatedTo](#sccm_adminsreplicatedto)
   - [SCCM_HasClient](#sccm_hasclient)
@@ -59,6 +65,17 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [SCCM_AssignAllPermissions](#sccm_assignallpermissions)
   - [SameHostAs](#samehostas)
   - [LocalAdminRequired](#localadminrequired)
+  - [MSSQL_Contains](#mssql_contains)
+  - [MSSQL_ControlServer](#mssql_controlserver)
+  - [MSSQL_ControlDB](#mssql_controldb)
+  - [MSSQL_HostFor](#mssql_hostfor)
+  - [MSSQL_ExecuteOnHost](#mssql_executeonhost)
+  - [MSSQL_HasLogin](#mssql_haslogin)
+  - [MSSQL_IsMappedTo](#mssql_ismappedto-1)
+  - [MSSQL_MemberOf](#mssql_memberof)
+  - [MSSQL_GetTGS](#mssql_gettgs)
+  - [MSSQL_ServiceAccountFor](#mssql_serviceaccountfor)
+  - [MSSQL_GetAdminTGS](#mssql_getadmintgs)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -215,7 +232,10 @@ The collector relies on these assumptions about the target environment and how i
 
 # Limitations
 
-- **Graph output covers Stages 1–4.** `convert` now emits eight node kinds and twenty-two edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, NAA secrets) are planned for later stages.
+- **Graph output covers Stages 1–5.** `convert` now emits fourteen node kinds and thirty-three edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, NAA secrets) are planned for later stages.
+- **MSSQL logins, database users, and roles are inferred from SCCM topology, not enumerated from SQL.** The `MSSQL_Login` and `MSSQL_DatabaseUser` nodes (and the `sysadmin` / `db_owner` role nodes) are built from SCCM's knowledge of which computers are Primary Site Servers or SMS Providers for a given site — the same inference CMBP makes. No live SQL connection is opened during `preprocess` or `convert`; the collector's MSSQL phase only probes EPA. This means logins/users/roles are only created for SCCM-linked SQL servers, and only for the machine accounts SCCM architecturally grants `sysadmin` access.
+- **Non-SCCM SQL servers appear as bare `MSSQL_Server` nodes.** SQL servers discovered by the EPA scan or RemoteRegistry that are not referenced by any SCCM site produce an `MSSQL_Server` node (with `MSSQL_HostFor` / `MSSQL_ExecuteOnHost` edges) but no `MSSQL_Database`, `MSSQL_Login`, or role nodes — CMBP likewise skips these and the collector follows suit.
+- **MSSQL nodes land in the SCCM payload; AD-touching MSSQL edges land in the AD payload.** The six MSSQL node kinds are written to `sccm_nodes-*.json` / `sccm_edges-*.json` (tagged `source_kind = "SCCM"`). Edges that touch an AD node — `MSSQL_HostFor`, `MSSQL_ExecuteOnHost`, `MSSQL_HasLogin`, `MSSQL_GetTGS`, `MSSQL_ServiceAccountFor`, and `MSSQL_GetAdminTGS` — are routed into `ad_edges-*.json` by the split step. Upload both file sets together.
 - **Some node properties are deferred to later collectors or stages.** The following properties appear in ConfigManBearPig but are not yet emitted because the required collector does not exist or the data is coupled to a later pipeline stage:
   - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `SCCMIsPXESupportEnabled`) but not the DHCP/PXE configuration parameters.
   - **NAA flag on `User`** (`is_sccm_network_access_account`) — requires NAA secret decryption (`--enable-bad-opsec`) and a dedicated NAA collector, neither of which is implemented yet.
@@ -365,8 +385,8 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 | Files | `metadata.source_kind` | Contents |
 |---|---|---|
-| `sccm_nodes-*.json`, `sccm_edges-*.json` | `"SCCM"` | SCCM-specific nodes (`SCCM_Site`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `SCCM_ClientDevice`) and edges where **both** endpoints are SCCM nodes. |
-| `ad_nodes-*.json`, `ad_edges-*.json` | *(none — no `metadata` block)* | AD-native nodes (`Computer`, `User`, `Group`, and backfill stubs) and every edge where **either** endpoint is an AD node (AD↔AD and AD↔SCCM). |
+| `sccm_nodes-*.json`, `sccm_edges-*.json` | `"SCCM"` | SCCM-specific nodes (`SCCM_Site`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `SCCM_ClientDevice`) and MSSQL nodes (`MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, `MSSQL_DatabaseUser`) and edges where **both** endpoints are SCCM/MSSQL nodes. |
+| `ad_nodes-*.json`, `ad_edges-*.json` | *(none — no `metadata` block)* | AD-native nodes (`Computer`, `User`, `Group`, and backfill stubs) and every edge where **either** endpoint is an AD node (AD↔AD, AD↔SCCM, and AD↔MSSQL). |
 
 The AD payload deliberately carries **no `source_kind`** so BloodHound merges those nodes into its **native AD graph** by SID — augmenting existing SharpHound data rather than registering a separate SCCM-owned copy. An AD↔SCCM edge lives in the AD payload but references an `SCCM_*` node defined in the SCCM payload; BloodHound resolves the reference by id across both files at ingest, so **upload both file sets** (the whole output directory) to File Ingest.
 
@@ -374,7 +394,7 @@ The AD payload deliberately carries **no `source_kind`** so BloodHound merges th
 
 # Node Reference
 
-> **Currently emitted: 8 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, and `SCCM_SecurityRole`.
+> **Currently emitted: 14 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`.
 
 All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. All property keys are lowercase with underscores.
 
@@ -600,9 +620,128 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 
 ---
 
+## MSSQL_Server
+
+A SQL Server instance discovered by the MSSQL EPA scan, RemoteRegistry, or SCCM site processing. Multiple discovery sources are coalesced into one row per `host_sid:port` — so a server seen by both the EPA scan and the registry produces one node, not two. Non-SCCM SQL servers (not referenced by any site) produce a bare node with `SCCMInfra = false` and no database/login/role nodes attached. Model: [models/mssql_server.py](src/openhound_sccm/models/mssql_server.py).
+
+- **Node id:** `<UPPER_HOST_SID>:<port>` (e.g. `S-1-5-21-11-22-33-1104:1433`).
+- **`environmentid`:** the AD domain SID of the SQL host computer (`S-1-5-21-X-Y-Z` stripped from the host SID).
+- **Kinds:** `["MSSQL_Server"]`.
+- **`name` / `displayname`:** the DNS hostname, or the node id if no hostname is available.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node (e.g. `MSSQL_EPA`, `RemoteRegistry`, `SCCM_Add-MSSQLServerNodesAndEdges`). |
+| `dnsHostName` | string | DNS hostname of the SQL Server host. |
+| `SQLServicePort` | string | TCP port the SQL Server listens on. |
+| `SCCMInfra` | bool | `true` if this SQL Server hosts an SCCM site database. |
+| `SCCMSite` | string | Site code of the SCCM site whose database this server hosts; `null` for non-SCCM servers. |
+| `databases` | list\<string\> | Database names on this server (e.g. `CM_PS1`). |
+| `forceEncryption` | bool | `true` if SQL Server has `ForceEncryption` enabled (from RemoteRegistry). |
+| `extendedProtection` | string | EPA enforcement value (e.g. `Off`, `Allowed`, `Allowed/Required`, `Required`) from the MSSQL EPA probe or RemoteRegistry. |
+| `SQLServiceAccountDomainSID` | string | Full SID of the domain account running the SQL Server service. |
+| `SQLServiceAccountName` | string | Domain account name running the SQL Server service (from SCCM site definitions). |
+| `strictEncryption` | bool | `true` if TDS 8.0 strict encryption is enforced (from the EPA scan). Port-added — no CMBP key. |
+| `instanceNames` | list\<string\> | Named SQL instance names from RemoteRegistry. Port-added — no CMBP key. |
+
+## MSSQL_Database
+
+The SCCM site database on an MSSQL_Server (always named `CM_<siteCode>`). One node per site database, built only for SCCM-linked servers — non-SCCM scan-only servers produce no database node. Model: [models/mssql_database.py](src/openhound_sccm/models/mssql_database.py).
+
+- **Node id:** `<UPPER_HOST_SID>:<port>\<db_name>` (e.g. `S-1-5-21-11-22-33-1104:1433\CM_PS1`).
+- **`environmentid`:** the AD domain SID of the SQL host.
+- **Kinds:** `["MSSQL_Database"]`.
+- **`name` / `displayname`:** the database name (e.g. `CM_PS1`).
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `isTrustworthy` | bool | Always `true` — SCCM requires the `TRUSTWORTHY` database property for CLR execution. |
+| `SCCMInfra` | bool | Always `true` for an SCCM site database. |
+| `SCCMSite` | string | Site code of the SCCM site (e.g. `PS1`). |
+| `SQLServer` | string | DNS hostname of the SQL Server hosting this database. |
+
+## MSSQL_ServerRole
+
+The fixed `sysadmin` server role on an SCCM-linked SQL Server. One node per SCCM-linked server; non-SCCM bare servers do not get a role node. Members are populated from the logins on the same server (a fix for a CMBP scope bug where `members` was always emitted empty). Model: [models/mssql_server_role.py](src/openhound_sccm/models/mssql_server_role.py).
+
+- **Node id:** `sysadmin@<UPPER_HOST_SID>:<port>` (e.g. `sysadmin@S-1-5-21-11-22-33-1104:1433`).
+- **`environmentid`:** the AD domain SID of the SQL host.
+- **Kinds:** `["MSSQL_ServerRole"]`.
+- **`name` / `displayname`:** `sysadmin`.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `isFixedRole` | bool | Always `true` — `sysadmin` is a SQL Server fixed server role. |
+| `members` | list\<string\> | Login node IDs that are members of this role (e.g. `MAYYHEM\PS1-SMS$@S-1-5-21-…:1433`). |
+| `SCCMSite` | string | Site code of the SCCM site. |
+| `SQLServer` | string | DNS hostname of the SQL Server. |
+
+## MSSQL_DatabaseRole
+
+The fixed `db_owner` database role in an MSSQL_Database. One node per SCCM site database. Members are populated from the database users in the database (fix for the same CMBP empty-array scope bug). Model: [models/mssql_database_role.py](src/openhound_sccm/models/mssql_database_role.py).
+
+- **Node id:** `db_owner@<UPPER_HOST_SID>:<port>\<db_name>` (e.g. `db_owner@S-1-5-21-11-22-33-1104:1433\CM_PS1`).
+- **`environmentid`:** the AD domain SID of the SQL host.
+- **Kinds:** `["MSSQL_DatabaseRole"]`.
+- **`name` / `displayname`:** `db_owner`.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `database` | string | Database name this role belongs to (e.g. `CM_PS1`). |
+| `isFixedRole` | bool | Always `true` — `db_owner` is a SQL Server fixed database role. |
+| `members` | list\<string\> | DatabaseUser node IDs that are members of this role. |
+| `SCCMSite` | string | Site code of the SCCM site. |
+| `SQLServer` | string | DNS hostname of the SQL Server. |
+
+## MSSQL_Login
+
+A Windows machine-account login on the SCCM site database's SQL Server. **Inferred from SCCM topology** — not enumerated from SQL. One login is created per (SQL host, sysadmin computer) pair, where the sysadmin computer is a Primary Site Server or SMS Provider for the same site as the SQL host (excluding the SQL host itself). The login name format follows CMBP's convention using the first DNS domain label as the NETBIOS name. Model: [models/mssql_login.py](src/openhound_sccm/models/mssql_login.py).
+
+- **Node id:** `<NETBIOS>\<samAccountName>@<UPPER_HOST_SID>:<port>` (e.g. `MAYYHEM\PS1-SMS$@S-1-5-21-11-22-33-1104:1433`), where `NETBIOS` = the first domain label of the sysadmin computer's FQDN (`split_part(dnshostname, '.', 2)`, e.g. `PS1SRV.mayyhem.com` → `MAYYHEM`).
+- **`environmentid`:** the AD domain SID of the SQL host.
+- **Kinds:** `["MSSQL_Login"]`.
+- **`name` / `displayname`:** the login name (e.g. `MAYYHEM\PS1-SMS$`).
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer"]`. |
+| `loginType` | string | Always `"Windows"` — all inferred logins are Windows machine-account logins. |
+| `memberOfRoles` | list\<string\> | Server role node IDs this login belongs to (always `["sysadmin@<server_id>"]`). |
+| `SCCMInfra` | bool | Always `true`. |
+| `SCCMSite` | string | Site code of the SCCM site. |
+| `SQLServer` | string | DNS hostname of the SQL Server. |
+
+> **Inferred, not enumerated.** These nodes are created from SCCM's architectural grants, not from a live SQL query. They represent the logins SCCM *must* have granted `sysadmin` for the site to function, not a live dump of SQL Server's `sys.server_principals`.
+
+## MSSQL_DatabaseUser
+
+A database user mapped into the SCCM site database. **Inferred from SCCM topology.** One node per (login, database) pair on the same server — the same machine account that holds the `sysadmin` SQL login is mapped into the site database as a `db_owner` database user, following CMBP's inference. Model: [models/mssql_database_user.py](src/openhound_sccm/models/mssql_database_user.py).
+
+- **Node id:** `<login_name>@<UPPER_HOST_SID>:<port>\<db_name>` (e.g. `MAYYHEM\PS1-SMS$@S-1-5-21-11-22-33-1104:1433\CM_PS1`).
+- **`environmentid`:** the AD domain SID of the SQL host.
+- **Kinds:** `["MSSQL_DatabaseUser"]`.
+- **`name` / `displayname`:** the database user name (same as the login name).
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer"]`. |
+| `database` | string | Database name this user belongs to (e.g. `CM_PS1`). |
+| `login` | string | Login name this database user is mapped from. |
+| `memberOfRoles` | list\<string\> | DatabaseRole node IDs this user belongs to (always `["db_owner@<database_id>"]`). |
+| `SCCMInfra` | bool | Always `true`. |
+| `SCCMSite` | string | Site code of the SCCM site. |
+| `SQLServer` | string | DNS hostname of the SQL Server. |
+
+> **Inferred, not enumerated.** Same topology-inference caveat as `MSSQL_Login` above.
+
+---
+
 # Edge Reference
 
-> **Currently emitted: 22 edge kinds** — 10 from Stages 1–2, 10 new from Stage 3, and 2 new from Stage 4.
+> **Currently emitted: 33 edge kinds** — 10 from Stages 1–2, 10 new from Stage 3, 2 new from Stage 4, and 11 new from Stage 5. (`SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.)
 
 Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
 
@@ -797,6 +936,143 @@ Links each site server (`Computer` hosting `SMS Site Server@<site>`) to every ot
 - **End:** `Computer` (peer site system in the same non-secondary site)
 - **Traversable:** yes
 - **Source:** `SCCM_Invoke-PostProcessing`
+
+---
+
+## MSSQL_Contains
+
+Links a container node to the object it contains. Emitted in five distinct start→end configurations (all sharing the one edge kind, following CMBP):
+
+| Start | End | Meaning |
+|---|---|---|
+| `MSSQL_Server` | `MSSQL_ServerRole` | Server contains its `sysadmin` role |
+| `MSSQL_Server` | `MSSQL_Database` | Server contains the site database |
+| `MSSQL_Server` | `MSSQL_Login` | Server contains the Windows login |
+| `MSSQL_Database` | `MSSQL_DatabaseRole` | Database contains its `db_owner` role |
+| `MSSQL_Database` | `MSSQL_DatabaseUser` | Database contains the database user |
+
+- **Traversable:** yes
+
+## MSSQL_ControlServer
+
+Links the `sysadmin` server role to the SQL Server it controls. Holding `sysadmin` grants full control over the SQL instance.
+
+- **Start:** `MSSQL_ServerRole` (`sysadmin`)
+- **End:** `MSSQL_Server`
+- **Traversable:** yes
+
+## MSSQL_ControlDB
+
+Links the `db_owner` database role to the database it controls. Holding `db_owner` grants full control over the database, including the ability to execute code via CLR assemblies when `TRUSTWORTHY` is on.
+
+- **Start:** `MSSQL_DatabaseRole` (`db_owner`)
+- **End:** `MSSQL_Database`
+- **Traversable:** yes
+
+## MSSQL_HostFor
+
+Links an AD computer to the SQL Server instance running on it. Compromise of the host gives control of the SQL instance.
+
+- **Start:** `Computer` (the SQL host)
+- **End:** `MSSQL_Server`
+- **Traversable:** yes
+- **Note:** This edge lands in the **AD payload** (`ad_edges-*.json`) because the start node is an AD `Computer`.
+
+## MSSQL_ExecuteOnHost
+
+Links an SQL Server instance to the AD computer it runs on. Represents the inverse of `MSSQL_HostFor` — code executing inside SQL (e.g. via `xp_cmdshell`) runs on the host OS.
+
+- **Start:** `MSSQL_Server`
+- **End:** `Computer` (the SQL host)
+- **Traversable:** yes
+- **Note:** Lands in the **AD payload** because the end node is an AD `Computer`.
+
+## MSSQL_HasLogin
+
+Links the sysadmin computer (Primary Site Server or SMS Provider) to its inferred SQL login on the server. The computer's machine account holds the `sysadmin` login — the link represents that grant.
+
+- **Start:** `Computer` (sysadmin computer — Primary Site Server or SMS Provider)
+- **End:** `MSSQL_Login`
+- **Traversable:** yes
+- **Note:** Lands in the **AD payload** because the start node is an AD `Computer`.
+
+## MSSQL_IsMappedTo
+
+Links an SQL login to its corresponding database user in the site database. A Windows login is mapped to a database user of the same name in each database it has access to.
+
+- **Start:** `MSSQL_Login`
+- **End:** `MSSQL_DatabaseUser`
+- **Traversable:** yes
+
+## MSSQL_MemberOf
+
+Links a login or database user to the role it belongs to. Emitted in two configurations:
+
+| Start | End | Meaning |
+|---|---|---|
+| `MSSQL_Login` | `MSSQL_ServerRole` | Login is a member of the `sysadmin` server role |
+| `MSSQL_DatabaseUser` | `MSSQL_DatabaseRole` | Database user is a member of the `db_owner` role |
+
+- **Traversable:** yes
+
+## MSSQL_GetTGS
+
+Links the SQL service account (an AD principal) to each `MSSQL_Login` on the server it runs on. Any principal that can request a Kerberos service ticket for the SQL service SPN (because it knows the service account's credentials) can authenticate as any login on that SQL instance.
+
+- **Start:** AD SID of the SQL service account (`User` or `Computer`)
+- **End:** `MSSQL_Login`
+- **Traversable:** yes
+- **Emitted only when** the service account SID resolves to an existing AD node.
+- **Note:** Lands in the **AD payload** because the start node is an AD principal.
+
+## MSSQL_ServiceAccountFor
+
+Links the SQL service account to the SQL Server it runs on, when the service account is *not* the SQL host itself (i.e. a dedicated service account, not a machine account running on the same host). Represents the trust relationship — the service account identity controls the SQL instance.
+
+- **Start:** AD SID of the SQL service account (`User` or `Computer`)
+- **End:** `MSSQL_Server`
+- **Traversable:** **no** — excluded from the BloodHound attack-path engine per CMBP's allow-list (`ps1:2233`, commented out).
+- **Emitted only when** the service account is not the SQL host's own computer SID, and it resolves to an existing AD node.
+- **Note:** Lands in the **AD payload** because the start node is an AD principal.
+
+## MSSQL_GetAdminTGS
+
+Links the SQL service account to the SQL Server it runs on, when the service account is not the SQL host itself. Represents the ability to forge a Kerberos service ticket for the SQL SPN (using the service account's key) and authenticate to the SQL instance with `sysadmin`-equivalent access.
+
+- **Start:** AD SID of the SQL service account (`User` or `Computer`)
+- **End:** `MSSQL_Server`
+- **Traversable:** yes
+- **Emitted only when** the service account is not the SQL host's own computer SID, and it resolves to an existing AD node.
+- **Note:** Lands in the **AD payload** because the start node is an AD principal.
+
+> **`SCCM_AssignAllPermissions` (Database → Site variant):** An additional set of `SCCM_AssignAllPermissions` edges is emitted from each `MSSQL_Database` to every non-secondary `SCCM_Site` in the hierarchy — beyond the existing Computer (SMS Provider) → Site edges described [above](#sccm_assignallpermissions). A database that hosts an SCCM site (with `TRUSTWORTHY` on and `db_owner` membership) can execute CLR code that writes SCCM administrative data, giving the same effective control as an SMS Provider. These edges are tagged `SCCM_Add-MSSQLServerNodesAndEdges` and are **traversable**. They land in the **SCCM payload** because both endpoints are SCCM-family nodes.
+
+---
+
+## Attack path example — SQL sysadmin to SCCM site (mayyhem.com lab)
+
+The following traversal shows how control of the `PS1-DB` SQL Server in the `mayyhem.com` lab leads to the `PS1` SCCM site via the SCCM site database. Query after ingesting the collector output:
+
+```cypher
+MATCH p = (c:Computer)-[:MSSQL_HostFor]->(srv:MSSQL_Server)
+          -[:MSSQL_Contains]->(db:MSSQL_Database)
+          -[:SCCM_AssignAllPermissions]->(site:SCCM_Site)
+WHERE site.name = "PS1"
+RETURN p LIMIT 10
+```
+
+Step-by-step:
+
+1. `Computer` (SQL host, e.g. `PS1-DB$`) → `MSSQL_Server` via `MSSQL_HostFor`.
+2. `MSSQL_Server` → `MSSQL_Database` (`CM_PS1`) via `MSSQL_Contains`.
+3. `MSSQL_Database` → `SCCM_Site` (`PS1`) via `SCCM_AssignAllPermissions` — the database has `TRUSTWORTHY` on and `db_owner` access, enabling CLR-based admin writes.
+
+To find all SQL service accounts that can reach a SQL Server hosting an SCCM database:
+
+```cypher
+MATCH p = (:User)-[:MSSQL_GetAdminTGS]->(srv:MSSQL_Server {SCCMInfra: true})
+RETURN p LIMIT 25
+```
 
 ---
 
