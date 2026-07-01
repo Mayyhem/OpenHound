@@ -24,18 +24,53 @@ logger = logging.getLogger(__name__)
 
 @functools.lru_cache(maxsize=1)
 def _wmi_ccm():
-    """Return the connected root\\CCM WMI service, or None if unavailable."""
+    """Return the connected root\\CCM WMI service, or None if unavailable.
+
+    A box that is local admin but not an SCCM client simply has no root\\CCM
+    namespace, which is normal rather than an error. To tell that expected case
+    apart from a genuine WMI problem (denied access, RPC down, corrupt
+    repository), connect to the parent ``root`` namespace first and enumerate
+    its child namespaces: connecting to ``root`` succeeds on any healthy Windows
+    box, so a failure there is worth surfacing, while an absent ``CCM`` child
+    just means "not a client" and is skipped quietly.
+    """
     if platform.system() != "Windows":
         logger.info("Local collection only supported on Windows SCCM client devices")
         return None
+
+    import win32com.client
+    locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+
+    # Reaching the parent root namespace should always work; failure here means
+    # a real WMI problem, so surface it at ERROR (traceback follows under --debug).
     try:
-        import win32com.client
-        svc = win32com.client.Dispatch("WbemScripting.SWbemLocator").ConnectServer(".", "root\\CCM")
+        root = locator.ConnectServer(".", "root")
+    except Exception as ex:
+        logger.error("Failed to connect to WMI root namespace: %s", ex)
+        return None
+
+    # Look for the CCM child namespace via the __NAMESPACE system class. Its
+    # absence is the ordinary non-client state; a failure to enumerate is not.
+    try:
+        ccm_present = any(
+            getattr(ns, "Name", "").upper() == "CCM"
+            for ns in root.InstancesOf("__NAMESPACE")
+        )
+    except Exception as ex:
+        logger.error("Failed to enumerate WMI namespaces under root: %s", ex)
+        return None
+
+    if not ccm_present:
+        logger.info("root\\CCM namespace not present; this host doesn't appear to be an SCCM client, skipping local collection")
+        return None
+
+    # CCM namespace exists, so this is an SCCM client -- connect and proceed.
+    try:
+        svc = locator.ConnectServer(".", "root\\CCM")
         logger.info("Connected to WMI root\\CCM namespace, proceeding with local collection")
         return svc
     except Exception as ex:
         logger.error("Failed to connect to WMI root\\CCM namespace: %s", ex)
-        logger.info("Skipping local collection since this host doesn't appear to be an SCCM client")
         return None
 
 
