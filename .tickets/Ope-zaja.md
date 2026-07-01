@@ -2,13 +2,14 @@
 id: Ope-zaja
 status: open
 deps: [Ope-l6fu, Ope-o008]
-links: []
+links: [ope-d820]
 created: 2026-05-28T13:31:00Z
 type: feature
 priority: 1
 assignee: Mayyhem
 tags: [sccm, http, relay, takeover]
 ---
+
 # Relay to Management Point
 
 Model NTLM relay attack paths targeting the SCCM management point AdminService API. If NTLM is accepted on AdminService (https://<MP>/AdminService/) without Extended Protection, a relay from a coerced site server allows executing AdminService operations as the site server computer account, which typically has site admin rights. References: Misconfiguration Manager TAKEOVER-1, TAKEOVER-2.

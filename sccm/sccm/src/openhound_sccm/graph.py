@@ -54,6 +54,16 @@ class SCCMEdgeProperties(EdgeProperties):
 
 
 @dataclass
+class SCCMRelayEdgeProperties(SCCMEdgeProperties):
+    # Coerce-and-relay context (CMBP Process-CoerceAndRelayTo*). ONLY the three
+    # CoerceAndRelay* edge kinds carry these — every other edge keeps the lean base
+    # SCCMEdgeProperties so its BloodHound panel stays uncluttered. Field names mirror
+    # ConfigManBearPig.ps1 exactly (ps1:6617/6719/6777).
+    coercionVictimAndRelayTargetPairs: list[str] = field(default_factory=list, kw_only=True)
+    coercionVictimHostnames: list[str] = field(default_factory=list, kw_only=True)
+
+
+@dataclass
 class SCCMNode(Node):
     """Concrete SCCM node: `id` is supplied directly (no UUID derivation)."""
     id: str = ""

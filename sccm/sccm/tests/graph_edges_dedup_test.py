@@ -1,5 +1,5 @@
 import duckdb
-from openhound_sccm.transforms import transforms, _graph_edges_dedup
+from openhound_sccm.transforms import transforms, _graph_edges_dedup, _graph_edges_init
 
 
 def test_graph_edges_deduplicated_across_sources():
@@ -22,13 +22,11 @@ def test_graph_edges_dedup_merges_collection_source_from_different_sources():
     should collapse into one row whose collection_source is the union of both tags."""
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA sccm")
-    con.execute(
-        "CREATE TABLE sccm.graph_edges "
-        "(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[])"
-    )
+    # Use _graph_edges_init so the schema stays current (includes Stage 6 coercion columns).
+    _graph_edges_init(con, "sccm")
     # Same triple, two different source tags.
     con.execute(
-        "INSERT INTO sccm.graph_edges VALUES "
+        "INSERT INTO sccm.graph_edges (start_id, end_id, kind, collection_source) VALUES "
         "('A', 'B', 'MemberOf', ['AdminService-SMS_R_System']), "
         "('A', 'B', 'MemberOf', ['WMI-SMS_R_System'])"
     )
@@ -53,13 +51,11 @@ def test_graph_edges_dedup_deduplicates_identical_collection_source_tags():
     should collapse into one row with a single copy of that tag (no duplicates)."""
     con = duckdb.connect(":memory:")
     con.execute("CREATE SCHEMA sccm")
-    con.execute(
-        "CREATE TABLE sccm.graph_edges "
-        "(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[])"
-    )
+    # Use _graph_edges_init so the schema stays current (includes Stage 6 coercion columns).
+    _graph_edges_init(con, "sccm")
     # Same triple AND same source tag inserted twice.
     con.execute(
-        "INSERT INTO sccm.graph_edges VALUES "
+        "INSERT INTO sccm.graph_edges (start_id, end_id, kind, collection_source) VALUES "
         "('A', 'B', 'MemberOf', ['AdminService-SMS_R_System']), "
         "('A', 'B', 'MemberOf', ['AdminService-SMS_R_System'])"
     )

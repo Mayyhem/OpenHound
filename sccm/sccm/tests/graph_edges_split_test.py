@@ -1,5 +1,5 @@
 import duckdb
-from openhound_sccm.transforms import _graph_edges_split
+from openhound_sccm.transforms import _graph_edges_split, _graph_edges_init
 
 
 def _seed(con):
@@ -8,12 +8,10 @@ def _seed(con):
     con.execute("CREATE TABLE sccm.node_user AS SELECT 'S-1-5-21-1-2-3-1110' AS sid")
     con.execute("CREATE TABLE sccm.node_group AS SELECT 'S-1-5-21-1-2-3-512' AS sid")
     con.execute("CREATE TABLE sccm.node_backfill AS SELECT 'S-1-5-21-1-2-3-9999' AS id, 'Base' AS kind")
+    # Use _graph_edges_init so the schema stays current (includes Stage 6 coercion columns).
+    _graph_edges_init(con, "sccm")
     con.execute(
-        "CREATE TABLE sccm.graph_edges "
-        "(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[])"
-    )
-    con.execute(
-        "INSERT INTO sccm.graph_edges VALUES "
+        "INSERT INTO sccm.graph_edges (start_id, end_id, kind, collection_source) VALUES "
         "('S-1-5-21-1-2-3-1104','S-1-5-21-1-2-3-1110','HasSession', ['x']), "
         "('GUID:dev1','S-1-5-21-1-2-3-1110','SCCM_HasPrimaryUser', ['x']), "
         "('PS1','CAS','SCCM_Contains', ['x']), "

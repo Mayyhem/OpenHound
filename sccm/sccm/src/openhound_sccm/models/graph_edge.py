@@ -3,7 +3,9 @@
 
 Each row in the graph_edges preproc table represents one directed relationship
 between two graph nodes. This model reads those rows and emits an Edge whose
-`traversable` property is set from the CMBP allow-list. It never produces a node
+`traversable` property is set from the CMBP allow-list. The three coerce-and-relay
+kinds additionally carry coercion-context lists (SCCMRelayEdgeProperties); every
+other kind uses the lean base SCCMEdgeProperties. It never produces a node
 (as_node returns None) because graph_edges rows are pure edge data.
 """
 import logging
@@ -13,10 +15,22 @@ from openhound.core.asset import BaseAsset
 from openhound.core.models.entries_dataclass import Edge, EdgePath
 from pydantic import ConfigDict
 
-from ..graph import SCCMEdgeProperties
-from ..kinds.edges import TRAVERSABLE_EDGE_KINDS
+from ..graph import SCCMEdgeProperties, SCCMRelayEdgeProperties
+from ..kinds.edges import (
+    COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+    COERCE_AND_RELAY_TO_MSSQL,
+    COERCE_AND_RELAY_TO_SMB,
+    TRAVERSABLE_EDGE_KINDS,
+)
 
 logger = logging.getLogger(__name__)
+
+# The only edge kinds that carry coerce-and-relay context lists.
+_RELAY_KINDS = frozenset({
+    COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+    COERCE_AND_RELAY_TO_MSSQL,
+    COERCE_AND_RELAY_TO_SMB,
+})
 
 
 class GraphEdge(BaseAsset):
@@ -29,6 +43,8 @@ class GraphEdge(BaseAsset):
     end_id: str | None = None
     kind: str | None = None
     collection_source: list[str] | None = None
+    coercion_victim_and_relay_target_pairs: list[str] | None = None
+    coercion_victim_hostnames: list[str] | None = None
 
     @property
     def as_node(self) -> None:
@@ -48,12 +64,24 @@ class GraphEdge(BaseAsset):
                 self.start_id, self.end_id, self.kind,
             )
             return
+        traversable = self.kind in TRAVERSABLE_EDGE_KINDS
+        if self.kind in _RELAY_KINDS:
+            # Relay edges carry the operator-facing coercion context (CMBP).
+            properties = SCCMRelayEdgeProperties(
+                traversable=traversable,
+                collectionSource=self.collection_source or [],
+                coercionVictimAndRelayTargetPairs=self.coercion_victim_and_relay_target_pairs or [],
+                coercionVictimHostnames=self.coercion_victim_hostnames or [],
+            )
+        else:
+            # Every other edge keeps the lean base properties.
+            properties = SCCMEdgeProperties(
+                traversable=traversable,
+                collectionSource=self.collection_source or [],
+            )
         yield Edge(
             kind=self.kind,
             start=EdgePath(match_by="id", value=self.start_id),
             end=EdgePath(match_by="id", value=self.end_id),
-            properties=SCCMEdgeProperties(
-                traversable=self.kind in TRAVERSABLE_EDGE_KINDS,
-                collectionSource=self.collection_source or [],
-            ),
+            properties=properties,
         )

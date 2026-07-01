@@ -48,12 +48,20 @@ MSSQL_SERVICE_ACCOUNT_FOR = "MSSQL_ServiceAccountFor"
 MSSQL_GET_ADMIN_TGS = "MSSQL_GetAdminTGS"
 MSSQL_GET_TGS = "MSSQL_GetTGS"
 
+# Stage 6 edge kinds (coerce-and-relay possible edges).
+COERCE_AND_RELAY_TO_ADMIN_SERVICE = "CoerceAndRelayToAdminService"
+COERCE_AND_RELAY_TO_MSSQL = "CoerceAndRelayToMSSQL"
+COERCE_AND_RELAY_TO_SMB = "CoerceAndRelayToSMB"
+
 # CMBP traversable allow-list (ConfigManBearPig.ps1:2216-2249, uncommented entries only).
 # Edges whose kind is in this set get properties.traversable = True. Includes future
 # (Stage 3-6) kinds so later stages reuse this one source of truth.
 TRAVERSABLE_EDGE_KINDS = frozenset({
     "AdminTo", "LocalAdminRequired",
-    "CoerceAndRelayToAdminService", "CoerceAndRelayToMSSQL", "CoerceAndRelayNTLMtoSMB",
+    # CMBP's allow-list (ps1:2221) named "CoerceAndRelayNTLMtoSMB", but the function
+    # (ps1:6775) emits "CoerceAndRelayToSMB" — the mismatch left the SMB relay
+    # non-traversable. The port emits CoerceAndRelayToSMB and marks it traversable.
+    "CoerceAndRelayToAdminService", "CoerceAndRelayToMSSQL", "CoerceAndRelayToSMB",
     "HasSession",
     "MSSQL_Contains", "MSSQL_ControlDB", "MSSQL_ControlServer", "MSSQL_ExecuteOnHost",
     "MSSQL_GetAdminTGS", "MSSQL_GetTGS", "MSSQL_HasLogin", "MSSQL_HostFor",

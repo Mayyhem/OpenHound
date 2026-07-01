@@ -8,10 +8,10 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 
 > ## 🚧 Work in progress
 >
-> This port is **mid-migration**. The collection side is broad, and Stages 1–5 of the graph pipeline are now shipping. As of today:
+> This port is **mid-migration**. The collection side is broad, and Stages 1–6 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-three edge kinds: the ten from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto-1), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
+> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto-1), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice), [`CoerceAndRelayToMSSQL`](#coerceandrelaytomssql), [`CoerceAndRelayToSMB`](#coerceandrelaytosmbedge)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -76,6 +76,9 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [MSSQL_GetTGS](#mssql_gettgs)
   - [MSSQL_ServiceAccountFor](#mssql_serviceaccountfor)
   - [MSSQL_GetAdminTGS](#mssql_getadmintgs)
+  - [CoerceAndRelayToAdminService](#coerceandrelaytoadminservice)
+  - [CoerceAndRelayToMSSQL](#coerceandrelaytomssql)
+  - [CoerceAndRelayToSMB](#coerceandrelaytosmbedge)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -232,7 +235,7 @@ The collector relies on these assumptions about the target environment and how i
 
 # Limitations
 
-- **Graph output covers Stages 1–5.** `convert` now emits fourteen node kinds and thirty-three edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (coerce-and-relay paths, NAA secrets) are planned for later stages.
+- **Graph output covers Stages 1–6.** `convert` now emits fourteen node kinds and thirty-seven edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (NAA secrets) are planned for later stages.
 - **MSSQL logins, database users, and roles are inferred from SCCM topology, not enumerated from SQL.** The `MSSQL_Login` and `MSSQL_DatabaseUser` nodes (and the `sysadmin` / `db_owner` role nodes) are built from SCCM's knowledge of which computers are Primary Site Servers or SMS Providers for a given site — the same inference CMBP makes. No live SQL connection is opened during `preprocess` or `convert`; the collector's MSSQL phase only probes EPA. This means logins/users/roles are only created for SCCM-linked SQL servers, and only for the machine accounts SCCM architecturally grants `sysadmin` access.
 - **Non-SCCM SQL servers appear as bare `MSSQL_Server` nodes.** SQL servers discovered by the EPA scan or RemoteRegistry that are not referenced by any SCCM site produce an `MSSQL_Server` node (with `MSSQL_HostFor` / `MSSQL_ExecuteOnHost` edges) but no `MSSQL_Database`, `MSSQL_Login`, or role nodes — CMBP likewise skips these and the collector follows suit.
 - **MSSQL nodes land in the SCCM payload; AD-touching MSSQL edges land in the AD payload.** The six MSSQL node kinds are written to `sccm_nodes-*.json` / `sccm_edges-*.json` (tagged `source_kind = "SCCM"`). Edges that touch an AD node — `MSSQL_HostFor`, `MSSQL_ExecuteOnHost`, `MSSQL_HasLogin`, `MSSQL_GetTGS`, `MSSQL_ServiceAccountFor`, and `MSSQL_GetAdminTGS` — are routed into `ad_edges-*.json` by the split step. Upload both file sets together.
@@ -327,10 +330,40 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 
 | Option | Description |
 |---|---|
-| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and future Stage 6 relay edges. The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
+| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and tighten the Stage 6 coerce-and-relay edges (see below). The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
 | `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 | `-t`, `--threads` | Per-host worker-pool size. Default `10`. |
 | `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
+
+#### `--disable-possible-edges` and the coerce-and-relay edges
+
+Without this flag (the default), the three Stage 6 coerce-and-relay edges treat an **uncollected** NTLM-restriction or EPA setting as *assumed vulnerable* — matching ConfigManBearPig's behaviour. This produces the most complete picture of speculative attack paths.
+
+With `--disable-possible-edges`, each relay edge applies stricter gating: a relay path is only emitted when the relevant security setting is **explicitly confirmed off** in the collected data. Specifically:
+
+- A `CoerceAndRelayToAdminService` relay is only emitted when the SMS Provider's `restrictReceivingNtlmTraffic` is explicitly `Off` (not merely absent or uncollected).
+- A `CoerceAndRelayToMSSQL` relay is only emitted when the SQL host's NTLM restriction is explicitly `Off` **and** the SQL Server's Extended Protection is explicitly `Off`.
+- A `CoerceAndRelayToSMB` relay is only emitted when the target site system's SMB signing is confirmed not required **and** its NTLM restriction is explicitly `Off`.
+
+Use the default run for a full speculative-path view; use `--disable-possible-edges` when you want only confirmed-vulnerable paths:
+
+```bash
+# Default — collect WITHOUT the flag; speculative relays included (null NTLM/EPA counts as vulnerable)
+uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!"
+openhound preprocess sccm .\out .\out\lookup.duckdb
+openhound convert sccm .\out\sccm .\graph --lookup-file .\out\lookup.duckdb
+
+# High-confidence — collect WITH --disable-possible-edges; only confirmed relay paths (explicit Off required)
+uv run openhound collect sccm .\out-confirmed -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --disable-possible-edges
+openhound preprocess sccm .\out-confirmed .\out-confirmed\lookup.duckdb
+openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\out-confirmed\lookup.duckdb
+```
+
+> **Note:** `--disable-possible-edges` is a **collect-time** flag. `collect` persists it to the `collection_settings` table, which `preprocess` reads; it is **not** accepted by `preprocess` or `convert`. To tighten an **existing** raw collection into high-confidence mode without re-collecting, set the same environment variable `collect` uses internally for the flag and re-run `preprocess`:
+> ```bash
+> SOURCES__SCCM__DISABLE_POSSIBLE_EDGES=true openhound preprocess sccm .\out .\out\lookup.duckdb
+> ```
+> This override is **tightening-only** — a truthy value forces possible edges off, but it can never re-enable possible edges that were already disabled at collect time. It has no effect (behavior is unchanged) when unset.
 
 ### Machine account / CRED-2 — 🚧 not yet implemented
 
@@ -394,7 +427,7 @@ The AD payload deliberately carries **no `source_kind`** so BloodHound merges th
 
 # Node Reference
 
-> **Currently emitted: 14 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`.
+> **Currently emitted: 14 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`. Stage 6 adds a synthetic **Authenticated Users** `Group` node for each domain that produces a coerce-and-relay edge (see the [`Group`](#group) section).
 
 All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. All property keys are lowercase with underscores.
 
@@ -464,6 +497,8 @@ An AD group observed in SCCM — either named in a device's or user's `security_
 | `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
 | `SCCMInfra` | bool | `true` if this group appears in the SCCM admins tables. |
 | `SCCMResourceIDs` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
+
+> **Synthetic Authenticated Users nodes (Stage 6).** For each domain that produces a coerce-and-relay edge, `preprocess` synthesises one `Group` node representing the Windows **Authenticated Users** well-known group for that domain. The node id follows SharpHound's well-known-SID form so it merges with any SharpHound-collected node for the same domain: `UPPER(<FQDN>)-S-1-5-11` (e.g. `MAYYHEM.COM-S-1-5-11`). The node is created lazily — only domains that actually have at least one relay edge start node get a node — and it carries `collectionSource = []` (the Group model does not populate a collection source for this synthetic node). Because the SID `S-1-5-11` has no domain part of its own, the `environmentid` is resolved from a co-occurring domain computer's AD domain SID. These nodes are the `start` of all three `CoerceAndRelayTo*` edge kinds.
 
 ## SCCM_Site
 
@@ -741,7 +776,7 @@ A database user mapped into the SCCM site database. **Inferred from SCCM topolog
 
 # Edge Reference
 
-> **Currently emitted: 33 edge kinds** — 10 from Stages 1–2, 10 new from Stage 3, 2 new from Stage 4, and 11 new from Stage 5. (`SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.)
+> **Currently emitted: 37 edge kinds** — 11 from Stages 1–2, 10 new from Stage 3, 2 new from Stage 4, 11 new from Stage 5, and 3 new from Stage 6. (`SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.)
 
 Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
 
@@ -1046,6 +1081,63 @@ Links the SQL service account to the SQL Server it runs on, when the service acc
 - **Note:** Lands in the **AD payload** because the start node is an AD principal.
 
 > **`SCCM_AssignAllPermissions` (Database → Site variant):** An additional set of `SCCM_AssignAllPermissions` edges is emitted from each `MSSQL_Database` to every non-secondary `SCCM_Site` in the hierarchy — beyond the existing Computer (SMS Provider) → Site edges described [above](#sccm_assignallpermissions). A database that hosts an SCCM site (with `TRUSTWORTHY` on and `db_owner` membership) can execute CLR code that writes SCCM administrative data, giving the same effective control as an SMS Provider. These edges are tagged `SCCM_Add-MSSQLServerNodesAndEdges` and are **traversable**. They land in the **SCCM payload** because both endpoints are SCCM-family nodes.
+
+---
+
+## CoerceAndRelayToAdminService
+
+<a name="coerceandrelaytoadminservice"></a>
+
+Links the **Authenticated Users** group of a site server's domain to the `SCCM_Site` that the site server belongs to, when NTLM coercion can relay the site server's credentials to an SMS Provider's AdminService endpoint. An attacker authenticating as any domain user can trigger NTLM authentication from the site server and relay it to the SMS Provider, gaining AdminService access and therefore SCCM administrative control over the site.
+
+- **Start:** `Group` (Authenticated Users for the site server's domain, e.g. `MAYYHEM.COM-S-1-5-11`)
+- **End:** `SCCM_Site`
+- **Traversable:** yes
+- **`collectionSource`:** `["Post-processing"]`
+- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null or uncollected `restrictReceivingNtlmTraffic` on the SMS Provider is treated as vulnerable (matching ConfigManBearPig). With the flag, only a confirmed `Off` value qualifies.
+- **Note:** Lands in the **AD payload** (`ad_edges-*.json`) because the start node is an AD `Group`.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Always `["Post-processing"]`. |
+| `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per coercion victim / relay target pair in the form `"Coerce <victim_fqdn>, relay to <provider_fqdn>"`. Shows which site server is coerced and which SMS Provider receives the relayed credential. |
+
+## CoerceAndRelayToMSSQL
+
+<a name="coerceandrelaytomssql"></a>
+
+Links the **Authenticated Users** group of a sysadmin computer's domain to an `MSSQL_Login` on the site database server, when NTLM coercion can relay the sysadmin computer's credentials to the SQL Server. An attacker can coerce the sysadmin computer (a Primary Site Server or SMS Provider) and relay its NTLM credential to the SQL Server, authenticating as the corresponding Windows login and gaining `sysadmin` access to the site database.
+
+- **Start:** `Group` (Authenticated Users for the coercion victim's domain)
+- **End:** `MSSQL_Login`
+- **Traversable:** yes
+- **`collectionSource`:** subset of `["MSSQL-ScanForEPA", "RemoteRegistry-MSSQL"]` — whichever sources determined the SQL Server's Extended Protection setting.
+- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, null NTLM restriction and null EPA are treated as vulnerable. With the flag, both must be explicitly `Off`.
+- **Note:** Lands in the **AD payload** because the start node is an AD `Group`.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Sources that determined the SQL Server's EPA setting (e.g. `["MSSQL-ScanForEPA"]`, `["RemoteRegistry-MSSQL"]`). |
+| `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per victim / target pair: `"Coerce <victim_fqdn>, relay to <sql_host>:<port>"`. Shows which sysadmin computer is coerced and which SQL Server endpoint receives the relay. |
+
+## CoerceAndRelayToSMB
+
+<a name="coerceandrelaytosmbedge"></a>
+
+Links the **Authenticated Users** group of a site server's domain to a site system computer whose SMB signing is not required, when NTLM coercion can relay the site server's credentials to that computer over SMB. An attacker can coerce the site server and relay its NTLM credential over SMB to a peer site system that does not enforce SMB signing, gaining authenticated SMB access (and therefore potential code execution) on that host.
+
+- **Start:** `Group` (Authenticated Users for the site server's domain)
+- **End:** `Computer` (site system with SMB signing not required)
+- **Traversable:** yes
+- **`collectionSource`:** subset of `["SMB-Negotiate", "RemoteRegistry-SMBSigningCheck"]` — whichever SMB-signing probes observed the target's signing setting.
+- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null `restrictReceivingNtlmTraffic` on the target is treated as vulnerable. With the flag, it must be explicitly `Off`. SMB signing must always be explicitly `false` (there is no assumed-vulnerable case for signing itself — it must be confirmed not required).
+- **Note:** Lands in the **AD payload** because both endpoints are AD nodes (`Group` and `Computer`).
+- **Bug fix note:** ConfigManBearPig's traversable allow-list (`ps1:2221`) named this kind `CoerceAndRelayNTLMtoSMB`, but the function that emits it (`ps1:6775`) used `CoerceAndRelayToSMB` — the mismatch left the edge non-traversable in CMBP. This port emits `CoerceAndRelayToSMB` and marks it traversable in `TRAVERSABLE_EDGE_KINDS`.
+
+| Property | Type | Description |
+|---|---|---|
+| `collectionSource` | list\<string\> | Sources that observed SMB signing on the target (e.g. `["SMB-Negotiate"]`, `["RemoteRegistry-SMBSigningCheck"]`, or both). |
+| `coercionVictimHostnames` | list\<string\> | The FQDN(s) of the site server(s) that would be coerced. |
 
 ---
 

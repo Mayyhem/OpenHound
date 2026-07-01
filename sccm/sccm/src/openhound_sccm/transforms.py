@@ -7,11 +7,15 @@ with `root_site_code`) and — added in later tasks — the coalesced `node_*` t
 skipped (early stages won't have collected everything).
 """
 import logging
+import os
 import re
 
 import duckdb
 
 logger = logging.getLogger(__name__)
+
+# Truthy spellings accepted for the SOURCES__SCCM__DISABLE_POSSIBLE_EDGES env override.
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
 
 def _safe(con: duckdb.DuckDBPyConnection, label: str, sql: str) -> None:
@@ -301,6 +305,14 @@ def _arr(col: str) -> str:
     )
 
 
+def _authed_users_id(dnshostname_col: str) -> str:
+    """SQL fragment: the SharpHound-form Authenticated Users node id for the domain of a
+    computer, derived from its dnshostname column. FQDN = dnshostname with the first
+    (host) label stripped, uppercased (e.g. 'PROV01.mayyhem.com' -> 'MAYYHEM.COM-S-1-5-11').
+    Always pair with a `<col> LIKE '%.%'` guard so a bare hostname can't yield a bad id."""
+    return f"upper(regexp_replace({dnshostname_col}, '^[^.]+\\.', '')) || '-S-1-5-11'"
+
+
 def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Build node_computer: one row per SID from every computer-bearing source.
 
@@ -326,6 +338,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "sccm_infra BOOLEAN, "
         "sms_unique_identifier VARCHAR, "
         "smb_signing_required BOOLEAN, "
+        "smb_signing_source VARCHAR[], "          # which probe(s) reported signing: SMB-Negotiate / RemoteRegistry-SMBSigningCheck
         "sccm_has_client_remote_control_spn BOOLEAN, "
         "network_boot_server BOOLEAN, "
         "disable_loopback_check BOOLEAN, "
@@ -481,6 +494,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"coalesce(sccm_infra, false) AS sccm_infra, "
         f"NULL AS sms_unique_identifier, "
         f"smb_signing_required, "
+        f"['SMB-Negotiate'] AS smb_signing_source, "
         f"false AS sccm_has_client_remote_control_spn, "
         f"false AS network_boot_server, "
         f"NULL AS disable_loopback_check, "
@@ -506,6 +520,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"coalesce(sccm_infra, false) AS sccm_infra, "
         f"NULL AS sms_unique_identifier, "
         f"smb_signing_required, "
+        f"['RemoteRegistry-SMBSigningCheck'] AS smb_signing_source, "
         f"false AS sccm_has_client_remote_control_spn, "
         f"false AS network_boot_server, "
         f"disable_loopback_check, "
@@ -648,6 +663,9 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  bool_or(sccm_infra) AS sccm_infra, "
         f"  any_value(sms_unique_identifier) AS sms_unique_identifier, "
         f"  bool_or(smb_signing_required) AS smb_signing_required, "
+        # Array-union the probe tags; FILTER drops the NULLs other sources leave.
+        f"  coalesce(list_distinct(flatten(list(smb_signing_source) "
+        f"    FILTER (WHERE smb_signing_source IS NOT NULL))), CAST([] AS VARCHAR[])) AS smb_signing_source, "
         f"  bool_or(sccm_has_client_remote_control_spn) AS sccm_has_client_remote_control_spn, "
         f"  bool_or(network_boot_server) AS network_boot_server, "
         f"  bool_or(disable_loopback_check) AS disable_loopback_check, "
@@ -1255,21 +1273,46 @@ def _root_code(con: duckdb.DuckDBPyConnection, schema: str) -> str | None:
 
 
 def _read_disable_possible(con: duckdb.DuckDBPyConnection, schema: str) -> bool:
-    """Read the persisted disable_possible_edges flag (collection_settings, written at
-    collect time). True only if the flag is set; False if the table is absent (older
-    collection) or the flag is false/NULL. Gates the possible-client rows (E2) and,
-    later, Stage 6 relay edges."""
+    """Return the effective disable_possible_edges setting for this preproc run.
+
+    Combines two inputs, tightening-only (logical OR):
+      1. The collect-time flag persisted in collection_settings (absent for older
+         collections -> False).
+      2. The SOURCES__SCCM__DISABLE_POSSIBLE_EDGES env var, which lets an operator
+         re-process an EXISTING raw collection in high-confidence mode without
+         re-collecting:
+             SOURCES__SCCM__DISABLE_POSSIBLE_EDGES=true openhound preprocess sccm <raw> <db>
+         This is the same SOURCES__SCCM__* env var `collect` maps its
+         --disable-possible-edges flag to (main.py:97), now also honored at preproc time.
+
+    The env var can only TIGHTEN: a truthy env forces disable; it can never re-enable
+    possible edges that collection already disabled. With the env unset, behavior is
+    unchanged from the collect-time value. Gates the possible-client rows and the
+    Stage 6 relay edges."""
+    # (1) Persisted collect-time value.
     try:
         row = con.execute(
             f"SELECT bool_or(disable_possible_edges) FROM {schema}.collection_settings"
         ).fetchone()
-        val = bool(row[0]) if row and row[0] is not None else False
+        table_disabled = bool(row[0]) if row and row[0] is not None else False
     except duckdb.CatalogException:
         # Older collection without the settings table -> default to emitting possible rows.
         logger.info("collection_settings absent; possible edges/nodes enabled by default")
-        val = False
-    logger.info("disable_possible_edges = %s", val)
-    return val
+        table_disabled = False
+    # (2) Env-var override (tightening-only).
+    env_raw = os.environ.get("SOURCES__SCCM__DISABLE_POSSIBLE_EDGES")
+    env_disabled = env_raw is not None and env_raw.strip().lower() in _TRUTHY_ENV
+    disabled = table_disabled or env_disabled
+    if env_disabled and not table_disabled:
+        logger.info(
+            "disable_possible_edges forced True by SOURCES__SCCM__DISABLE_POSSIBLE_EDGES "
+            "env override (collection was collected with possible edges enabled)"
+        )
+    logger.info(
+        "disable_possible_edges = %s (collect-time table=%s, env override=%s)",
+        disabled, table_disabled, env_disabled,
+    )
+    return disabled
 
 
 def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -2215,10 +2258,14 @@ def _node_mssql_database_role(con: duckdb.DuckDBPyConnection, schema: str) -> No
 
 def _graph_edges_init(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Create the empty graph_edges table that every edge builder INSERTs into.
-    Always runs (even with no site/edge data) so convert can read the table."""
+    Always runs (even with no site/edge data) so convert can read the table.
+
+    The coercion_* columns are populated only by the Stage 6 relay builders; every
+    other builder INSERTs BY NAME and leaves them NULL (dedup coalesces NULL -> [])."""
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges "
-        f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[])"
+        f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[], "
+        f"coercion_victim_and_relay_target_pairs VARCHAR[], coercion_victim_hostnames VARCHAR[])"
     )
 
 
@@ -2811,6 +2858,211 @@ def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> No
           f"CROSS JOIN {nonsec} site")
 
 
+def _edge_coerce_relay_adminservice(
+    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
+) -> None:
+    """CoerceAndRelayToAdminService: Authenticated Users -> SCCM_Site (CMBP ps1:6572-6624).
+
+    For each non-secondary site, every SMS Provider relay target is paired with every Site
+    Server coercion victim (provider != site server). The relay coerces the site server and
+    relays its NTLM to the provider's AdminService; the edge end is the site code (the
+    SCCM_Site node id). Start = the Authenticated Users node of the SITE SERVER's domain
+    (CMBP keys it off the coerced victim, ps1:6606).
+
+    NTLM gate is on the PROVIDER (the relay target must accept NTLM): default treats
+    null-or-'Off' as vulnerable; with --disable-possible-edges only explicit 'Off' qualifies
+    (Stage 6 decision #1). collectionSource is the static ['Post-processing'] CMBP passes at
+    ps1:1955. _safe() skips+logs if site_hierarchy / node_computer is missing."""
+    from .kinds.edges import COERCE_AND_RELAY_TO_ADMIN_SERVICE
+    # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
+    # contains a NULL placeholder; real node_computer always emits VARCHAR but be explicit.
+    # Default: null/Off => vulnerable. Flag: only explicit 'Off'.
+    ntlm_ok = ("upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
+               if not disable_possible
+               else "upper(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'")
+    _safe(
+        con, "edge_coerce_relay_adminservice",
+        f"INSERT INTO {schema}.graph_edges BY NAME "
+        f"WITH nonsec AS ("
+        f"  SELECT site_code, upper(site_code) AS u FROM {schema}.site_hierarchy "
+        f"  WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL"
+        f"), "
+        f"providers AS ("
+        f"  SELECT c.sid, c.dnshostname, upper(regexp_extract(role, '@(.+)$', 1)) AS site "
+        f"  FROM {schema}.node_computer c, UNNEST(c.site_system_roles) AS t(role) "
+        f"  WHERE role LIKE 'SMS Provider@%' AND c.sid IS NOT NULL AND ({ntlm_ok})"
+        f"), "
+        f"servers AS ("
+        f"  SELECT c.sid, c.dnshostname, upper(regexp_extract(role, '@(.+)$', 1)) AS site "
+        f"  FROM {schema}.node_computer c, UNNEST(c.site_system_roles) AS t(role) "
+        f"  WHERE role LIKE 'SMS Site Server@%' AND c.sid IS NOT NULL AND c.dnshostname LIKE '%.%'"
+        f") "
+        f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
+        f"  n.site_code AS end_id, "
+        f"  '{COERCE_AND_RELAY_TO_ADMIN_SERVICE}' AS kind, "
+        f"  ['Post-processing'] AS collection_source, "
+        f"  ['Coerce ' || coalesce(srv.dnshostname, srv.sid) || ', relay to ' "
+        f"    || coalesce(prov.dnshostname, prov.sid)] AS coercion_victim_and_relay_target_pairs, "
+        f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_hostnames "
+        f"FROM providers prov "
+        f"JOIN servers srv ON srv.site = prov.site AND srv.sid != prov.sid "
+        f"JOIN nonsec n ON n.u = srv.site"
+    )
+
+
+def _edge_coerce_relay_mssql(
+    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
+) -> None:
+    """CoerceAndRelayToMSSQL: Authenticated Users -> MSSQL_Login (CMBP ps1:6626-6726).
+
+    Driven off node_mssql_login, which already encodes the (sysadmin computer, server)
+    pairing CMBP reconstructs by hand (and already excludes the SQL host as its own
+    sysadmin, so 'can't relay to self' is satisfied). For each login: coerce the sysadmin
+    computer and relay NTLM to the site DB server, authenticating as that login.
+
+    Two gates (Stage 6 decision #1): the SQL HOST computer's NTLM and the SERVER's Extended
+    Protection. Default treats null as vulnerable (null NTLM => assume Off; null EPA =>
+    assume Off). A known EPA other than 'Off' always disqualifies the server. With
+    --disable-possible-edges both must be EXPLICITLY 'Off'. collectionSource = the server's
+    EPA-determination sources only (CMBP ps1:6715). _safe() skips+logs missing tables."""
+    from .kinds.edges import COERCE_AND_RELAY_TO_MSSQL
+    # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
+    # contains a NULL placeholder; real node_mssql_server and node_computer always emit
+    # VARCHAR but be explicit (same pattern as _edge_coerce_relay_adminservice).
+    # Default: null/Off => vulnerable. Flag: only explicit 'Off'.
+    if not disable_possible:
+        epa_ok = "(s.extended_protection IS NULL OR upper(CAST(s.extended_protection AS VARCHAR)) = 'OFF')"
+        ntlm_ok = "upper(coalesce(CAST(h.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
+    else:
+        epa_ok = "upper(CAST(s.extended_protection AS VARCHAR)) = 'OFF'"
+        ntlm_ok = "upper(CAST(h.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'"
+    _safe(
+        con, "edge_coerce_relay_mssql",
+        f"INSERT INTO {schema}.graph_edges BY NAME "
+        f"SELECT DISTINCT {_authed_users_id('v.dnshostname')} AS start_id, "
+        f"  l.login_id AS end_id, "
+        f"  '{COERCE_AND_RELAY_TO_MSSQL}' AS kind, "
+        f"  coalesce(list_filter(s.collection_source, "
+        f"    x -> x IN ('MSSQL-ScanForEPA', 'RemoteRegistry-MSSQL')), CAST([] AS VARCHAR[])) "
+        f"    AS collection_source, "
+        f"  ['Coerce ' || v.dnshostname || ', relay to ' "
+        f"    || coalesce(s.dns_host_name, s.name) || ':' || coalesce(s.port, '1433')] "
+        f"    AS coercion_victim_and_relay_target_pairs, "
+        f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_hostnames "
+        f"FROM {schema}.node_mssql_login l "
+        f"JOIN {schema}.node_mssql_server s ON s.server_id = l.server_id "
+        f"JOIN {schema}.node_computer h ON h.sid = l.host_sid "
+        f"JOIN {schema}.node_computer v "
+        f"  ON v.sid = l.sysadmin_computer_sid AND v.dnshostname LIKE '%.%' "
+        f"WHERE ({epa_ok}) AND ({ntlm_ok})"
+    )
+
+
+def _edge_coerce_relay_smb(
+    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
+) -> None:
+    """CoerceAndRelayToSMB: Authenticated Users -> Computer (CMBP ps1:6728-6781).
+
+    The edge END is a site system whose SMB signing is NOT required (the relay target); the
+    coerced victim is a Site Server in the same non-secondary site (system != server). Start
+    = the Authenticated Users node of the SITE SERVER's domain (CMBP ps1:6763).
+
+    Gates (Stage 6 decision #1): the TARGET's smb_signing_required is false (always explicit
+    in CMBP) AND its NTLM is null-or-'Off' (default) / explicitly 'Off' (flag).
+    collectionSource = the target's smb_signing_source filtered to the SMB-signing probes
+    (CMBP ps1:6773). coercionVictimHostnames = the coerced site server's dnshostname.
+    _safe() skips+logs missing tables."""
+    from .kinds.edges import COERCE_AND_RELAY_TO_SMB
+    # Cast restrict_receiving_ntlm_traffic to VARCHAR before upper() — DuckDB types a
+    # ?-bound NULL column as INTEGER at bind time, causing upper() to fail. This CAST is
+    # harmless in production (the real column is VARCHAR). Same fix as E1/F1.
+    ntlm_ok = ("upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
+               if not disable_possible
+               else "upper(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'")
+    _safe(
+        con, "edge_coerce_relay_smb",
+        f"INSERT INTO {schema}.graph_edges BY NAME "
+        f"WITH nonsec AS ("
+        f"  SELECT upper(site_code) AS u FROM {schema}.site_hierarchy "
+        f"  WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL"
+        f"), "
+        f"targets AS ("
+        f"  SELECT DISTINCT c.sid, c.smb_signing_source, "
+        f"    upper(regexp_extract(role, '@(.+)$', 1)) AS site "
+        f"  FROM {schema}.node_computer c, UNNEST(c.site_system_roles) AS t(role) "
+        f"  WHERE role LIKE '%@%' AND c.sid IS NOT NULL "
+        f"    AND c.smb_signing_required = false AND ({ntlm_ok})"
+        f"), "
+        f"servers AS ("
+        f"  SELECT DISTINCT c.sid, c.dnshostname, upper(regexp_extract(role, '@(.+)$', 1)) AS site "
+        f"  FROM {schema}.node_computer c, UNNEST(c.site_system_roles) AS t(role) "
+        f"  WHERE role LIKE 'SMS Site Server@%' AND c.sid IS NOT NULL AND c.dnshostname LIKE '%.%'"
+        f") "
+        f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
+        f"  tgt.sid AS end_id, "
+        f"  '{COERCE_AND_RELAY_TO_SMB}' AS kind, "
+        f"  coalesce(list_filter(tgt.smb_signing_source, "
+        f"    x -> x IN ('SMB-Negotiate', 'RemoteRegistry-SMBSigningCheck')), CAST([] AS VARCHAR[])) "
+        f"    AS collection_source, "
+        f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_and_relay_target_pairs, "
+        f"  [srv.dnshostname] AS coercion_victim_hostnames "
+        f"FROM targets tgt "
+        f"JOIN servers srv ON srv.site = tgt.site AND srv.sid != tgt.sid "
+        f"JOIN nonsec n ON n.u = tgt.site"
+    )
+
+
+def _node_authenticated_users(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Synthesise the Authenticated Users group node for every domain a Stage 6 relay edge
+    starts from (CMBP Upsert-Node ps1:6609/6708/6766).
+
+    id = UPPER(<FQDN>)-S-1-5-11 (SharpHound well-known-SID form, so it merges with
+    SharpHound-collected AD data); name = 'AUTHENTICATED USERS@<FQDN-UPPER>'. environmentid
+    is resolved by GroupNode from fallback_domain_sid — here the AD-domain SID of any
+    domain-joined computer in that FQDN (S-1-5-11 has no domain part of its own).
+
+    Lazy: only domains that actually produced a relay edge get a node — matching CMBP, where
+    the node is upserted inside the relay loop. Inserted into node_group BEFORE
+    _node_backfill / _graph_edges_split so the AD id set and GroupNode pick it up. The
+    DISTINCT join to _domain_to_sid guarantees the edge's start id has a resolvable domain
+    SID; the same domain computer that seeded the relay's start id seeds this map, so every
+    relay-start id resolves."""
+    from .kinds.edges import (
+        COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+        COERCE_AND_RELAY_TO_MSSQL,
+        COERCE_AND_RELAY_TO_SMB,
+    )
+    # UPPER(FQDN) -> AD-domain SID, from every domain-joined computer.
+    con.execute(
+        f"CREATE OR REPLACE TEMP TABLE _domain_to_sid AS "
+        f"SELECT DISTINCT upper(regexp_replace(dnshostname, '^[^.]+\\.', '')) AS fqdn_upper, "
+        f"  regexp_extract(upper(sid), '^(S-1-5-21(?:-\\d+){{3}})-\\d+$', 1) AS domain_sid "
+        f"FROM {schema}.node_computer "
+        f"WHERE dnshostname LIKE '%.%' AND sid IS NOT NULL "
+        f"  AND regexp_extract(upper(sid), '^(S-1-5-21(?:-\\d+){{3}})-\\d+$', 1) != ''"
+    )
+    # Any newly-introduced relay edge kind must be added here so its start nodes get an
+    # AUTHENTICATED USERS node.
+    relay_kinds = (f"('{COERCE_AND_RELAY_TO_ADMIN_SERVICE}', "
+                   f"'{COERCE_AND_RELAY_TO_MSSQL}', '{COERCE_AND_RELAY_TO_SMB}')")
+    _safe(
+        con, "node_group<-authenticated_users",
+        f"INSERT INTO {schema}.node_group BY NAME "
+        f"SELECT DISTINCT ge.start_id AS sid, "
+        f"  'AUTHENTICATED USERS@' || replace(ge.start_id, '-S-1-5-11', '') AS name, "
+        f"  false AS sccm_infra, "
+        f"  CAST([] AS VARCHAR[]) AS sccm_resource_ids, "
+        f"  d.domain_sid AS fallback_domain_sid "
+        f"FROM {schema}.graph_edges ge "
+        f"JOIN _domain_to_sid d ON d.fqdn_upper = replace(ge.start_id, '-S-1-5-11', '') "
+        f"WHERE ge.kind IN {relay_kinds} AND ge.start_id LIKE '%-S-1-5-11'"
+    )
+    n = con.execute(
+        f"SELECT count(*) FROM {schema}.node_group WHERE sid LIKE '%-S-1-5-11'"
+    ).fetchone()[0]
+    logger.info("node_authenticated_users: node_group holds %d AUTHENTICATED USERS node(s)", n)
+
+
 def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Collapse duplicate (start_id, end_id, kind) rows into one row per unique triple.
 
@@ -2825,7 +3077,15 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges AS "
         f"SELECT start_id, end_id, kind, "
-        f"  coalesce(list_distinct(flatten(list(collection_source))), CAST([] AS VARCHAR[])) AS collection_source "
+        f"  coalesce(list_distinct(flatten(list(collection_source))), CAST([] AS VARCHAR[])) AS collection_source, "
+        # Stage 6: array-union the coercion lists (CMBP Upsert-Edge merges arrays, ps1:2155-2158).
+        # FILTER drops the NULLs that every non-relay builder leaves in these columns.
+        f"  coalesce(list_distinct(flatten(list(coercion_victim_and_relay_target_pairs) "
+        f"    FILTER (WHERE coercion_victim_and_relay_target_pairs IS NOT NULL))), CAST([] AS VARCHAR[])) "
+        f"    AS coercion_victim_and_relay_target_pairs, "
+        f"  coalesce(list_distinct(flatten(list(coercion_victim_hostnames) "
+        f"    FILTER (WHERE coercion_victim_hostnames IS NOT NULL))), CAST([] AS VARCHAR[])) "
+        f"    AS coercion_victim_hostnames "
         f"FROM {schema}.graph_edges "
         f"GROUP BY start_id, end_id, kind"
     )
@@ -2908,14 +3168,16 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_ad AS "
-        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source "
+        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames "
         f"FROM {schema}.graph_edges e "
         f"WHERE EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"   OR EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
     )
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_sccm AS "
-        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source "
+        f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames "
         f"FROM {schema}.graph_edges e "
         f"WHERE NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"  AND NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
@@ -2991,6 +3253,15 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _edge_mssql_membership(con, schema)
     _edge_mssql_service_account(con, schema)
     _edge_mssql_db_assign_all(con, schema)
+    # Stage 6: coerce-and-relay possible edges + the synthetic Authenticated Users node.
+    # disable_possible was read above (for _node_client_device_possible). The relay builders
+    # gate the "assume vulnerable on null" cases on it (surgical, Stage 6 decision #1).
+    # _node_authenticated_users runs AFTER the relay builders (it reads their start ids) and
+    # BEFORE dedup/backfill/split (which read node_group for the AD id set).
+    _edge_coerce_relay_adminservice(con, schema, disable_possible)
+    _edge_coerce_relay_mssql(con, schema, disable_possible)
+    _edge_coerce_relay_smb(con, schema, disable_possible)
+    _node_authenticated_users(con, schema)
     # Dedup after all edge builders: both adminservice and wmi sources can contribute the
     # same edge, and name fan-out (collection_by_name, role_by_name) can match the same
     # id twice. CMBP's Upsert-Edge dedupes at insert time; we do it once here.

@@ -50,6 +50,7 @@ Every section follows the same spine:
   - [11e. Edge-endpoint stub-node backfill (new divergence category)](#11e-edge-endpoint-stub-node-backfill-new-divergence-category)
   - [11f. Split output: an untagged AD payload beside the SCCM source](#11f-split-output-an-untagged-ad-payload-beside-the-sccm-source)
   - [11g. Stage 5: MSSQL node merge and topology inference](#11g-stage-5-mssql-node-merge-and-topology-inference)
+  - [11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node](#11h-stage-6-coerce-and-relay-possible-edges-and-the-synthetic-authenticated-users-node)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -794,9 +795,24 @@ CMBP maintains a hard-coded list of edge kinds whose `traversable` property is `
 
 In OpenHound the list lives in `TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py). It is a `frozenset` covering current and future (Stage 3–6) kinds so later stages can add edges without updating the traversability logic.
 
-All edges — regardless of kind — are emitted by the single generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. It reads the `graph_edges` preproc table (four columns: `start_id`, `end_id`, `kind`, `collection_source VARCHAR[]`) and sets both `SCCMEdgeProperties.traversable = kind in TRAVERSABLE_EDGE_KINDS` and `SCCMEdgeProperties.collectionSource` from the row's `collection_source` array (defaulting to `[]`). The `collection_source` column is a typed `VARCHAR[]` array — **not** a JSON string. Storing it as JSON was a Stage-2 bug (DuckDB returns JSON columns as plain strings, which would have required manual parsing in convert); the typed array avoids that entirely. This keeps the edge model trivially thin and `graph_edges` a uniform table — new edge kinds only require rows in the table plus an entry in the allow-list if they should be traversable.
+All edges — regardless of kind — are emitted by the single generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. It reads the `graph_edges` preproc table and sets both `SCCMEdgeProperties.traversable = kind in TRAVERSABLE_EDGE_KINDS` and `SCCMEdgeProperties.collectionSource` from the row's `collection_source` array (defaulting to `[]`). The `collection_source` column is a typed `VARCHAR[]` array — **not** a JSON string. Storing it as JSON was a Stage-2 bug (DuckDB returns JSON columns as plain strings, which would have required manual parsing in convert); the typed array avoids that entirely. This keeps the edge model trivially thin and `graph_edges` a uniform table — new edge kinds only require rows in the table plus an entry in the allow-list if they should be traversable.
 
-A final dedup pass (`_graph_edges_dedup`) in the `graph_edges` preproc query groups by `(start_id, end_id, kind)` and array-unions the `collection_source` values across the group via `list_distinct(flatten(list(collection_source)))`, replacing the old `SELECT DISTINCT` that could only deduplicate identical triples.
+**`graph_edges` columns (as of Stage 6):**
+
+| Column | Type | Description |
+|---|---|---|
+| `start_id` | `VARCHAR` | Start node id |
+| `end_id` | `VARCHAR` | End node id |
+| `kind` | `VARCHAR` | Edge kind string |
+| `collection_source` | `VARCHAR[]` | Provenance tags array-unioned across duplicate rows |
+| `coercion_victim_and_relay_target_pairs` | `VARCHAR[]` | Human-readable `"Coerce <victim>, relay to <target>"` strings; populated only by the three `CoerceAndRelay*` builders; `NULL` (coalesced to `[]` by dedup) for every other edge kind. |
+| `coercion_victim_hostnames` | `VARCHAR[]` | FQDNs of coercion victim hosts; populated only by `_edge_coerce_relay_smb`; `NULL` (coalesced to `[]` by dedup) for all other kinds. |
+
+The three `CoerceAndRelay*` edge kinds carry additional context via the `SCCMRelayEdgeProperties` subclass of `SCCMEdgeProperties` (defined in [graph.py](src/openhound_sccm/graph.py)), which adds `coercionVictimAndRelayTargetPairs` and `coercionVictimHostnames` fields. `GraphEdge` emits these relay-only properties when the edge's kind is one of the three relay kinds; every other edge uses the lean base `SCCMEdgeProperties` with only `collectionSource` and `traversable`. Field names in both classes mirror ConfigManBearPig's exact casing.
+
+A final dedup pass (`_graph_edges_dedup`) in the `graph_edges` preproc query groups by `(start_id, end_id, kind)` and array-unions both `collection_source` and the two coercion columns via `list_distinct(flatten(list(...)))` — matching CMBP's `Upsert-Edge` array-merge behaviour (`ps1:2155-2158`).
+
+**`node_computer.smb_signing_source` — SMB-signing probe provenance.** `node_computer` carries a `smb_signing_source VARCHAR[]` column that records which probe(s) observed the host's SMB-signing state: `["SMB-Negotiate"]` (from the unauthenticated SMB2-negotiate check in `smb_computers`), `["RemoteRegistry-SMBSigningCheck"]` (from the registry-based check in `remoteregistry_computers`), or both. This array is array-unioned across sources during the `GROUP BY sid` collapse and is consumed directly by `_edge_coerce_relay_smb` as the `collection_source` for the `CoerceAndRelayToSMB` edge (filtered to the two SMB-signing probe tags). It is not emitted as a node property.
 
 ### 11d. Stage 4: client-device dedup and host-correlation edges
 
@@ -947,6 +963,25 @@ AD payload); all-MSSQL/SCCM edges (`MSSQL_Contains`, `MSSQL_ControlServer`, `MSS
 `MSSQL_MemberOf`, `MSSQL_IsMappedTo`, `SCCM_AssignAllPermissions`) go to `graph_edges_sccm`.
 No change to `_graph_edges_split` is needed — MSSQL node ids are deliberately not in its AD id set.
 
+### 11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node
+
+Stage 6 adds three new edge kinds (`CoerceAndRelayToAdminService`, `CoerceAndRelayToMSSQL`, `CoerceAndRelayToSMB`) and one new synthetic node type. No new framework divergence categories are introduced; Stage 6 extends the existing preproc-only pattern from §11c and the output-split routing from §11f.
+
+**Surgical `--disable-possible-edges` semantics.** The `disable_possible_edges` flag (persisted in `collection_settings`, read by `_read_disable_possible`) already gated Stage 3–4 possible-client nodes. Stage 6 extends it to the three relay builders with a *surgical* two-level gate:
+
+- **Default (flag off):** a null or absent NTLM restriction is treated as *assumed vulnerable* — matching ConfigManBearPig's behavior at `ps1:6618`, `ps1:6712`, `ps1:6762`. A known EPA setting other than `Off` always disqualifies the server, but a null EPA is also treated as vulnerable.
+- **Flag on:** only *explicitly confirmed* `Off` values qualify for each relay condition. A null NTLM restriction or null EPA causes the relay row to be dropped rather than assumed safe.
+
+This gives operators a single flag to choose between a speculative-complete view (default) and a confirmed-only view without changing the collection. The three builders each implement this via a conditional SQL expression for the `ntlm_ok` (and `epa_ok` for MSSQL) predicate.
+
+`_read_disable_possible` combines the collect-time `collection_settings` value with the `SOURCES__SCCM__DISABLE_POSSIBLE_EDGES` env var (tightening-only OR), so preproc can re-tighten existing raw without a re-collect.
+
+**Lazy Authenticated Users node.** Rather than creating a fixed set of Authenticated Users nodes up front, `_node_authenticated_users` runs *after* all three relay edge builders have inserted into `graph_edges`. It reads the distinct `start_id` values from relay-kind rows and inserts one `Group` row into `node_group` per domain that actually produced at least one relay edge. The node id follows SharpHound's well-known-SID form (`UPPER(FQDN)-S-1-5-11`) so it merges with SharpHound data by id; the `environmentid` is resolved from a co-occurring domain computer's AD domain SID via a join on `_domain_to_sid`. This lazy approach matches CMBP's per-iteration `Upsert-Node` pattern and avoids creating orphan Authenticated Users nodes for domains with no exploitable relay path. The node must be inserted into `node_group` *before* `_node_backfill` and `_graph_edges_split` so it is included in the AD id set and routed to the AD payload correctly.
+
+**`CoerceAndRelayToSMB` traversable bug fix.** ConfigManBearPig's traversable allow-list at `ps1:2221` named the SMB relay kind `CoerceAndRelayNTLMtoSMB`, while the function that emits the edge at `ps1:6775` used `CoerceAndRelayToSMB` — the string mismatch meant the SMB relay edge was stored but never marked traversable. This port emits `CoerceAndRelayToSMB` and includes that exact string in `TRAVERSABLE_EDGE_KINDS`, so all three relay kinds are traversable.
+
+**Output routing.** All three relay edges touch an AD `Group` start node (Authenticated Users), so they are routed to `graph_edges_ad` (the untagged AD payload) by `_graph_edges_split`. For `CoerceAndRelayToSMB` the end node is also an AD `Computer`, so both endpoints are AD nodes. For `CoerceAndRelayToAdminService` the end is a `SCCM_Site`, and for `CoerceAndRelayToMSSQL` the end is an `MSSQL_Login` — both SCCM-payload nodes — but the AD-start-node rule routes them to the AD payload regardless.
+
 ---
 
 ## Quick reference: which framework extension point each add-on uses
@@ -967,6 +1002,7 @@ No change to `_graph_edges_split` is needed — MSSQL node ids are deliberately 
 | Edge-endpoint stub-node backfill | `_node_backfill` + `StubNode` synthesise bare nodes for unresolved edge endpoints | An `Upsert-Node`-equivalent that creates nodes on demand |
 | Split output (untagged AD payload) | A second `convert`-time emit pass through an extension `opengraph_file_untagged` destination (no `metadata`); preproc `_graph_edges_split` partitions edges | A `source_kind=None` / multi-source option on `@app.convert` |
 | MSSQL node merge + topology inference | `_mssql_sql_servers` temp table + three-source `UNION`/`GROUP BY` coalesce in `_node_mssql_server`; Login/DatabaseUser inferred from SCCM sysadmin-computer topology in `_node_mssql_login` / `_node_mssql_database_user`; MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split` | No new framework extension point — extends the existing Convert2-Read-DB pipeline and output-split (§11f) |
+| Coerce-and-relay possible edges + synthetic Authenticated Users node | Three relay edge builders in `_edge_coerce_relay_*`; `_node_authenticated_users` inserts lazily after relay builders; `SCCMRelayEdgeProperties` subclass for relay-only props; surgical `--disable-possible-edges` gate; `graph_edges` gains two `VARCHAR[]` coercion columns | No new framework extension point — extends §11b (persist-at-collect/gate-in-preproc), §11c (graph_edges + GraphEdge), and §11f (output-split routing) |
 
 ---
 
@@ -991,6 +1027,7 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-06-30 | Stage 6 (coerce-and-relay) shipped. Added §11h: three `CoerceAndRelay*` possible-edge kinds with surgical `--disable-possible-edges` gate (default: null NTLM/EPA assumed vulnerable; flag: only explicit `Off` qualifies). Lazy `_node_authenticated_users` synthesises one `Group` node per domain with at least one relay edge (id = `UPPER(FQDN)-S-1-5-11`, merges with SharpHound). `graph_edges` gains two `VARCHAR[]` coercion columns (`coercion_victim_and_relay_target_pairs`, `coercion_victim_hostnames`); `SCCMRelayEdgeProperties` subclass carries them to the BloodHound entity panel. Fixed `CoerceAndRelayToSMB` traversable mismatch (CMBP allow-list used `CoerceAndRelayNTLMtoSMB`; the port emits and marks traversable `CoerceAndRelayToSMB`). Updated §11c `graph_edges` column list + `SCCMRelayEdgeProperties` note; added `node_computer.smb_signing_source` provenance note. Quick-reference table updated. |
 | 2026-06-30 | Stage 5 (MSSQL) shipped. Added §11g: `MSSQL_Server` is a three-source coalesce (`mssql_server_instances` + `remoteregistry_mssql_servers` + `_mssql_sql_servers`), keyed on `upper(host_sid):port`, capturing multiple SQL hosts per site and non-SCCM servers. Six MSSQL node kinds inferred from SCCM topology (no live SQL enumeration). `environmentid` = AD-domain SID of the SQL host via `domain_environment_id`. MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split`. Quick-reference table updated. |
 | 2026-06-29 | Split output shipped. Added §11f: `convert` now writes two payloads — the SCCM-tagged set (`sccm_*`, `source_kind="SCCM"`) and an untagged AD set (`ad_*`, no `metadata` block) for native AD-graph merge. New preproc step `transforms._graph_edges_split` partitions `graph_edges` into `graph_edges_ad` / `graph_edges_sccm`; new extension destination `opengraph_file_untagged`; `emit_graph_from_duckdb` gained `resource_prefix` + `source_kind=None` (untagged) handling; `NODE_SPECS`/`EDGE_SPECS` split into `SCCM_*`/`AD_*` spec lists. |
 | 2026-06-29 | Stage 4 shipped. Added §11d documenting `_dedup_client_device` (merge real+inferred SCCM_ClientDevice twins by `ad_domain_sid`, runs before all edge builders — deliberate divergence from CMBP's post-edge merge order), `_edge_same_host` (bidirectional `Computer ↔ SCCM_ClientDevice` `SameHostAs`), and `_edge_local_admin_required` (site server → peer site systems `LocalAdminRequired`). Renamed §11d stub-node backfill to §11e. Updated §11b: inferred client rows now use `is_confirmed_active_client = False` (not "possible"); note the Stage 4 `SameHostAs` edge that links them back to AD computer objects. |
