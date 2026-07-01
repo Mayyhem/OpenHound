@@ -8,7 +8,6 @@ passed into each resource. All decorators register onto the same
 from __future__ import annotations
 
 import functools
-import logging
 import os
 import platform
 import re
@@ -17,9 +16,9 @@ from typing import Any, Iterable
 from ..context import SourceContext
 from ..main import app
 from ..models.raw_table import raw_table_asset
-from ..log_context import with_log_context
+from ..log_context import get_logger, with_log_context
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @functools.lru_cache(maxsize=1)
@@ -87,34 +86,40 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     if svc is None:
         return
 
-    global current_mp_ad_obj, site_code
-
     logger.info("Starting local collection...")
     logger.info("Querying SMS_Authority for current management point and site code...")
+
+    # site_codes is lazily created (same pattern as the LDAP phase) so a
+    # local-first run doesn't crash adding to a None set.
+    if ctx.site_codes is None:
+        ctx.site_codes = set()
+    site_codes = ctx.site_codes
 
     try:
         for item in svc.ExecQuery("SELECT * FROM SMS_Authority"):
             current_mp = getattr(item, "CurrentManagementPoint", None)
             # Extract site code from Name property (format: "SMS:PS1")
-            site_code = getattr(item, "Name", "").split(":")[-1] if ":" in getattr(item, "Name", "") else None
+            ctx.current_site_code = getattr(item, "Name", "").split(":")[-1] if ":" in getattr(item, "Name", "") else None
 
-            if site_code and site_code not in ctx.site_codes:
-                logger.info(f"Found new site code '{site_code}' in local WMI repository")
-                ctx.site_codes.add(site_code)
+            if ctx.current_site_code and ctx.current_site_code not in site_codes:
+                logger.info(f"Found new site code '{ctx.current_site_code}' in local WMI repository")
+                site_codes.add(ctx.current_site_code)
 
             if current_mp:
                 target = ctx.register_target(
                     identifier=current_mp,
                     source="Local-SMS_Authority",
-                    site_code=site_code if site_code else None
+                    site_code=ctx.current_site_code if ctx.current_site_code else None
                 )
 
-                if target:
+                # Only emit a graph row when the MP resolved in AD; an
+                # unresolved MP is still a probe target (register_target added
+                # it) but has no AD identity to yield. register_target already
+                # logged why it skipped a filtered/empty host.
+                if target and target.ad_object:
                     logger.info(f"Found current management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
-                    current_mp_ad_obj = target.ad_object
-                    yield current_mp_ad_obj
-                # No else: register_target logs why it skipped (filtered host or
-                # empty name), so a None return isn't a failure here.
+                    ctx.current_mp_ad_object = target.ad_object
+                    yield target.ad_object
 
     except Exception as ex:
         logger.error("Error querying SMS_Authority: %s", ex)
@@ -142,14 +147,15 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 target = ctx.register_target(
                     identifier=mp,
                     source="Local-SMS_LookupMP",
-                    site_code=site_code if site_code else None
+                    site_code=ctx.current_site_code if ctx.current_site_code else None
                 )
 
-                if target:
+                # Emit only resolved MPs; an unresolved one is still a probe
+                # target but has no AD row to yield. register_target already
+                # logged filtered/empty skips.
+                if target and target.ad_object:
                     logger.info(f"Found management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
-                # No else: register_target logs why it skipped (filtered host or
-                # empty name), so a None return isn't a failure here.
 
     except Exception as ex:
         logger.error("Error querying SMS_LookupMP: %s", ex)
@@ -167,8 +173,6 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     if svc is None:
         return
 
-    global this_computer_ad_obj
-
     logger.info("Querying CCM_Client for client information...")
 
     try:
@@ -185,7 +189,7 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
             if name_to_resolve:
                 try:
                     # Just resolve, don't add local host to targets
-                    this_computer_ad_obj = ctx.resolve_principal(name_to_resolve)
+                    ctx.this_computer_ad_object = ctx.resolve_principal(name_to_resolve)
                 except Exception as ex:
                     logger.error("Error resolving principal for %s: %s", name_to_resolve, ex)
 
@@ -198,16 +202,18 @@ def local_wmi_ccm_client(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                     log_suffix += ")"
                 logger.info(f"Found client ID (SMSID) for {name_to_resolve}: {client_id} {log_suffix}")
 
+                this_computer = ctx.this_computer_ad_object
+                current_mp = ctx.current_mp_ad_object
                 yield {
-                    "ad_domain_sid": this_computer_ad_obj.get("object_sid") if this_computer_ad_obj else None,
-                    "current_management_point": current_mp_ad_obj.get("dns_host_name") if current_mp_ad_obj else None,
-                    "current_management_point_sid": current_mp_ad_obj.get("object_sid") if current_mp_ad_obj else None,
-                    "distinguished_name": this_computer_ad_obj.get("distinguished_name") if this_computer_ad_obj else None,
-                    "dns_host_name": this_computer_ad_obj.get("dns_host_name") if this_computer_ad_obj else None,
-                    "name": this_computer_ad_obj.get("sam_account_name") if this_computer_ad_obj else None,
+                    "ad_domain_sid": this_computer.get("object_sid") if this_computer else None,
+                    "current_management_point": current_mp.get("dns_host_name") if current_mp else None,
+                    "current_management_point_sid": current_mp.get("object_sid") if current_mp else None,
+                    "distinguished_name": this_computer.get("distinguished_name") if this_computer else None,
+                    "dns_host_name": this_computer.get("dns_host_name") if this_computer else None,
+                    "name": this_computer.get("sam_account_name") if this_computer else None,
                     "previous_smsid_change_date": client_id_change_date,
                     "previous_smsid": previous_client_id,
-                    "site_code": site_code if site_code else None,
+                    "site_code": ctx.current_site_code if ctx.current_site_code else None,
                     "smsid": client_id,
                     "source": "Local-CCM_Client",
                 }
@@ -285,9 +291,21 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 logger.error(f"Failed to process log directory {log_dir}: {ex}")
                 continue
 
+    # Build the set of names that identify this machine once, so references to
+    # ourselves in the logs are skipped. Guard each lookup: a resolved AD object
+    # may lack dns_host_name / sam_account_name, and .lower() on a missing value
+    # would crash.
+    skip_hosts = {"localhost", "127.0.0.1"}
+    this_computer = ctx.this_computer_ad_object
+    if this_computer:
+        for key in ("dns_host_name", "sam_account_name"):
+            value = this_computer.get(key)
+            if value:
+                skip_hosts.add(value.lower())
+
     for host in sorted(discovered.keys()):
         # Skip localhost references and current machine
-        if host in ("localhost", "127.0.0.1", this_computer_ad_obj.get("dns_host_name").lower() if this_computer_ad_obj else None, this_computer_ad_obj.get("sam_account_name").lower() if this_computer_ad_obj else None):
+        if host in skip_hosts:
             logger.debug(f"Skipping localhost reference found in client logs: {host}")
             continue
 
@@ -303,14 +321,15 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 target = ctx.register_target(
                     identifier=host,
                     source="Local-ClientLogs",
-                    site_code=site_code
+                    site_code=ctx.current_site_code
                 )
 
-                if target:
+                # Emit only resolved hosts; an unresolved one is still a probe
+                # target but has no AD row to yield. register_target already
+                # logged filtered/empty skips.
+                if target and target.ad_object:
                     logger.info(f"Found host in client logs: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     yield target.ad_object
-                # No else: register_target logs why it skipped (filtered host or
-                # empty name), so a None return isn't a failure here.
             else:
                 logger.debug(f"Host found in client logs resolved to non-RFC1918 IP address, skipping: {host} ({resolved_ip})")
         else:

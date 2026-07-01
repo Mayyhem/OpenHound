@@ -1,3 +1,15 @@
+# Disable dlt's anonymous telemetry BEFORE anything can initialize the dlt
+# runtime. The `dlt.config[...] = False` line further down runs too late: the
+# `import openhound.core.logging` below constructs CustomLogger at import time,
+# which touches dlt.config, initializes the dlt runtime, and arms the anonymous
+# tracker with telemetry still ON (dlt latches "started" once, so the later
+# disable is a no-op). Setting the env var here — before any import — is honored
+# by dlt's config resolution regardless of import order. setdefault() so an
+# operator who deliberately set it keeps control.
+import os
+
+os.environ.setdefault("RUNTIME__DLTHUB_TELEMETRY", "false")
+
 from pathlib import Path
 
 import dlt

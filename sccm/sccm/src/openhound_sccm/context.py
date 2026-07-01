@@ -47,6 +47,15 @@ class SourceContext:
     # collected from LDAP, local WMI
     site_codes: Optional[set[str]] = None
 
+    # Per-run local-collection state, discovered by one local resource and reused
+    # by its siblings (they run in order, ``parallelized=False``). Previously held
+    # in module-level globals in collectors/local.py; living on the context makes
+    # the data flow explicit and typed. ``current_site_code`` is this host's
+    # single site code (``site_codes`` above is the full set across all sources).
+    current_site_code: str | None = None
+    current_mp_ad_object: dict[str, Any] | None = None
+    this_computer_ad_object: dict[str, Any] | None = None
+
     # CmRcService SPN match cache. Populated by ``cmrc_spn_matches()`` when
     # the LDAP phase first asks for it; the network call is bracketed by
     # ``phase_context("LDAP")`` so the resulting log line is tagged as an

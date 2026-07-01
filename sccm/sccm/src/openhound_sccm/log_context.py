@@ -59,6 +59,28 @@ if not hasattr(logging.Logger, "verbose"):
     logging.Logger.verbose = _verbose  # type: ignore[attr-defined]
 
 
+class VerboseLogger(logging.Logger):
+    """A stdlib ``Logger`` plus the project's custom ``verbose`` level method.
+
+    ``verbose`` is attached to ``logging.Logger`` at import time (above), but a
+    static type checker can't see that runtime monkeypatch, so it flags every
+    ``logger.verbose(...)`` call as an unknown attribute. Modules obtain their
+    logger via :func:`get_logger` and get this type instead, so ``verbose`` is
+    known while the full stdlib ``Logger`` interface is still inherited.
+    """
+
+    def verbose(self, message: str, *args: Any, **kwargs: Any) -> None: ...
+
+
+def get_logger(name: str) -> VerboseLogger:
+    """Return a module logger typed to include the custom ``verbose`` level.
+
+    Drop-in for ``logging.getLogger(__name__)``; the returned object is the
+    same plain ``Logger`` at runtime, only re-typed so ``.verbose(...)`` checks.
+    """
+    return logging.getLogger(name)  # type: ignore[return-value]
+
+
 # ---------------------------------------------------------------------------
 # Per-target / per-phase context vars
 # ---------------------------------------------------------------------------
@@ -565,9 +587,11 @@ def trace_node_with_properties(kind: str, node_id: str, name: Optional[str], pro
 __all__ = [
     "LogContextFilter",
     "VERBOSE",
+    "VerboseLogger",
     "cached_with_log",
     "fire_host_complete",
     "get_current_resource",
+    "get_logger",
     "get_current_target",
     "install_filter",
     "register_host_complete_callback",

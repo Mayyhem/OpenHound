@@ -1,8 +1,8 @@
 ---
 id: ope-7f61
 status: open
-deps: []
-links: []
+deps: [ope-255b]
+links: [ope-255b]
 created: 2026-06-29T15:57:27Z
 type: chore
 priority: 2

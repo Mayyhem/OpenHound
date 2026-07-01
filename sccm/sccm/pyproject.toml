@@ -68,3 +68,9 @@ sccm = "openhound_sccm.main:app"
 
 [tool.mypy]
 enable_error_code = ["possibly-undefined"]
+
+# pywin32 ships no type information, so importing win32com is otherwise flagged
+# as an untyped import. It's used only in the Windows-only local collector.
+[[tool.mypy.overrides]]
+module = ["win32com.*"]
+ignore_missing_imports = true
