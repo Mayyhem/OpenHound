@@ -469,7 +469,7 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             # Add to collection targets for subsequent collection phases
             target = ctx.register_target(
                 identifier=computer.get("object_sid"),
-                source=f"LDAP-NamePattern",
+                source="LDAP-NamePattern",
                 ad_object=computer,
             )
 

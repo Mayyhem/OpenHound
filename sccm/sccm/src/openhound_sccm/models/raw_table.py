@@ -22,7 +22,7 @@ placeholder use site with a fully-typed asset.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 from dlt.common.libs.pydantic import DltConfig
 from openhound.core.asset import BaseAsset

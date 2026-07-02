@@ -143,3 +143,95 @@ H1 models; H2 exports; H3 SCCM_NODE_SPECS; I1 README; I2 ARCHITECTURE; I3 valida
 - [G1] edge builders import kind constants inside the function (deferred import) — consistent with existing Stage 2-4 _edge_* builders; G2/G3/G4 follow same pattern. Final review: decide whether to hoist all edge-builder imports to module top (touches pre-existing code).
 - [G3] redundant "service_account_domain_sid IS NOT NULL" alongside acct_exists EXISTS (harmless, brief-inherited); test :1433 is default-port fallback, add clarifying comment.
 - [H1] add clarifying comments (cleanup wave): mssql_login.py sysadmin_computer_sid is the HasLogin edge endpoint (not a node prop) — note it; mssql_database.py isTrustworthy/SCCMInfra hardcoded True (CMBP sets site DB trustworthy) — comment; role models isFixedRole=True (only fixed sysadmin/db_owner roles collected) — comment.
+
+## Stage 7 (Docs + validation) — gtk ope-255b — subagent-driven, started 2026-07-01
+Plan: sccm/sccm/docs/superpowers/plans/2026-07-01-sccm-preproc-convert-stage7.md
+Baseline: HEAD 5edf791 "Fix failing tests and loading bug" (user committed plan+ticket in parallel; tree clean).
+NO-COMMIT regime (CLAUDE.md): implementers stop at green checkpoint (verification passes), never commit.
+Per-task diff via .sdd (git diff HEAD -- <file>); README touched by Tasks 2 & 3 -> snapshot README before Task 3
+(.sdd/prev_README.md) and diff --no-index. .sdd/{briefs,reports,diffs}/ (gitignored). User committing in parallel
+=> always diff SPECIFIC files, never bare git diff. Locked decisions: docs+validation ONLY (no behavioral code);
+ground truth = code-static (14 node kinds / 37 edge kinds); "docs" incl non-behavioral docstrings/comments/ruff-autofix/mypy-annotations.
+Tasks: 0 scaffold(controller); 1 code-truth matrix; 2 README reconcile; 3 three Mermaid diagrams; 4 docstring/Attributes;
+5 ARCHITECTURE reconcile+changelog; 6 validation run; 7 harness doc+final self-check; FINAL whole-branch review.
+
+- [x] Task 0: complete (controller; .sdd dirs reused from Stage 6, briefs extracted, ledger appended, baseline 5edf791 clean)
+- [x] Task 1: complete (no commit; spec ✅ Approved by independent source-verify review, 33 tool uses). Matrix at
+  .sdd/reports/2026-07-01-stage7-code-truth-matrix.md (14 nodes / 37 edges, verified). Findings F1-F9 (F1 AdminTo dead
+  allow-list entry; F4 ZERO Attributes docstrings across all 14 dataclasses ~190 fields -> Task 4 starts from scratch;
+  F5 is_confirmed_active_client = the one deliberately snake_case output key). CODE-TRUTH ENDPOINT CORRECTIONS vs stale
+  spec §3 that Task 3 diagrams MUST use (matrix is authority): MSSQL_IsMappedTo = Login->DatabaseUser (NOT ->AD principal);
+  MSSQL_HostFor = Computer->Server (NOT Server->Computer); MSSQL_HasLogin = Computer(sysadmin)->Login (NOT Server->Login);
+  MSSQL_ExecuteOnHost = Server->Computer. My plan's diagram source had these reversed/wrong.
+- [x] Task 2: complete (no commit; spec ✅ Approved by review). README text reconciled: Graph Model "8 emitted"->14 prose
+  (brief Step 1 verbatim); killed false "property keys lowercase with underscores" claim (they're CMBP camelCase);
+  fixed dead anchor #mssql_ismappedto-1->#mssql_ismappedto (intro + ToC). Node/Edge Reference + all 4 MSSQL endpoint
+  watch-points were ALREADY correct vs matrix. 4 hunks / +7 -5. Dead-link sweep clean. NO diagrams added (Task 3 scope).
+  README snapshotted post-Task-2 -> .sdd/prev_README_task2.md for Task 3 diff isolation.
+- [x] Task 3: complete (no commit; spec ✅ after 1 fix). 3 Mermaid diagrams added to README Graph Model section
+  (pipeline; clustered AD/SCCM/MSSQL; full 37-edge/14-node hairball). All endpoints matrix-correct incl 3 corrections
+  (MSSQL_HostFor Computer->Server, HasLogin Computer->Login, IsMappedTo Login->DatabaseUser). Review found 1 Important
+  (caption "Node color=cluster" w/ no styling) -> FIXED: added classDef/class cluster coloring to both graph-model
+  diagrams (AD blue/SCCM green/MSSQL orange). 37/14 coverage intact, fences=3, subgraph/end=6/6. Mermaid NOT
+  parser-validated (no mmdc/node in env) -> flagged for visual check on GitHub (Task 6/7 note).
+- [x] Task 4: complete (no commit; spec ✅ Approved by independent field-by-field review of all 16 classes). graph.py
+  gained Attributes: docstrings on 2 edge + 14 node property dataclasses (+398/-7; the -7 are comments folded into
+  docstrings, intent preserved). NOTE: these docstrings appeared in the WORKING TREE (HEAD had 0) — provenance = user
+  parallel edit or agent; verified non-behavioral + matrix-accurate regardless. Field names are CMBP-cased (only
+  is_confirmed_active_client is snake_case). 2 Minors (cosmetic): task-4-report field counts off by 3; matrix Section 1
+  undercounts Computer(15->16)/ClientDevice(29->30 missing SCCMInfra) while Section 3 is correct — matrix is gitignored
+  scratch, left as-is, Section 3 authoritative.
+- [FOUND during Task 4] README property-parity GAP (Task 2 missed it; matrix Section 1 undercount masked it): 4 SCCM-native
+  kinds (SCCM_Collection, SCCM_AdminUser, SCCM_SecurityRole, SCCM_ClientDevice) each MISSING 3 emitted props from their
+  README tables: SCCMInfra, collectionSource, rootSiteCode. Other 10 kinds complete, no extras. Authoritative diff via
+  code_fields (docstring-stripped graph.py) vs README Node Reference tables. -> dispatching README-parity fix (Task 2 follow-up).
+- [x] README-parity fix (Task 2 follow-up): complete (no commit). Added 12 rows (collectionSource/rootSiteCode/SCCMInfra x
+  4 SCCM-native sections), descriptions from graph.py Attributes docstrings; per-kind SCCMInfra wording (Always-true for
+  Collection/AdminUser/SecurityRole, conditional-default-false for ClientDevice). INDEPENDENT controller recheck:
+  ALL 14 KINDS PARITY-CLEAN; SCCMInfra rows 8->12. README now matches emitted code exactly (Stage 7 acceptance bar).
+- [x] Task 5: complete (no commit; controller-verified). ARCHITECTURE.md: §11 function-ref check ALL OK (no renamed/removed
+  fns); Stage 7 changelog row added (line 1030, 1-insertion diff). Implementer correctly caught PLAN ERROR: brief's
+  "status line ~L11 / count ~L238" refer to README (not ARCHITECTURE — which has no status banner); left README to its
+  owner. Those README strings ("mid-migration…Stages 1-6 shipping", "fourteen…thirty-seven") are ACCURATE, no change needed.
+- [x] README anchor-integrity fix (Task 2 dead-ref follow-up; controller-applied): audited all 121 intra-doc #anchor links
+  -> found 4 broken (Task 2's sweep was file-path-only). Fixed: intro #coerceandrelaytosmbedge->#coerceandrelaytosmb (+ToC),
+  and 3 intro Has*User links (#sccm_hasprimaryuser/currentuser/adlastlogonuser) -> combined heading slug (ToC already had it).
+  RE-AUDIT: ALL ANCHOR LINKS RESOLVE.
+- [x] Task 6: complete (no commit; validation run = the acceptance gate). Report:
+  .sdd/reports/2026-07-01-stage7-validation-report.md. Isolated env = session scratchpad
+  dir (not literal /tmp per brief — harness instructs scratchpad over /tmp on this
+  Windows/Git-Bash setup; functionally equivalent, outside repo, `uv sync --group dev`
+  succeeded first try, no fallback needed). pytest 582 passed/5 skipped/0 failed (ran
+  twice, before+after the ruff fix, identical). ruff: 8->4 findings after `--fix` (fixed:
+  1 f-string trim in ldap.py + 3 unused imports in main.py/raw_table.py, all non-
+  behavioral, confirmed via git diff HEAD -- src/ + re-run pytest; remaining 4 F841
+  unused-locals in ldap.py's SD/ACL parser are pre-existing, not autofixable). mypy: 223
+  pre-existing errors (import-untyped stub gaps + custom Logger.verbose unrecognized by
+  stdlib stubs + ~15 genuine logic-shaped errors), ZERO in Stage-7-touched code (graph.py's
+  only hit is the same import-untyped notice every model file gets). Both ruff+mypy
+  findings folded into ope-1f0f (no new ticket). Structural checklist 10/10 PASS (4
+  brief-specified + 6 extra: NodeDef/EdgeDef-equivalent as_node/.edges pattern verified,
+  dlt.secrets.value creds, global @app.convert(lookup=) registration, domain_environment_id
+  root/environment mechanism, no kind-enum classes) with 3 documented intentional
+  environmentid non-matches (graph_edge.py edge asset, raw_table.py no-emit placeholder,
+  target_entry.py non-graph internal dataclass). No checks skipped for tooling/network
+  reasons; noted which AST-level Search Checks were inherited from prior-stage per-task
+  review rather than re-derived from scratch (no code changed since those reviews).
+- [x] Task 6: complete (no commit; controller-verified non-behavioral autofix diff). Isolated scratchpad venv, uv sync OK.
+  pytest 582 passed / 5 skipped / 0 FAILED. ruff 8->4 via --fix (non-behavioral: f-string F541 in ldap.py + 3 unused-import
+  F401 in main.py x2/raw_table.py; verified diff = only import/f-prefix removals, pytest re-green). Remaining 4 ruff F841
+  (ldap.py SD/ACL parser unused locals) + 223 mypy errors (missing stubs + ~15 logic-shaped) = ALL PRE-EXISTING, none in
+  Stage-7 code -> folded to ope-1f0f. Structural checklist 10/10 (3 documented environmentid exceptions). Report:
+  .sdd/reports/2026-07-01-stage7-validation-report.md. NOTE: ruff --fix touched 3 non-docs src files (ldap/main/raw_table)
+  -- authorized by user's "fix everything non-behavioral" choice; flag to user at handoff.
+- [x] Task 7: complete (no commit; controller-completed after subagent WRITE DENIED by permission layer for both scratchpad
+  AND repo paths). Harness doc written by controller: docs/superpowers/plans/2026-07-01-sccm-preproc-convert-stage7-validation.md
+  (reproduction-guide style: re-derive counts, README self-consistency gate, validation-suite reproduction, optional lab
+  cross-check, Last-run results). Final self-consistency gate LIVE: 37 edge constants, 0 MISSING in diagram, all pass.
+  ope-7f61 CLOSED (banner verified resolved). Task-7 subagent verification (all-pass) folded in.
+- [x] FINAL whole-branch review (opus): READY TO MERGE. Independently re-verified all gates (14/37 banners, diagram
+  coverage 0-MISSING, anchors resolve, 14/14 parity-clean, all fields documented, ARCHITECTURE changelog accurate,
+  MSSQL endpoints match matrix). Non-behavioral CONFIRMED: graph.py docstrings-only (field decls/defaults untouched;
+  -7 comments folded into docstrings, intent preserved); ldap.py/main.py/raw_table.py = dead-import/f-string removals
+  with 0 remaining refs. No Critical/Important. 4 Minors ALL triaged ACCEPTABLE (gitignored .sdd artifacts + flagged
+  manual Mermaid visual check). STAGE 7 COMPLETE. NO COMMIT (user commits after testing per CLAUDE.md).

@@ -24,11 +24,9 @@ from openhound.core.app import (
 )
 from openhound.core.collect import CollectContext, Collector
 from openhound.core.convert import ConvertContext
-from openhound.core.lookup import LookupManager
 from openhound.core.preproc import PreProcContext
 from openhound.core.progress import Progress
 from dlt.common.pipeline import LoadInfo
-from dlt.extract.source import DltSource
 import dlt
 from .convert_pipeline import emit_graph_from_duckdb
 from .lookup import SCCMLookup

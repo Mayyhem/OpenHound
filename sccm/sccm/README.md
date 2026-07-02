@@ -11,7 +11,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, and Stages 1–6 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser), [`SCCM_HasCurrentUser`](#sccm_hascurrentuser), [`SCCM_HasADLastLogonUser`](#sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto-1), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice), [`CoerceAndRelayToMSSQL`](#coerceandrelaytomssql), [`CoerceAndRelayToSMB`](#coerceandrelaytosmbedge)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
+> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasCurrentUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasADLastLogonUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice), [`CoerceAndRelayToMSSQL`](#coerceandrelaytomssql), [`CoerceAndRelayToSMB`](#coerceandrelaytosmb)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -71,14 +71,14 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [MSSQL_HostFor](#mssql_hostfor)
   - [MSSQL_ExecuteOnHost](#mssql_executeonhost)
   - [MSSQL_HasLogin](#mssql_haslogin)
-  - [MSSQL_IsMappedTo](#mssql_ismappedto-1)
+  - [MSSQL_IsMappedTo](#mssql_ismappedto)
   - [MSSQL_MemberOf](#mssql_memberof)
   - [MSSQL_GetTGS](#mssql_gettgs)
   - [MSSQL_ServiceAccountFor](#mssql_serviceaccountfor)
   - [MSSQL_GetAdminTGS](#mssql_getadmintgs)
   - [CoerceAndRelayToAdminService](#coerceandrelaytoadminservice)
   - [CoerceAndRelayToMSSQL](#coerceandrelaytomssql)
-  - [CoerceAndRelayToSMB](#coerceandrelaytosmbedge)
+  - [CoerceAndRelayToSMB](#coerceandrelaytosmb)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -406,11 +406,13 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 **Node identity.** Every node carries a stable string id and an `environmentid` tying it to its collected environment. AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the id and the **AD domain SID** (the `S-1-5-21-X-Y-Z` prefix stripped of the trailing RID) as `environmentid`, so they merge with SharpHound data by SID. `SCCM_Site` uses the **site code** as both id and `environmentid` (scoped to the hierarchy root site code). The common node/property base classes live in [graph.py](src/openhound_sccm/graph.py) (`SCCMNode`, property dataclasses); node and edge kind strings live in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py) and [kinds/edges.py](src/openhound_sccm/kinds/edges.py).
 
-**Kinds declared** (in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)) — the following are the kind *constants* the project intends to use; `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, and `SCCM_SecurityRole` are emitted today:
+**Kinds emitted** (declared in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)). `convert` emits **14 node kinds**. Every AD-native node additionally carries the secondary `Base` label so BloodHound treats it as a first-class principal:
 
-- AD-native: `Computer`, `User`, `Group`, `Base`
+- AD-native: `Computer`, `User`, `Group` (each also labeled `Base`)
 - SCCM: `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`
 - MSSQL: `MSSQL_Server`, `MSSQL_Login`, `MSSQL_Database`, `MSSQL_DatabaseUser`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`
+
+The Stage 6 synthetic *Authenticated Users* node is an instance of the existing `Group` kind (id `UPPER(FQDN)-S-1-5-11`), not a 15th kind.
 
 **Convert-time enrichment.** Nodes are built from coalesced DuckDB tables (`node_computer`, `node_user`, `node_group`, `node_site`) computed by `preprocess`. Each table unions multiple raw collected sources (AdminService, WMI, LDAP, RemoteRegistry, SMB, HTTP) into one row per identity, so a node's richness grows as more collection phases come online, without changing the model.
 
@@ -423,13 +425,155 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 The AD payload deliberately carries **no `source_kind`** so BloodHound merges those nodes into its **native AD graph** by SID — augmenting existing SharpHound data rather than registering a separate SCCM-owned copy. An AD↔SCCM edge lives in the AD payload but references an `SCCM_*` node defined in the SCCM payload; BloodHound resolves the reference by id across both files at ingest, so **upload both file sets** (the whole output directory) to File Ingest.
 
+### Pipeline
+
+```mermaid
+flowchart LR
+    subgraph C["collect (per-host phases)"]
+        direction TB
+        LDAP[LDAP / AD]
+        ADM[AdminService / WMI]
+        RR[RemoteRegistry]
+        SMB[SMB]
+        HTTP[HTTP]
+        SQL[MSSQL]
+    end
+    C -->|"~45 raw JSONL tables"| P
+    subgraph P["preprocess (DuckDB — transforms.py)"]
+        direction TB
+        COAL["coalesce → node_* (one row per entity)"]
+        EDG["build graph_edges (UNION of per-kind SELECTs)"]
+        COAL --- EDG
+    end
+    P -->|"lookup.duckdb"| V
+    subgraph V["convert (convert_pipeline.py — Convert2-Read-DB)"]
+        RD["read node_* / graph_edges → typed OpenGraph models"]
+    end
+    V --> O1["sccm_nodes/edges-*.json<br/>source_kind = SCCM"]
+    V --> O2["ad_nodes/edges-*.json<br/>untagged — merges into AD graph"]
+    O1 --> BH["BloodHound File Ingest"]
+    O2 --> BH
+```
+
+### Graph model — clustered overview
+
+Representative cross-cluster edges only; the [Edge Reference](#edge-reference) section below carries the exhaustive, per-shape detail for all 37 edge kinds.
+
+```mermaid
+flowchart LR
+    subgraph AD["Active Directory"]
+        Computer
+        User
+        Group
+    end
+    subgraph SCCM["SCCM"]
+        SCCM_Site
+        SCCM_ClientDevice
+        SCCM_Collection
+        SCCM_AdminUser
+        SCCM_SecurityRole
+    end
+    subgraph MSSQL["MSSQL"]
+        MSSQL_Server
+        MSSQL_Database
+        MSSQL_Login
+        MSSQL_ServerRole
+        MSSQL_DatabaseRole
+        MSSQL_DatabaseUser
+    end
+    User -->|MemberOf| Group
+    Computer -->|HasSession| User
+    Group -->|SCCM_IsMappedTo| SCCM_AdminUser
+    SCCM_AdminUser -->|SCCM_FullAdministrator| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_AllPermissions| SCCM_Site
+    SCCM_Site -->|SCCM_HasClient| SCCM_ClientDevice
+    SCCM_ClientDevice -->|SameHostAs| Computer
+    Computer -->|MSSQL_HostFor| MSSQL_Server
+    MSSQL_Login -->|MSSQL_MemberOf| MSSQL_ServerRole
+    MSSQL_ServerRole -->|MSSQL_ControlServer| MSSQL_Server
+    Group -->|CoerceAndRelayToAdminService| SCCM_Site
+    Group -->|CoerceAndRelayToMSSQL| MSSQL_Login
+    Group -->|CoerceAndRelayToSMB| Computer
+
+    classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
+    classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
+    classDef mssql fill:#ffe6cc,stroke:#d79b00,color:#000;
+    class Computer,User,Group ad;
+    class SCCM_Site,SCCM_ClientDevice,SCCM_Collection,SCCM_AdminUser,SCCM_SecurityRole sccm;
+    class MSSQL_Server,MSSQL_Database,MSSQL_ServerRole,MSSQL_DatabaseRole,MSSQL_Login,MSSQL_DatabaseUser mssql;
+```
+
+### Graph model — complete edge reference
+
+> Every edge kind the collector emits. Node color = cluster (AD / SCCM / MSSQL). Some kinds
+> (`MSSQL_Contains`, `MSSQL_MemberOf`, `SCCM_IsAssigned`) have more than one endpoint shape;
+> extra shapes are drawn so all node kinds appear.
+
+```mermaid
+flowchart LR
+    %% AD-native
+    Computer; User; Group
+    %% SCCM
+    SCCM_Site; SCCM_ClientDevice; SCCM_Collection; SCCM_AdminUser; SCCM_SecurityRole
+    %% MSSQL
+    MSSQL_Server; MSSQL_Database; MSSQL_ServerRole; MSSQL_DatabaseRole; MSSQL_Login; MSSQL_DatabaseUser
+
+    SCCM_Site -->|SCCM_AdminsReplicatedTo| SCCM_Site
+    User -->|SCCM_IsMappedTo| SCCM_AdminUser
+    SCCM_AdminUser -->|SCCM_IsAssigned| SCCM_SecurityRole
+    SCCM_AdminUser -->|SCCM_IsAssigned| SCCM_Collection
+    SCCM_Collection -->|SCCM_HasMember| SCCM_ClientDevice
+    SCCM_Site -->|SCCM_HasClient| SCCM_ClientDevice
+    SCCM_ClientDevice -->|SCCM_HasPrimaryUser| User
+    SCCM_ClientDevice -->|SCCM_HasCurrentUser| User
+    SCCM_ClientDevice -->|SCCM_HasADLastLogonUser| User
+    SCCM_Site -->|SCCM_HasStoredAccount| User
+    User -->|MemberOf| Group
+    Computer -->|HasSession| User
+    SCCM_Site -->|SCCM_Contains| SCCM_Collection
+    SCCM_AdminUser -->|SCCM_FullAdministrator| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_ApplicationAuthor| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_ApplicationAdministrator| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_ComplianceSettingsManager| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_OSDManager| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_OperationsAdministrator| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_SecurityAdministrator| SCCM_ClientDevice
+    SCCM_AdminUser -->|SCCM_AllPermissions| SCCM_Site
+    Computer -->|SCCM_AssignAllPermissions| SCCM_Site
+    SCCM_ClientDevice -->|SameHostAs| Computer
+    Computer -->|LocalAdminRequired| Computer
+    MSSQL_Server -->|MSSQL_Contains| MSSQL_Database
+    MSSQL_Database -->|MSSQL_Contains| MSSQL_DatabaseRole
+    MSSQL_ServerRole -->|MSSQL_ControlServer| MSSQL_Server
+    MSSQL_DatabaseRole -->|MSSQL_ControlDB| MSSQL_Database
+    Computer -->|MSSQL_HostFor| MSSQL_Server
+    MSSQL_Server -->|MSSQL_ExecuteOnHost| Computer
+    Computer -->|MSSQL_HasLogin| MSSQL_Login
+    MSSQL_Login -->|MSSQL_IsMappedTo| MSSQL_DatabaseUser
+    MSSQL_Login -->|MSSQL_MemberOf| MSSQL_ServerRole
+    MSSQL_DatabaseUser -->|MSSQL_MemberOf| MSSQL_DatabaseRole
+    User -->|MSSQL_ServiceAccountFor| MSSQL_Server
+    User -->|MSSQL_GetAdminTGS| MSSQL_Server
+    User -->|MSSQL_GetTGS| MSSQL_Login
+    Group -->|CoerceAndRelayToAdminService| SCCM_Site
+    Group -->|CoerceAndRelayToMSSQL| MSSQL_Login
+    Group -->|CoerceAndRelayToSMB| Computer
+
+    classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
+    classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
+    classDef mssql fill:#ffe6cc,stroke:#d79b00,color:#000;
+    class Computer,User,Group ad;
+    class SCCM_Site,SCCM_ClientDevice,SCCM_Collection,SCCM_AdminUser,SCCM_SecurityRole sccm;
+    class MSSQL_Server,MSSQL_Database,MSSQL_ServerRole,MSSQL_DatabaseRole,MSSQL_Login,MSSQL_DatabaseUser mssql;
+```
+
 ---
 
 # Node Reference
 
 > **Currently emitted: 14 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`. Stage 6 adds a synthetic **Authenticated Users** `Group` node for each domain that produces a coerce-and-relay edge (see the [`Group`](#group) section).
 
-All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. All property keys are lowercase with underscores.
+All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. Property keys use ConfigManBearPig's original casing (camelCase/PascalCase), not snake_case — see [graph.py](src/openhound_sccm/graph.py).
 
 ## Computer
 
@@ -547,6 +691,7 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 
 | Property | Type | Description |
 |---|---|---|
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
 | `SMSID` | string | The SCCM unique identifier (e.g. `GUID:3F8A…`). |
 | `resourceID` | string | SCCM resource ID in `"<id>@<site_code>"` format. |
 | `siteCode` | string | The enrolling site code. |
@@ -564,6 +709,7 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `ADDomainSID` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
 | `ADLastLogonTime` | string | Timestamp of the device's last AD logon as reported by SCCM. |
 | `ADLastLogonUserDomain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
+| `rootSiteCode` | string | Hierarchy root site code for this device's site hierarchy. |
 | `sourceSiteCode` | string | Site code of the site that enrolled this device. |
 | `primaryUserSID` | string | AD SID of the primary user (resolved from `primaryUser` via the name lookup). |
 | `currentLogonUserSID` | string | AD SID of the currently logged-on user (resolved from `currentLogonUser`). |
@@ -574,6 +720,7 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `lastActiveTime` | string | Timestamp of the device's last active check-in (`LastActiveTime`). |
 | `lastOnlineTime` | string | Timestamp the device was last seen online (`CNLastOnlineTime`). |
 | `lastOfflineTime` | string | Timestamp the device last went offline (`CNLastOfflineTime`). |
+| `SCCMInfra` | bool | `true` if this device is itself part of the SCCM infrastructure (rare for a client device; usually `false`). |
 
 > **Properties not yet emitted:** `currentManagementPoint`, `distinguishedName` (client), `dNSHostName` (client), `domain`, `previous_smsid` — these fields are absent from the AdminService/WMI device columns; see [Limitations](#limitations).
 
@@ -588,6 +735,7 @@ An SCCM collection — a named set of devices or users used to scope deployments
 
 | Property | Type | Description |
 |---|---|---|
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
 | `collectionID` | string | The collection ID (e.g. `SMS00001`). |
 | `collectionType` | string | `Other`, `User`, or `Device` (from the integer type field). |
 | `memberCount` | int | Number of members in the collection. |
@@ -596,10 +744,12 @@ An SCCM collection — a named set of devices or users used to scope deployments
 | `limitToCollectionID` | string | Collection ID that limits membership for this collection. |
 | `limitToCollectionName` | string | Name of the limiting collection. |
 | `collectionVariablesCount` | int | Number of collection variables defined on this collection. |
+| `rootSiteCode` | string | Hierarchy root site code for this collection's site hierarchy. |
 | `sourceSiteCode` | string | Site code of the site that owns this collection (from `SMS_Collection.SourceSite` metadata). |
 | `lastChangeTime` | string | Timestamp of the last change to the collection definition. |
 | `lastMemberChangeTime` | string | Timestamp of the last membership change in this collection. |
 | `members` | list\<string\> | Raw `ResourceID@SiteCode` keys of the collection's members (faithful — built-in and unresolved members included). |
+| `SCCMInfra` | bool | Always `true` for a collection. |
 
 ## SCCM_AdminUser
 
@@ -612,12 +762,14 @@ An SCCM RBAC administrator — an AD user or group that has been granted SCCM ad
 
 | Property | Type | Description |
 |---|---|---|
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
 | `adminID` | string | SCCM internal admin ID. |
 | `adminSid` | string | AD SID of this admin account or group. |
 | `distinguishedName` | string | AD distinguished name (if available). |
 | `isGroup` | bool | `true` if this admin entry is an AD group rather than a user. |
 | `accountType` | int | SCCM account type integer. |
 | `displayName` | string | Display name from the SCCM admin record. |
+| `rootSiteCode` | string | Hierarchy root site code for this admin-user's site hierarchy. |
 | `sourceSiteCode` | string | Site code of the site that owns this admin record. |
 | `createdBy` | string | Logon name of the account that created this admin entry. |
 | `createdDate` | string | Timestamp when this admin entry was created. |
@@ -626,6 +778,7 @@ An SCCM RBAC administrator — an AD user or group that has been granted SCCM ad
 | `collectionIds` | list\<string\> | Collection node IDs (`COLLECTION_ID@SITE`) this admin is assigned to (resolved via collection name). |
 | `roleIDs` | list\<string\> | Raw security role IDs assigned to this admin (e.g. `SMS0001R`). |
 | `memberOf` | list\<string\> | Node IDs of the collections this admin is scoped to (derived from `SCCM_IsAssigned` edges). |
+| `SCCMInfra` | bool | Always `true` for an admin-user. |
 
 ## SCCM_SecurityRole
 
@@ -638,6 +791,7 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 
 | Property | Type | Description |
 |---|---|---|
+| `collectionSource` | list\<string\> | Collection sources that contributed to this node. |
 | `roleID` | string | SCCM role ID (e.g. `SMS000AR`). |
 | `roleName` | string | Human-readable role name (e.g. `Full Administrator`). |
 | `roleDescription` | string | Description of the role's purpose. |
@@ -646,12 +800,14 @@ An SCCM RBAC security role — defines the set of operations an admin is permitt
 | `copiedFromID` | string | Role ID this was cloned from (custom roles only). |
 | `numberOfAdmins` | int | Number of admins assigned to this role. |
 | `operations` | list\<string\> | List of SCCM operation strings granted by this role. |
+| `rootSiteCode` | string | Hierarchy root site code for this role's site hierarchy. |
 | `siteCode` | string | Site code of the site that owns this role (from `SMS_Role.SourceSite`). |
 | `createdBy` | string | Logon name of the account that created this role. |
 | `createdDate` | string | Timestamp when this role was created. |
 | `lastModifiedBy` | string | Logon name of the account that last modified this role. |
 | `lastModifiedDate` | string | Timestamp of the last modification to this role. |
 | `members` | list\<string\> | Node IDs of the admin users assigned to this role (derived from `SCCM_IsMappedTo` edges). |
+| `SCCMInfra` | bool | Always `true` for a security role. |
 
 ---
 
