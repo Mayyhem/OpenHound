@@ -1,6 +1,6 @@
 ---
 id: ope-d57d
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-09T20:43:02Z
@@ -26,3 +26,7 @@ Refinement: HttpClient now reuses the authenticated keep-alive connection when t
 **2026-06-11T15:34:29Z**
 
 DONE: service-ticket (TGS) caching implemented + live-validated. KerberosNegotiator caches (tgs,cipher,sessionKey) after the first _service_ticket() and rebuilds only the AP-REQ per request; HttpClient caches the Kerberos negotiator across get() calls so the KDC exchange (TGT+TGS) happens once per provider, not per request. Live: explicit-password against ps1-sms = one 'requesting TGT+TGS' + KDC:88 contact on request 1, zero KDC contact on requests 2-3, all 200. Matches browser behavior (mint ticket once, cheap per-request AP-REQ). SSPI path already LSA-cached; NTLM stays a per-request handshake. 53 client/auth/adminservice unit tests green; ruff+mypy clean.
+
+**2026-07-02T20:19:26Z**
+
+Done + committed: clients/http.py + clients/http_auth.py (Negotiate ladder, TGS caching). Live-validated vs ps1-sms per notes.

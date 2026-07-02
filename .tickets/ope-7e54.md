@@ -1,6 +1,6 @@
 ---
 id: ope-7e54
-status: open
+status: closed
 deps: [ope-0112]
 links: []
 created: 2026-06-03T19:29:20Z
@@ -68,3 +68,7 @@ Bug: source.py built allowed_targets from --computers WITHOUT lowercasing (only 
 Fix: extracted _expand_allowed_targets(names) -> set (lowercase each + add short-name form) and routed BOTH --computers and --computer-file through it, so the two branches cannot drift apart again. Added a logger.warning when a --computer-file path does not exist (was silently ignored). debug_per_host.py now reuses the same helper instead of its own inline copy.
 
 Tests: tests/test_allowed_targets.py (3 cases: lowercases+adds short-name, strips/skips blanks, uppercase --computers still matches a lowercased target via _is_allowed_target). ruff clean on changed files; mypy source.py clean; full suite 138 passed, same 6 pre-existing unrelated failures (test_extension_methods @app.convert + test_per_host_integration stubs).
+
+**2026-07-02T20:19:26Z**
+
+Done + committed (3fc77c6): registry.collect_registry wired at per_host_phases.py:26. CurrentUser-SID + multisite bugs fixed and live-validated per notes.

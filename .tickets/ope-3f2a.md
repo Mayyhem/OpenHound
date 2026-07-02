@@ -1,8 +1,8 @@
 ---
 id: ope-3f2a
-status: in_progress
+status: closed
 deps: []
-links: [Ope-ew5k, ope-38ad]
+links: [Ope-ew5k, ope-38ad, ope-c660]
 created: 2026-06-11T22:47:52Z
 type: feature
 priority: 2
@@ -19,3 +19,7 @@ Port ConfigManBearPig.ps1 Invoke-SmsProviderWmiCollection as the per-host WMI ph
 **2026-06-12T16:28:17Z**
 
 Implemented + live-validated against ps1-sms.mayyhem.com (site PS1). All 5 auth rungs confirmed end-to-end (identify + SMS_Site/SMS_SCI_SiteDefinition/SMS_Admin queries returning rows): SSPI (pywin32 current user), Kerberos (explicit password, impacket DCOM), pass-the-hash, NTLM (IP literal), pass-the-ticket. Live testing caught 4 bugs the mocks could not: (1) IWbemLevel1Login takes the interface positionally not as iinterface=; (2) impacket breaks on a 2nd IWbemLevel1Login over one DCOMConnection -> use one connection per namespace; (3) embedded SMS Props come back as unparsed ENCODING_UNIT -> call ObjectBlock.parseObject() before normalizing; (4) ticket-only PtT needs the client principal derived from the .kirbi. Unit suite: 270 passed / 5 skipped / 0 failed; ruff clean on new code. Collect-only (raw wmi_* tables; graph convert deferred, same as AdminService).
+
+**2026-07-02T20:19:26Z**
+
+Done + committed: privileged.collect_wmi wired at per_host_phases.py:68. Live-validated across all 5 auth rungs vs ps1-sms per notes.

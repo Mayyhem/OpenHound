@@ -1,6 +1,6 @@
 ---
 id: Ope-rhzx
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-28T13:32:31Z
@@ -9,6 +9,7 @@ priority: 1
 assignee: Mayyhem
 tags: [sccm, adminservice, rbac, permissions]
 ---
+
 # Individual Permissions (Port from PowerShell)
 
 Port granular SCCM RBAC permission collection from ConfigManBearPig.ps1 to the Python/OpenHound implementation. The PS1 script collects which AD principals have which SCCM security roles on which collections, mapping to SMS_Admin, SMS_Role, SMS_SecuredCategory, and SMS_Collection. The OpenHound model includes SCCM_AdminUser, SCCM_SecurityRole, SCCM_Collection node kinds but no RBAC edge collection.
@@ -21,3 +22,8 @@ Implement AdminService collection of: GET /AdminService/wmi/SMS_Admin (admin pri
 
 All SCCM admin principals, their roles, and collection scopes are collected. Role assignment edges appear in graph output. Full-admin principals emit EX_AdminTo edge to site node (matches PS1 behavior).
 
+## Notes
+
+**2026-07-02T20:19:41Z**
+
+RBAC edges delivered in Stage 3 (transforms _edge_rbac_role_grants/_edge_all_permissions/_edge_assign_all_permissions); validated with Stage 3. Closing.

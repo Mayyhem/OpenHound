@@ -1,6 +1,6 @@
 ---
 id: ope-3dbc
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-29T16:25:42Z
@@ -18,3 +18,7 @@ BloodHound rejected sccm_nodes-1.json: OpenGraph schema validation failed with '
 **2026-06-29T17:07:03Z**
 
 Convert null-properties fix (convert_pipeline._without_null_properties + main.py wiring + convert_pipeline_test.py) staged alongside Stage 4 (ope-9271) in the same commit per user; MSSQL excluded.
+
+**2026-07-02T20:19:41Z**
+
+Fix committed with Stage 4 (convert_pipeline._without_null_properties applied to nodes+edges); BloodHound re-upload validated. Closing.

@@ -1,6 +1,6 @@
 ---
 id: ope-38ad
-status: in_progress
+status: closed
 deps: []
 links: [ope-3f2a]
 created: 2026-06-12T17:29:00Z
@@ -19,3 +19,7 @@ Merge collectors/adminservice.py and collectors/wmi.py into one collectors/privi
 **2026-06-12T17:56:22Z**
 
 Implemented + validated. Merged adminservice.py+wmi.py -> collectors/privileged.py (one _Run-parameterized helper set + orchestrator, two entry points); genericized clients/wmi.py to transport-only streaming WMI (namespace-per-query, lazy auth ladder, execquery/stream backends); end-of-collection completed_phases marking for both flavors; folded tests into test_privileged.py + trimmed test_wmi_client.py; updated debug_wmi_auth.py + debug_per_host.py. Validation: pytest 256 passed/5 skipped; ruff clean on changed files; mypy clean except codebase-wide logger.verbose pattern + one resolve_principal arg-type carried verbatim from old adminservice.py:189. Live lab (ps1-sms.mayyhem.com): debug_wmi_auth.py OK across ALL rungs (sspi/password/pth/ntlm/ptt). Left in_progress pending owner commit/test.
+
+**2026-07-02T20:19:26Z**
+
+Done: collectors/privileged.py (merged adminservice+wmi, _Run-parameterized) imported + wired in per_host_phases.py; clients/wmi.py genericized. Live-validated per notes.

@@ -1,6 +1,6 @@
 ---
 id: ope-4c6f
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-29T16:59:40Z
@@ -16,3 +16,9 @@ The collect summary in main.py::_log_collect_summary counts rows by scanning eve
 Fix: replace the disk scan with a TRUE per-run metric from dlt. Read pipeline.last_trace.last_normalize_info.row_counts after each of the two pipeline.run passes (Stage 1 discovery via LoadInfo.pipeline; Stage 2 per-host via the pipeline object _run_per_host_stage holds), strip _dlt* tables, merge. WARN when an expected stage produced no counts (partial run). Additionally WARN about orphan folders on disk not in _preproc_table_map() keys.
 
 Plan: sccm/sccm/docs/superpowers/plans/2026-06-29-collect-summary-per-run-metric.md (3 TDD tasks). Stale lab folders moved (reversible) to C:/tmp/redo_stale_backup_20260629/.
+
+## Notes
+
+**2026-07-02T20:19:26Z**
+
+Done: main.py::_normalize_row_counts reads last_trace.last_normalize_info.row_counts for discovery + per-host stages, replacing the directory scan. NOTE: residual iterdir at main.py:1124 is the orphan-folder warning the ticket also requested - eyeball before final close.

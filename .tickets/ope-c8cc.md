@@ -1,8 +1,8 @@
 ---
 id: ope-c8cc
-status: in_progress
+status: closed
 deps: []
-links: [Ope-l6fu]
+links: [Ope-l6fu, ope-3d28]
 created: 2026-06-08T20:48:22Z
 type: task
 priority: 2
@@ -24,3 +24,7 @@ Design locked via grilling (2026-06-08): Hybrid impl = impacket 0.13.1 core (fre
 **2026-06-08T21:37:01Z**
 
 Live matrix validation vs ps1-db (SQL2022): explicit-cred / pass-the-hash path = 12/12 CORRECT across all FE x FSE x EP combos incl. TDS 8.0 strict. SSPI integrated-auth path = 8/12: correctly detects Off and Required everywhere, but reports EP=Allowed as Required (4 combos). ROOT CAUSE (evidence: per-probe truth table, both CBT and service paths): impacket hand-built Type3 can OMIT the MsvAvChannelBindings/MsvAvTargetName AV pair -> Allowed server accepts the 'missing' probe. Windows SSPI ALWAYS includes the AV pair (Z(16)/empty when app supplies none) -> Allowed server treats it as present-but-wrong and rejects, identical to Required. Cannot strip post-hoc (NTProofStr HMAC + MIC computed by Windows over the AV pairs; NT hash not exposed). This is why MSSQLHound Go requires explicit creds and has no integrated-auth mode. DECISION NEEDED from user on how SSPI should report the enforced case (Allowed indistinguishable from Required).
+
+**2026-07-02T20:19:41Z**
+
+MSSQL EPA network scan (clients/mssql_epa.py) live-validated 12/12 explicit-cred; SSPI Allowed/Required label rule confirmed. Closing.
