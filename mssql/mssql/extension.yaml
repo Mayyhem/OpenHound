@@ -1,0 +1,129 @@
+name: "mssql"
+version: 0.0.1
+description: "OpenHound collector for Microsoft SQL Server attack paths (MSSQLHound port)"
+authors:
+  - name: "Chris Thompson (@_Mayyhem)"
+    email: "cthompson@specterops.io"
+
+type: local
+license: MIT
+homepage: TBD
+references:
+  - name: OpenHound
+    url: TBD
+  - name: MSSQLHound
+    url: TBD
+
+credentials:
+  # ---- Authentication — SQL ----
+  - name: user
+    description: "SQL/Windows login (DOMAIN\\user for domain auth, or a SQL login name)."
+    required: false
+  - name: password
+    description: "Password for the SQL/Windows login. Mutually exclusive with nt_hash / kerberos_ticket."
+    required: false
+  - name: nt_hash
+    description: "NT hash for SQL pass-the-hash auth. Mutually exclusive with password / kerberos_ticket."
+    required: false
+  - name: kerberos_ticket
+    description: "Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for SQL pass-the-ticket. Mutually exclusive with password / nt_hash."
+    required: false
+  # ---- Authentication — LDAP/AD ----
+  - name: ldap_user
+    description: "LDAP/AD login for SPN discovery, SID resolution, and EPA testing. Falls back to the SQL login when domain-shaped and unset."
+    required: false
+  - name: ldap_password
+    description: "Password for the LDAP/AD login. Mutually exclusive with ldap_nt_hash / ldap_kerberos_ticket."
+    required: false
+  - name: ldap_nt_hash
+    description: "NT hash for LDAP/AD pass-the-hash auth. Mutually exclusive with ldap_password / ldap_kerberos_ticket."
+    required: false
+  - name: ldap_kerberos_ticket
+    description: "Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for LDAP/AD pass-the-ticket. Mutually exclusive with ldap_password / ldap_nt_hash."
+    required: false
+
+parameters:
+  # ---- Connection / Collection ----
+  - name: targets
+    description: "Target(s): [user:pass@]host | host:port | host\\instance | MSSQLSvc/host:port | comma-list | file path. Empty => SPN enumeration via LDAP."
+    required: false
+  - name: domain
+    description: "AD domain (e.g. mayyhem.com). Auto-detected from the current user context on Windows."
+    required: false
+  - name: dc
+    description: "Domain controller hostname or IP. Resolved from the domain via DNS SRV when omitted."
+    required: false
+  - name: dns_resolver
+    description: "DNS nameserver IP for all lookups. Omit to use the system default."
+    required: false
+  - name: proxy
+    description: "SOCKS5 proxy (socks5://[user:pass@]host:port) for all TCP connections."
+    required: false
+  # ---- Collection toggles ----
+  - name: scan_all_computers
+    description: "Enumerate every AD computer object and probe it for SQL Server."
+    required: false
+    default: false
+  - name: scan_all_computer_ports
+    description: "Comma-separated TCP ports to probe under scan_all_computers."
+    required: false
+    default: "1433"
+  - name: skip_private_address
+    description: "Skip targets that resolve to RFC1918 / private addresses."
+    required: false
+    default: false
+  - name: domain_enum_only
+    description: "Only enumerate SQL Servers via SPN discovery; do not connect or collect."
+    required: false
+    default: false
+  - name: skip_linked_servers
+    description: "Do not enumerate linked servers."
+    required: false
+    default: false
+  - name: collect_from_linked
+    description: "Enqueue discovered linked servers as new targets and collect from them."
+    required: false
+    default: false
+  - name: skip_ad_nodes
+    description: "Do not create AD (Computer/Group/User) nodes."
+    required: false
+    default: false
+  - name: disable_nontraversable_edges
+    description: "Omit non-traversable informational edges."
+    required: false
+    default: false
+  - name: disable_possible_edges
+    description: "Mark uncertain/possible edges non-traversable."
+    required: false
+    default: false
+  - name: skip_ip_dedupe
+    description: "Do not de-duplicate targets that resolve to the same IP."
+    required: false
+    default: false
+  # ---- Performance ----
+  - name: linked_timeout
+    description: "Per-target timeout (seconds) for linked-server enumeration."
+    required: false
+    default: 300
+  - name: port_check_timeout
+    description: "TCP port-reachability check timeout in seconds."
+    required: false
+    default: 2
+  - name: memory_threshold
+    description: "Pause spawning new workers above this memory-usage percentage."
+    required: false
+    default: 90
+  - name: workers
+    description: "Number of targets collected concurrently. 0 = sequential."
+    required: false
+    default: 0
+  # ---- Output ----
+  - name: temp_dir
+    description: "Directory for scratch/intermediate files. Defaults to the system temp dir."
+    required: false
+  - name: log_per_target
+    description: "Write a separate log file per target."
+    required: false
+    default: false
+
+tags: ["mssql", "extension", "opengraph", "bloodhound"]
