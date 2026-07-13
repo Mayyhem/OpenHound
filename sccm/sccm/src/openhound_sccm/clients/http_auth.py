@@ -27,7 +27,6 @@ import base64
 import datetime
 import enum
 import importlib
-import ipaddress
 import logging
 import struct
 import sys
@@ -67,7 +66,9 @@ from pyasn1.type.univ import noValue
 # use the single shared implementation instead of a local copy.
 from openhound_collector_common.clients.auth import (  # noqa: F401 (re-exported)
     EMPTY_LM_HASH,
+    choose_auth,
     format_hashes,
+    is_ip,
     split_user_domain,
 )
 
@@ -104,59 +105,15 @@ def _sspi_negotiate_available() -> bool:
 sspi_negotiate_available = _sspi_negotiate_available  # public alias
 
 
-def is_ip(host: str) -> bool:
-    """True when *host* is a bare IP literal (so no HTTP SPN can be formed)."""
-    try:
-        ipaddress.ip_address(host.strip().strip("[]"))
-        return True
-    except ValueError:
-        return False
-
-
 def http_spn(host: str) -> str:
     """The Kerberos service principal name for an HTTP/HTTPS endpoint."""
     return f"HTTP/{host}"
 
 
-# format_hashes, split_user_domain and EMPTY_LM_HASH now come from the shared
-# library (imported at the top of this module); the local copies were byte-identical.
-
-
-def choose_auth(
-    *,
-    username: Optional[str],
-    password: Optional[str],
-    nt_hash: Optional[str],
-    ticket: Optional[str],
-    target_host: str,
-    sspi_available: bool,
-) -> list[str]:
-    """Resolve the ordered auth rungs to attempt for a NEGOTIATE-mode request.
-
-    Precedence (explicit creds win, then current-user SSPI, then anonymous):
-      1. ticket                       -> ["kerberos"]            (no NTLM fallback)
-      2. username + (password|hash)   -> ["kerberos","ntlm"]    (kerberos skipped
-                                          when target is a bare IP -> ["ntlm"])
-      3. sspi_available               -> ["sspi"]
-      4. otherwise                    -> ["anonymous"]
-    """
-    if ticket:
-        logger.debug("HTTP auth: pass-the-ticket (Kerberos only) for %s", target_host)
-        return ["kerberos"]
-    if username and (password or nt_hash):
-        if is_ip(target_host):
-            logger.verbose(
-                "HTTP auth: %s is a bare IP; skipping Kerberos (no SPN), using NTLM only",
-                target_host,
-            )
-            return ["ntlm"]
-        logger.debug("HTTP auth: explicit creds -> Kerberos, NTLM fallback for %s", target_host)
-        return ["kerberos", "ntlm"]
-    if sspi_available:
-        logger.debug("HTTP auth: current-user SSPI Negotiate for %s", target_host)
-        return ["sspi"]
-    logger.verbose("HTTP auth: no creds and no SSPI; anonymous for %s", target_host)
-    return ["anonymous"]
+# EMPTY_LM_HASH, format_hashes, split_user_domain, is_ip and choose_auth all come
+# from the shared library (imported at the top of this module); the local copies
+# were equivalent. choose_auth is the shared credential-precedence ladder used by
+# both this HTTP client and the WMI client (clients/wmi.py).
 
 
 # --- SPNEGO helpers ---------------------------------------------------------

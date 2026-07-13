@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import datetime
 import importlib
+import ipaddress
 import logging
 import struct
 import sys
@@ -135,6 +136,59 @@ def split_hashes(nt_hash: Optional[str]) -> tuple[str, str]:
         return "", ""
     lm, nt = hashes.split(":")
     return lm, nt
+
+
+# --- auth-ladder selection ---------------------------------------------------
+
+
+def is_ip(host: str) -> bool:
+    """True when *host* is a bare IP literal (no Kerberos SPN can be formed for it)."""
+    try:
+        ipaddress.ip_address(host.strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def choose_auth(
+    *,
+    username: Optional[str],
+    password: Optional[str],
+    nt_hash: Optional[str],
+    ticket: Optional[str],
+    target_host: str,
+    sspi_available: bool,
+) -> list[str]:
+    """Resolve the ordered auth rungs to attempt against a target.
+
+    Shared credential-precedence ladder used by the HTTP (Negotiate) client and
+    the WMI client. Precedence (explicit creds win, then current-user SSPI, then
+    anonymous):
+
+      1. ticket                     -> ["kerberos"]         (no NTLM fallback)
+      2. username + (password|hash) -> ["kerberos","ntlm"]  (Kerberos skipped when
+                                        the target is a bare IP -> ["ntlm"], since
+                                        no SPN can be formed for an IP)
+      3. sspi_available             -> ["sspi"]
+      4. otherwise                  -> ["anonymous"]
+    """
+    if ticket:
+        logger.debug("auth ladder: pass-the-ticket (Kerberos only) for %s", target_host)
+        return ["kerberos"]
+    if username and (password or nt_hash):
+        if is_ip(target_host):
+            logger.verbose(
+                "auth ladder: %s is a bare IP; skipping Kerberos (no SPN), NTLM only",
+                target_host,
+            )
+            return ["ntlm"]
+        logger.debug("auth ladder: explicit creds -> Kerberos, NTLM fallback for %s", target_host)
+        return ["kerberos", "ntlm"]
+    if sspi_available:
+        logger.debug("auth ladder: current-user SSPI for %s", target_host)
+        return ["sspi"]
+    logger.verbose("auth ladder: no creds and no SSPI; anonymous for %s", target_host)
+    return ["anonymous"]
 
 
 # --- NTLM token minting ------------------------------------------------------
