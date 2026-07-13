@@ -16,6 +16,14 @@ logs
 dbt_packages
 .vscode
 
+# The unanchored `graph` above is meant for generated dlt/dbt output dirs, but it
+# also silently swallowed the shared library's SOURCE package of the same name,
+# blocking it from ever being committed (mssql + tests import it, so a clean clone
+# broke). Re-include the source package. Re-include the directory itself first, or
+# git won't descend into it.
+!openhound-collector-common/src/openhound_collector_common/graph/
+!openhound-collector-common/src/openhound_collector_common/graph/**
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
