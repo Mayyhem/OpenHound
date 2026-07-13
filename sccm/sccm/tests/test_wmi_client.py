@@ -7,6 +7,10 @@ the caller supplies the namespace and class; site-code identification lives in
 the privileged collector (see test_privileged.py).
 """
 from openhound_sccm.clients import wmi as w
+# Row normalization + the DCOM/pywin32 backends moved to the shared library
+# (SCCM's wmi now imports the backends from there), so test _normalize at its
+# new home. The WQL builder and the auth-ladder wrapper stay SCCM-local (w.*).
+from openhound_collector_common.clients import wmi as shared_wmi
 
 
 # --- WQL builder ----------------------------------------------------------
@@ -33,7 +37,7 @@ class _FakeObj:
 
 def test_normalize_flattens_scalar_values():
     props = {"SiteCode": {"value": "PS1"}, "BuildNumber": {"value": 9078}}
-    assert w._normalize(props) == {"SiteCode": "PS1", "BuildNumber": 9078}
+    assert shared_wmi._normalize(props) == {"SiteCode": "PS1", "BuildNumber": 9078}
 
 
 def test_normalize_unwraps_embedded_props_array():
@@ -43,7 +47,7 @@ def test_normalize_unwraps_embedded_props_array():
             _FakeObj({"PropertyName": {"value": "siteGUID"}, "Value1": {"value": "{G}"}}),
         ]},
     }
-    out = w._normalize(props)
+    out = shared_wmi._normalize(props)
     assert out["SiteCode"] == "PS1"
     assert out["Props"] == [{"PropertyName": "siteGUID", "Value1": "{G}"}]
 
