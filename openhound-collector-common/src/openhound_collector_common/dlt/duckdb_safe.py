@@ -28,7 +28,7 @@ from typing import Callable, Optional
 
 import duckdb
 
-logger = logging.getLogger(__name__)
+_LOG = logging.getLogger(__name__)
 
 # An expected-miss predicate: given the missing table name parsed from a DuckDB
 # CatalogException, return True if that miss is expected/benign (log at DEBUG)
@@ -43,6 +43,7 @@ def safe_execute(
     sql: str,
     *,
     expected_miss: Optional[ExpectedMiss] = None,
+    logger: Optional[logging.Logger] = None,
 ) -> None:
     """Run one SQL statement; log and continue if a source table is missing.
 
@@ -56,7 +57,12 @@ def safe_execute(
     this data under a sibling table name") without baking that knowledge in here.
     Any non-catalog DuckDB error is logged at ERROR (it indicates a real SQL bug,
     not a not-yet-collected source).
+
+    *logger*, if given, is used for all log records instead of this module's logger
+    — a consuming collector passes its own so the ``%(name)s`` field stays under its
+    namespace (log parity). Defaults to this module's log.
     """
+    log = logger or _LOG
     try:
         con.execute(sql)
     except duckdb.CatalogException as err:
@@ -72,16 +78,16 @@ def safe_execute(
                 # If the classifier itself hits a DB error, stay safe and warn.
                 downgrade = False
         if downgrade:
-            logger.debug(
+            log.debug(
                 "transform %r skipped (expected fallback miss on %r): %s",
                 label, match, err,
             )
         else:
             # A missing source table is expected before all sources have run.
-            logger.warning("transform %r skipped (missing source): %s", label, err)
+            log.warning("transform %r skipped (missing source): %s", label, err)
     except duckdb.Error as err:
         # Non-catalog error => a real SQL problem worth surfacing loudly.
-        logger.error("transform %r failed: %s", label, err)
+        log.error("transform %r failed: %s", label, err)
 
 
 def duckdb_missing_table_name(message: str) -> Optional[str]:
@@ -104,6 +110,8 @@ def ensure_columns(
     schema: str,
     table: str,
     coldefs: dict[str, str],
+    *,
+    logger: Optional[logging.Logger] = None,
 ) -> None:
     """Add any missing columns (typed, as NULL) so a coalesce SELECT always binds.
 
@@ -121,7 +129,11 @@ def ensure_columns(
     (``INSERT ... BY NAME`` ignores it); an already-present column keeps its real
     type (we only add when missing). No-op if the table doesn't exist — the
     following ``safe_execute`` INSERT logs that skip.
+
+    *logger*, if given, is used instead of this module's logger so a collector's
+    ``%(name)s`` log field stays under its namespace (log parity).
     """
+    log = logger or _LOG
     exists = con.execute(
         "SELECT 1 FROM information_schema.tables "
         "WHERE table_schema = ? AND table_name = ?",
@@ -129,7 +141,7 @@ def ensure_columns(
     ).fetchone()
     if not exists:
         # Missing table is handled (and logged) by the safe_execute INSERT after.
-        logger.debug("ensure_columns: table %s.%s absent; nothing to do", schema, table)
+        log.debug("ensure_columns: table %s.%s absent; nothing to do", schema, table)
         return
 
     have = {
@@ -146,7 +158,7 @@ def ensure_columns(
             continue
         # Column referenced by a coalesce SELECT but absent in this load — add as NULL.
         con.execute(f'ALTER TABLE {schema}.{table} ADD COLUMN "{col}" {sqltype}')
-        logger.debug("ensure_columns: added %s.%s.%s (%s)", schema, table, col, sqltype)
+        log.debug("ensure_columns: added %s.%s.%s (%s)", schema, table, col, sqltype)
 
 
 def arr_sql(col: str) -> str:

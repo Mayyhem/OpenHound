@@ -8,9 +8,10 @@ skipped (early stages won't have collected everything).
 """
 import logging
 import os
-import re
 
 import duckdb
+
+from openhound_collector_common.dlt.duckdb_safe import arr_sql, ensure_columns, safe_execute
 
 logger = logging.getLogger(__name__)
 
@@ -18,75 +19,45 @@ logger = logging.getLogger(__name__)
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
 
+def _sccm_sibling_miss(con: duckdb.DuckDBPyConnection, missing: str) -> bool:
+    """`expected_miss` predicate for the shared `safe_execute`.
+
+    WMI/AdminService fallback-mirror logic: the collector produces EITHER
+    wmi_<X> OR adminservice_<X> tables for each data type — whichever transport
+    was available. A missing wmi_<X> when adminservice_<X> exists (or vice versa)
+    is a normal, expected miss, so `safe_execute` downgrades its log from WARNING
+    to DEBUG. Any other missing table (no sibling) stays a WARNING.
+
+    The sibling lookup is schema-agnostic (matches on table_name across schemas);
+    under the collector's single `sccm` schema this is equivalent to the old
+    schema-scoped check.
+    """
+    if missing.startswith("wmi_"):
+        sibling = "adminservice_" + missing[len("wmi_"):]
+    elif missing.startswith("adminservice_"):
+        sibling = "wmi_" + missing[len("adminservice_"):]
+    else:
+        # No transport-mirror prefix: not a fallback miss, so keep it a WARNING.
+        return False
+    try:
+        found = con.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
+            [sibling],
+        ).fetchone()
+    except duckdb.Error:
+        # Can't query the catalog — stay safe and treat as a real miss (WARNING).
+        return False
+    return found is not None
+
+
 def _safe(con: duckdb.DuckDBPyConnection, label: str, sql: str) -> None:
     """Run one SQL statement; log and continue if a source table is missing.
 
-    WMI/AdminService fallback-mirror logic: the collector produces EITHER
-    wmi_<X> OR adminservice_<X> tables for each data type — whichever
-    transport was available. A CatalogException for wmi_<X> when
-    adminservice_<X> exists (or vice versa) is a normal, expected miss;
-    we log it at DEBUG to keep the log clean during routine operation.
-    Any other missing-table error still logs at WARNING.
+    Thin wrapper over the shared `safe_execute` engine, injecting SCCM's
+    wmi/adminservice sibling-miss downgrade (`_sccm_sibling_miss`) and this
+    module's logger so log records stay under `openhound_sccm.transforms`.
     """
-    try:
-        con.execute(sql)
-    except duckdb.CatalogException as err:
-        # Parse the missing table name from the DuckDB error message.
-        # Example: "Catalog Error: Table with name wmi_r_system does not exist!"
-        _match = re.search(r'with name "?([A-Za-z0-9_]+)"?', str(err))
-        _missing = _match.group(1) if _match else None
-
-        _log_as_debug = False
-        if _missing:
-            # Determine the sibling table name by swapping the wmi_/adminservice_ prefix.
-            if _missing.startswith("wmi_"):
-                _sibling = "adminservice_" + _missing[len("wmi_"):]
-            elif _missing.startswith("adminservice_"):
-                _sibling = "wmi_" + _missing[len("adminservice_"):]
-            else:
-                _sibling = None
-
-            if _sibling:
-                try:
-                    # Extract the schema from the failing sql (e.g. 'schema.missing_table').
-                    _schema_match = re.search(
-                        rf'([A-Za-z0-9_]+)\.{re.escape(_missing)}',
-                        sql,
-                    )
-                    _schema = _schema_match.group(1) if _schema_match else None
-
-                    if _schema:
-                        # Check sibling in the same schema.
-                        _found = con.execute(
-                            "SELECT 1 FROM information_schema.tables "
-                            "WHERE table_schema = ? AND table_name = ?",
-                            [_schema, _sibling],
-                        ).fetchone()
-                    else:
-                        # Schema extraction failed; fall back to schema-agnostic query.
-                        _found = con.execute(
-                            "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
-                            [_sibling],
-                        ).fetchone()
-
-                    if _found:
-                        # The sibling (other transport) table exists; this is an expected
-                        # fallback miss — no need to warn.
-                        _log_as_debug = True
-                except duckdb.Error:
-                    # Unable to query information_schema; default to WARNING (safe).
-                    pass
-
-        if _log_as_debug:
-            logger.debug(
-                "transform %r skipped (expected fallback miss — sibling table present): %s",
-                label, err,
-            )
-        else:
-            # A missing source table is expected when not all collectors have run.
-            logger.warning("transform %r skipped (missing source): %s", label, err)
-    except duckdb.Error as err:
-        logger.error("transform %r failed: %s", label, err)
+    safe_execute(con, label, sql, expected_miss=_sccm_sibling_miss, logger=logger)
 
 
 def _ensure_columns(
@@ -97,45 +68,22 @@ def _ensure_columns(
 ) -> None:
     """Add any missing columns (as NULL, typed) so a coalesce SELECT always binds.
 
-    A coalesce SELECT references source columns inside expressions
-    (e.g. ``_arr('sccm_site_system_roles')``, ``coalesce(sccm_infra, false)``).
-    ``INSERT ... BY NAME`` only maps the *output* aliases, so every referenced
-    source column must physically exist or the whole SELECT fails to compile and
-    ``_safe`` drops the source. Two real-data reasons a column goes missing:
-
-      * the source never emits it (e.g. ldap_cmrc_devices has no roles column), or
-      * dlt drops a column that is all-NULL across the load.
-
-    We pre-create the union of optional columns each coalesce references so the
-    SELECTs bind regardless. Adding a column the SELECT doesn't read is harmless
-    (``INSERT ... BY NAME`` ignores it); an already-present column keeps its real
-    type (we only add when missing). No-op if the table doesn't exist — the
-    following ``_safe`` INSERT logs that skip.
+    Thin wrapper over the shared `ensure_columns`, passing this module's logger so
+    its DEBUG records stay under `openhound_sccm.transforms`. Why it's needed: a
+    coalesce SELECT references source columns inside expressions
+    (e.g. ``_arr('sccm_site_system_roles')``, ``coalesce(sccm_infra, false)``);
+    ``INSERT ... BY NAME`` only maps *output* aliases, so every referenced source
+    column must physically exist or the whole SELECT fails to compile and ``_safe``
+    drops the source. Columns go missing when the source never emits them (e.g.
+    ldap_cmrc_devices has no roles column) or dlt drops an all-NULL column.
     """
-    exists = con.execute(
-        "SELECT 1 FROM information_schema.tables "
-        "WHERE table_schema = ? AND table_name = ?",
-        [schema, table],
-    ).fetchone()
-    if not exists:
-        # Missing table is handled (and logged) by the _safe INSERT that follows.
-        logger.debug("ensure_columns: table %s.%s absent; nothing to do", schema, table)
-        return
+    ensure_columns(con, schema, table, coldefs, logger=logger)
 
-    have = {
-        row[0]
-        for row in con.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ?",
-            [schema, table],
-        ).fetchall()
-    }
-    for col, sqltype in coldefs.items():
-        if col in have:
-            continue
-        # Column referenced by a coalesce SELECT but absent in this load — add as NULL.
-        con.execute(f'ALTER TABLE {schema}.{table} ADD COLUMN "{col}" {sqltype}')
-        logger.debug("ensure_columns: added %s.%s.%s (%s)", schema, table, col, sqltype)
+
+# SCCM's former _arr was byte-identical to the shared arr_sql (normalize a
+# list-shaped column to VARCHAR[] whatever physical shape dlt produced). Pure SQL
+# string builder, no logging — alias directly.
+_arr = arr_sql
 
 
 def _principal_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -267,41 +215,6 @@ def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"SELECT site_code, parent_site_code, site_type, ? AS root_site_code "
         f"FROM {schema}.site_hierarchy",
         [root_code],
-    )
-
-
-def _arr(col: str) -> str:
-    """Return SQL that normalises a role column to VARCHAR[], whatever its shape.
-
-    Across the collectors the same logical role list arrives in *four* physical
-    shapes, so the result is always VARCHAR[] for uniform aggregation:
-
-      * NULL                                   -> ``[]``
-      * a VARCHAR holding JSON-array TEXT       -> parsed JSON elements
-        (e.g. ``'["SMS Site Server@CAS","SMS Distribution Point@CAS"]'`` from the
-        smb / remoteregistry collectors, which stringify a Python list)
-      * a plain/comma-joined VARCHAR scalar     -> ``string_split(.,',')``
-        (e.g. ``'SMS Management Point@PS1'`` from site_definitions_computers/http)
-      * a native JSON array or VARCHAR[] list   -> ``CAST(. AS VARCHAR[])``
-        (e.g. ``system_roles`` which dlt types as JSON)
-
-    The JSON branch is gated on a leading ``[`` (after trimming) so only true
-    array text takes it; ``TRY_CAST`` + ``coalesce`` mean malformed JSON degrades
-    to ``[]`` rather than failing the whole INSERT. DuckDB's ``typeof()`` returns
-    'VARCHAR' for scalars/JSON-text and 'JSON'/'VARCHAR[]' for the native shapes.
-    """
-    as_varchar = f"CAST({col} AS VARCHAR)"
-    return (
-        f"CASE "
-        f"WHEN {col} IS NULL THEN CAST([] AS VARCHAR[]) "
-        # VARCHAR that *contains* JSON-array text: parse it, not comma-split it.
-        f"WHEN typeof({col}) = 'VARCHAR' AND ltrim({as_varchar}) LIKE '[%' "
-        f"  THEN coalesce(CAST(TRY_CAST({as_varchar} AS JSON) AS VARCHAR[]), CAST([] AS VARCHAR[])) "
-        # Plain/comma-joined VARCHAR scalar.
-        f"WHEN typeof({col}) = 'VARCHAR' THEN string_split({as_varchar}, ',') "
-        # Native JSON array or VARCHAR[] list.
-        f"ELSE CAST({col} AS VARCHAR[]) "
-        f"END"
     )
 
 
