@@ -87,3 +87,11 @@ enable_error_code = ["possibly-undefined"]
 [[tool.mypy.overrides]]
 module = ["win32com.*"]
 ignore_missing_imports = true
+
+# The shared library ships no py.typed marker yet (adding one would make mypy
+# type-check its API against both extensions' usage — a separate hygiene task with
+# its own validation). Until then, treat its imports as untyped so SCCM's mypy
+# doesn't accrue an import-untyped note for every shared module adopted per phase.
+[[tool.mypy.overrides]]
+module = ["openhound_collector_common.*"]
+ignore_missing_imports = true

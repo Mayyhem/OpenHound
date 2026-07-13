@@ -37,26 +37,12 @@ import sys
 import threading
 from typing import Any, Callable, Iterator, List, Optional, TypeVar
 
-
-# ---------------------------------------------------------------------------
-# VERBOSE log level — sits between INFO (20) and DEBUG (10) so ``-vv``
-# can surface PS1's ``[Verbose]`` tier without the noise of DLT / ldap3
-# internals that ``--debug`` brings in. Importing this module installs the
-# level globally and adds ``Logger.verbose()`` so collector code reads as
-# ``logger.verbose(...)`` rather than ``logger.log(VERBOSE, ...)``.
-# ---------------------------------------------------------------------------
-VERBOSE = 15
-logging.addLevelName(VERBOSE, "VERBOSE")
-
-
-def _verbose(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None:
-    """``logger.verbose(...)`` shortcut for the VERBOSE level."""
-    if self.isEnabledFor(VERBOSE):
-        self._log(VERBOSE, message, args, **kwargs)
-
-
-if not hasattr(logging.Logger, "verbose"):
-    logging.Logger.verbose = _verbose  # type: ignore[attr-defined]
+# The VERBOSE level (15, between INFO and DEBUG) + the ``logger.verbose()`` shortcut
+# live in the shared library so SCCM and MSSQL share one definition. Importing it
+# runs the ``addLevelName`` + ``Logger.verbose`` monkeypatch as a side effect. It's
+# re-exported (see ``__all__``) so the many ``from openhound_sccm.log_context import
+# VERBOSE`` call sites keep working unchanged.
+from openhound_collector_common.logging.log_context import VERBOSE
 
 
 class VerboseLogger(logging.Logger):

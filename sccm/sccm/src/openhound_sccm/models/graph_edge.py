@@ -7,13 +7,19 @@ between two graph nodes. This model reads those rows and emits an Edge whose
 kinds additionally carry coercion-context lists (SCCMRelayEdgeProperties); every
 other kind uses the lean base SCCMEdgeProperties. It never produces a node
 (as_node returns None) because graph_edges rows are pure edge data.
+
+Subclasses the shared `openhound_collector_common.graph.graph_edge.GraphEdge` (the
+same base the MSSQL extension uses): the base contributes the row fields
+(start_id/end_id/kind/collection_source), the id-matched-endpoint contract, and
+`as_node = None`. This subclass sets SCCM's traversable allow-list, adds the
+relay-only coercion columns, and overrides `edges` to emit SCCM's richer,
+CMBP-cased edge properties.
 """
 import logging
 from typing import Iterator
 
-from openhound.core.asset import BaseAsset
 from openhound.core.models.entries_dataclass import Edge, EdgePath
-from pydantic import ConfigDict
+from openhound_collector_common.graph.graph_edge import GraphEdge as _BaseGraphEdge
 
 from ..graph import SCCMEdgeProperties, SCCMRelayEdgeProperties
 from ..kinds.edges import (
@@ -33,23 +39,23 @@ _RELAY_KINDS = frozenset({
 })
 
 
-class GraphEdge(BaseAsset):
+class GraphEdge(_BaseGraphEdge):
     """One graph_edges row -> one OpenGraph edge of any kind. Endpoints matched by id;
-    `traversable` is set from the CMBP allow-list. Never produces a node."""
+    `traversable` is set from the CMBP allow-list. Never produces a node.
 
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+    Inherits start_id/end_id/kind/collection_source, the model config, and `as_node`
+    (None) from the shared base; adds the relay-only coercion columns and overrides
+    `edges` to emit SCCM's SCCMEdgeProperties / SCCMRelayEdgeProperties.
+    """
 
-    start_id: str | None = None
-    end_id: str | None = None
-    kind: str | None = None
-    collection_source: list[str] | None = None
+    # SCCM's traversable-edge allow-list. This is the same ClassVar the shared base
+    # reads; we compute `traversable` from it below because SCCM emits richer,
+    # kind-dependent property types rather than the base's generic properties.
+    traversable_kinds = TRAVERSABLE_EDGE_KINDS
+
+    # Relay edges carry coerce-and-relay context columns the base doesn't declare.
     coercion_victim_and_relay_target_pairs: list[str] | None = None
     coercion_victim_hostnames: list[str] | None = None
-
-    @property
-    def as_node(self) -> None:
-        """Graph edges never produce a node."""
-        return None
 
     @property
     def edges(self) -> Iterator[Edge]:
@@ -64,7 +70,7 @@ class GraphEdge(BaseAsset):
                 self.start_id, self.end_id, self.kind,
             )
             return
-        traversable = self.kind in TRAVERSABLE_EDGE_KINDS
+        traversable = self.kind in self.traversable_kinds
         if self.kind in _RELAY_KINDS:
             # Relay edges carry the operator-facing coercion context (CMBP).
             properties = SCCMRelayEdgeProperties(
