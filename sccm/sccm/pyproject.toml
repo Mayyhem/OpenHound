@@ -8,6 +8,13 @@ authors = [
   {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
 ]
 dependencies = [
+    # Shared pure-Python collector infrastructure (TDS/NTLM/Kerberos/EPA, LDAP/AD,
+    # WMI, DNS discovery, duckdb-safe, DLT source bridge, logging, graph base).
+    # Carries impacket/ldap3/dnspython/pywin32/winkerberos/cryptography transitively
+    # (see ../../openhound-collector-common). SCCM migrates onto it module-by-module
+    # per docs/superpowers/specs/2026-07-02-sccm-shared-lib-migration-design.md; the
+    # direct deps below are pruned as each SCCM module stops importing them directly.
+    "openhound-collector-common",
     # LDAP client used by the LDAP collection phase (clients/ad.py).
     # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
     # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
@@ -38,6 +45,12 @@ dependencies = [
     # the site server. No stdlib X.509 parser exists; cryptography is the standard.
     "cryptography>=42.0.0",
 ]
+
+[tool.uv.sources]
+# Editable local path dep: SCCM and MSSQL share one live copy of the library in a
+# single checkout. The library is a read-only contract to extension work — changes
+# to it are a separate, user-gated shared-lib task (see the migration spec).
+openhound-collector-common = { path = "../../openhound-collector-common", editable = true }
 
 [tool.uv]
 # Prefer system / official Pythons over uv-managed (python-build-standalone) on
