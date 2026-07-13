@@ -378,7 +378,7 @@ class AdClient:
             return self._conn
 
         attempts = self._build_attempt_plan()
-        host = self._bind_host(attempts)
+        attempts, host = self._prepare_attempts_and_host(attempts)
         self._log_credential_summary(attempts)
 
         last_exc: Optional[BaseException] = None
@@ -533,28 +533,59 @@ class AdClient:
                 attempts.append(ldap_plain(mode, 389))
         return attempts
 
-    def _bind_host(self, attempts: list[_BindAttempt]) -> str:
-        """Resolve which host string to dial, reverse-resolving an IP DC when a
-        Kerberos profile needs a hostname to build the LDAP SPN."""
+    def _prepare_attempts_and_host(
+        self, attempts: list[_BindAttempt]
+    ) -> tuple[list[_BindAttempt], str]:
+        """Resolve the host to dial and apply the IP-DC Kerberos fallback.
+
+        Kerberos needs a DC *hostname* to build the ``ldap/<dc>`` SPN; an IP DC
+        can't (``InitializeSecurityContext`` fails "target unknown"). So when a
+        Kerberos profile targets an IP DC:
+
+        1. reverse-DNS the IP and use the hostname if one is found;
+        2. else, if current-user SSPI-NTLM is available, **drop the Kerberos
+           profiles** and bind via SSPI-NTLM (which needs no SPN);
+        3. else warn and try Kerberos anyway (it will most likely fail, but the
+           error is clearer than silently doing nothing).
+
+        Ported from the SCCM collector (generalized: no collector-specific CLI /
+        env-var names in the messages) so both collectors get the same fallback.
+        """
         host = self.dc or self.domain
         modes = {a.auth_mode for a in attempts}
         if "kerberos" not in modes or not _is_ip_address(self.dc):
-            return host
-        rdns = _reverse_dns_hostname(self.dc)
-        if rdns:
+            return attempts, host
+
+        rdns_hostname = _reverse_dns_hostname(self.dc)
+        if rdns_hostname:
             logger.info(
-                "LDAP auth: reverse DNS resolved Kerberos DC IP %s to %s for SPN construction",
-                self.dc, rdns,
+                "LDAP auth: reverse DNS resolved Kerberos DC IP '%s' to '%s'; "
+                "using that hostname to build the LDAP service principal name.",
+                self.dc, rdns_hostname,
             )
-            return rdns
-        # Couldn't get a hostname — Kerberos/SPN will likely fail; warn but try.
+            return attempts, rdns_hostname
+
+        if "sspi_ntlm" in modes:
+            attempts = [a for a in attempts if a.auth_mode != "kerberos"]
+            logger.info(
+                "LDAP auth: DC '%s' is an IP address and reverse DNS did not "
+                "return a hostname; skipping Kerberos and using current-user "
+                "NTLM via Windows SSPI.",
+                self.dc,
+            )
+            return attempts, host
+
         logger.warning(
-            "LDAP auth: --dc %s is an IP and reverse DNS returned no hostname; "
-            "Kerberos SPN construction may fail. Use a DC FQDN, or supply "
-            "explicit credentials to force NTLM.",
+            "LDAP auth: integrated Kerberos is using domain controller '%s', "
+            "which is an IP address, and reverse DNS did not return a hostname. "
+            "Kerberos/SSPI needs a DC hostname to build the LDAP service "
+            "principal name (ldap/<dc-host>); IP addresses commonly fail with "
+            "`InitializeSecurityContext: The specified target is unknown or "
+            "unreachable`. Supply the DC by hostname (FQDN or NetBIOS name), or "
+            "supply explicit credentials to force NTLM.",
             self.dc,
         )
-        return host
+        return attempts, host
 
     def _log_credential_summary(self, attempts: list[_BindAttempt]) -> None:
         modes = {a.auth_mode for a in attempts}
@@ -768,6 +799,7 @@ class AdClient:
         scope: str = SUBTREE,
         size_limit: int = 0,
         paged_size: int = 1000,
+        controls: Optional[list[str]] = None,
     ) -> Iterable[dict[str, Any]]:
         """Yield each matching entry as a dict {attr: value}, decoding SIDs/GUIDs.
 
@@ -791,6 +823,7 @@ class AdClient:
                     paged_size=paged_size,
                     paged_cookie=cookie,
                     size_limit=size_limit,
+                    controls=controls,
                 )
                 result = conn.result or {}
                 desc = result.get("description")

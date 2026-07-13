@@ -14,6 +14,9 @@ Two independent fixes are covered here:
      back as a clean empty result rather than crashing.
 """
 from openhound_sccm.clients import ad
+# _open_connection / Connection / _BindAttempt now live in the shared library
+# (SCCM's ADClient is a thin subclass), so patch/reference them there.
+from openhound_collector_common.clients import ad as shared_ad
 from openhound_sccm.context import SourceContext
 
 
@@ -58,10 +61,10 @@ def test_open_connection_disables_auto_referrals(monkeypatch):
         def __init__(self, server, **kwargs):
             captured.update(kwargs)
 
-    monkeypatch.setattr(ad, "Connection", _FakeConnection)
+    monkeypatch.setattr(shared_ad, "Connection", _FakeConnection)
 
     client = ad.ADClient(ad.ADCredentials(domain="mayyhem.com"))
-    attempt = ad._BindAttempt(
+    attempt = shared_ad._BindAttempt(
         label="ldaps",
         use_ssl=True,
         port=636,

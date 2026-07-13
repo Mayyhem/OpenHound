@@ -2,6 +2,12 @@ import logging
 import socket
 
 from openhound_sccm.clients import ad
+# The lockout-safe bind waterfall + IP-DC Kerberos fallback now live in the
+# shared library (SCCM's ADClient is a thin subclass). The availability flags,
+# the socket used for reverse DNS, and the logger are all in the shared module,
+# so patch/observe THERE — but still build SCCM's ADClient so this exercises the
+# subclass + shared integration end-to-end.
+from openhound_collector_common.clients import ad as shared_ad
 
 
 def _client(domain_controller: str, password: str | None = None) -> ad.ADClient:
@@ -43,11 +49,11 @@ def _unexpected_reverse_dns(ip: str):
 def test_uses_reverse_dns_when_integrated_kerberos_gets_ip_domain_controller(
     caplog, monkeypatch
 ):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", True)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
-    caplog.set_level(logging.WARNING, logger=ad.__name__)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
+    caplog.set_level(logging.WARNING, logger=shared_ad.__name__)
     monkeypatch.setattr(
-        ad.socket,
+        shared_ad.socket,
         "gethostbyaddr",
         lambda ip: ("dc01.mayyhem.com.", [], [ip]),
     )
@@ -59,10 +65,10 @@ def test_uses_reverse_dns_when_integrated_kerberos_gets_ip_domain_controller(
 
 
 def test_uses_current_user_ntlm_fallback_when_reverse_dns_fails(caplog, monkeypatch):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", True)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
-    monkeypatch.setattr(ad.socket, "gethostbyaddr", _missing_reverse_dns)
-    caplog.set_level(logging.INFO, logger=ad.__name__)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad.socket, "gethostbyaddr", _missing_reverse_dns)
+    caplog.set_level(logging.INFO, logger=shared_ad.__name__)
 
     host = _bind_host("10.2.10.100")
 
@@ -77,10 +83,10 @@ def test_uses_current_user_ntlm_fallback_when_reverse_dns_fails(caplog, monkeypa
 def test_warns_when_integrated_kerberos_ip_domain_controller_has_no_reverse_dns(
     caplog, monkeypatch
 ):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", True)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", False)
-    monkeypatch.setattr(ad.socket, "gethostbyaddr", _missing_reverse_dns)
-    caplog.set_level(logging.WARNING, logger=ad.__name__)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", False)
+    monkeypatch.setattr(shared_ad.socket, "gethostbyaddr", _missing_reverse_dns)
+    caplog.set_level(logging.WARNING, logger=shared_ad.__name__)
 
     host = _bind_host("10.2.10.100")
 
@@ -90,18 +96,17 @@ def test_warns_when_integrated_kerberos_ip_domain_controller_has_no_reverse_dns(
     assert "integrated Kerberos is using domain controller '10.2.10.100'" in message
     assert "IP address" in message
     assert "reverse DNS did not return a hostname" in message
-    assert "omitting --dc" in message
-    assert "DC FQDN or NetBIOS/NBNS name" in message
-    assert "SOURCES__SCCM__PASSWORD to force NTLM" in message
+    assert "hostname (FQDN or NetBIOS name)" in message
+    assert "explicit credentials to force NTLM" in message
 
 
 def test_does_not_warn_when_integrated_kerberos_uses_hostname_domain_controller(
     caplog, monkeypatch
 ):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", True)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
-    monkeypatch.setattr(ad.socket, "gethostbyaddr", _unexpected_reverse_dns)
-    caplog.set_level(logging.WARNING, logger=ad.__name__)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad.socket, "gethostbyaddr", _unexpected_reverse_dns)
+    caplog.set_level(logging.WARNING, logger=shared_ad.__name__)
 
     host = _bind_host("dc01.mayyhem.com")
 
@@ -110,10 +115,10 @@ def test_does_not_warn_when_integrated_kerberos_uses_hostname_domain_controller(
 
 
 def test_does_not_warn_when_ntlm_uses_ip_domain_controller(caplog, monkeypatch):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", True)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
-    monkeypatch.setattr(ad.socket, "gethostbyaddr", _unexpected_reverse_dns)
-    caplog.set_level(logging.WARNING, logger=ad.__name__)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad.socket, "gethostbyaddr", _unexpected_reverse_dns)
+    caplog.set_level(logging.WARNING, logger=shared_ad.__name__)
 
     host = _bind_host("10.2.10.100", password="not-secret")
 
@@ -122,8 +127,8 @@ def test_does_not_warn_when_ntlm_uses_ip_domain_controller(caplog, monkeypatch):
 
 
 def test_uses_current_user_ntlm_when_kerberos_backend_is_unavailable(monkeypatch):
-    monkeypatch.setattr(ad, "_INTEGRATED_AUTH_AVAILABLE", False)
-    monkeypatch.setattr(ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
+    monkeypatch.setattr(shared_ad, "_INTEGRATED_AUTH_AVAILABLE", False)
+    monkeypatch.setattr(shared_ad, "_CURRENT_USER_NTLM_AVAILABLE", True)
 
     modes = _attempt_modes("10.2.10.100")
 
