@@ -60,11 +60,18 @@ from impacket.spnego import (
 from pyasn1.codec.der import decoder, encoder
 from pyasn1.type.univ import noValue
 
-logger = logging.getLogger(__name__)
+# EMPTY_LM_HASH / format_hashes / split_user_domain are byte-identical to the
+# shared library's originals (the shared clients/auth.py was generalized from this
+# very module). Import them here so this module's callers — http.py, wmi.py and
+# smb_sso.py all import format_hashes/split_user_domain from here — transparently
+# use the single shared implementation instead of a local copy.
+from openhound_collector_common.clients.auth import (  # noqa: F401 (re-exported)
+    EMPTY_LM_HASH,
+    format_hashes,
+    split_user_domain,
+)
 
-# The conventional empty LM hash, prepended to a bare NT hash so impacket
-# receives the LMHASH:NTHASH form it expects (identical to mssql_epa.py).
-EMPTY_LM_HASH = "aad3b435b51404eeaad3b435b51404ee"
+logger = logging.getLogger(__name__)
 
 # GSS checksum flags for the explicit-Kerberos authenticator. Matches impacket's
 # getKerberosType1 set MINUS GSS_C_DCE_STYLE (and GSS_C_CONF, unnecessary here):
@@ -111,24 +118,8 @@ def http_spn(host: str) -> str:
     return f"HTTP/{host}"
 
 
-def format_hashes(nt_hash: Optional[str]) -> Optional[str]:
-    """Normalize an NT hash to impacket's LMHASH:NTHASH form (or None)."""
-    if not nt_hash:
-        return None
-    if ":" in nt_hash:
-        return nt_hash
-    return f"{EMPTY_LM_HASH}:{nt_hash}"
-
-
-def split_user_domain(username: str, default_domain: str) -> tuple[str, str]:
-    """Split ``DOMAIN\\user`` or ``user@domain`` into ``(domain, user)``."""
-    if "\\" in username:
-        domain, user = username.split("\\", 1)
-        return domain, user
-    if "@" in username:
-        user, domain = username.split("@", 1)
-        return domain, user
-    return default_domain, username
+# format_hashes, split_user_domain and EMPTY_LM_HASH now come from the shared
+# library (imported at the top of this module); the local copies were byte-identical.
 
 
 def choose_auth(
