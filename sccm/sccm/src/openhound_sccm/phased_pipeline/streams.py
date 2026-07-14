@@ -9,36 +9,19 @@ rows are produced.
 ``DONE`` is a single shared sentinel value. A consumer reads rows until it gets
 ``DONE``, then stops. :func:`broadcast_done` places that marker on every stream
 once collection has reached quiescence.
+
+These three primitives come from ``openhound_collector_common.dlt.source_bridge``
+— the shared bridge was generalized from this module, so the implementations are
+identical. Re-exporting them (rather than keeping a byte-for-byte copy) means the
+engine, SCCM's ``source.py`` emit resources, and the shared :class:`StreamBridge`
+all share the SAME ``DONE`` instance: the marker is identity-compared
+(``item is DONE``), so a single shared object is required for producer and
+consumer to agree. This is the integration the shared bridge's docstring
+anticipated; the engine's dependency on the shared infra is deliberate (its
+portability test permits ``openhound_collector_common``).
 """
 from __future__ import annotations
 
-import queue
-from typing import Iterable
+from openhound_collector_common.dlt.source_bridge import DONE, broadcast_done, build_streams
 
-
-class _Done:
-    """Type of the unique :data:`DONE` end-of-stream marker."""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:  # pragma: no cover - cosmetic
-        return "<DONE>"
-
-
-# The one shared "no more rows are coming" marker. Compare with ``is DONE``.
-DONE = _Done()
-
-
-def build_streams(names: Iterable[str], maxsize: int) -> dict[str, queue.Queue]:
-    """Return a dict mapping each name to a fresh bounded queue of length *maxsize*."""
-    return {name: queue.Queue(maxsize=maxsize) for name in names}
-
-
-def broadcast_done(streams: dict[str, queue.Queue]) -> None:
-    """Put the shared :data:`DONE` marker on every stream.
-
-    Uses a blocking ``put`` so delivery is guaranteed even if a stream is
-    momentarily full; every consumer will eventually drain to the marker.
-    """
-    for stream in streams.values():
-        stream.put(DONE)
+__all__ = ["DONE", "build_streams", "broadcast_done"]

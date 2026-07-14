@@ -1,16 +1,15 @@
 import logging
 import pathlib
-import queue as _queue
 from collections.abc import Iterable
 
 import dlt
+from openhound_collector_common.dlt.source_bridge import StreamBridge
 
 from .clients.ad import ADClient, ADCredentials
 from .context import SourceContext
 from .main import app
 from .models.raw_table import raw_table_asset
 from .per_host_phases import PER_HOST_PHASES, all_table_names
-from .phased_pipeline.streams import DONE
 
 from .collectors.ldap import (
     ldap_management_points_raw,
@@ -118,47 +117,53 @@ DISCOVERY_RESOURCE_NAMES: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Per-table stream registry. The per-host engine (run by collect_sccm on a
-# background thread) pushes rows onto these bounded queues; the emit resources
-# below drain them. collect_sccm installs the mapping via set_table_queues()
-# just before running the emit pass, mirroring the _shared_* pattern above.
+# Per-run stream bridge. The per-host engine (run by collect_sccm on a
+# background thread) pushes rows onto the bridge's bounded per-table queues; the
+# emit resources below drain them. collect_sccm creates the bridge and plants it
+# via set_bridge() just before running the emit pass, mirroring the _shared_*
+# pattern above.
+#
+# The bridge is the shared openhound-collector-common StreamBridge: it owns the
+# queues, the blocking drain, and the DONE handling, so every OpenHound collector
+# shares one push->pull implementation. SCCM keeps only the app-registration glue
+# (_make_emit_resource / _EMIT_RESOURCES) because its emit resources must be
+# registered on ``app`` at import time (a conformance guard checks
+# ``app.dlt_resources``) — earlier than any run-scoped bridge can exist. So the
+# bridge is planted late and the drain below simply delegates to it.
 # ---------------------------------------------------------------------------
-_table_queues: dict[str, _queue.Queue] | None = None
+_bridge: StreamBridge | None = None
 
 
-def set_table_queues(mapping: dict[str, _queue.Queue]) -> None:
-    """Plant the per-table stream mapping the emit resources will drain."""
-    global _table_queues
-    _table_queues = mapping
+def set_bridge(bridge: StreamBridge) -> None:
+    """Plant the stream bridge whose queues the emit resources will drain."""
+    global _bridge
+    _bridge = bridge
 
 
-def get_table_queues() -> dict[str, _queue.Queue] | None:
-    """Return the currently-installed per-table stream mapping (or None)."""
-    return _table_queues
+def get_bridge() -> StreamBridge | None:
+    """Return the currently-installed stream bridge (or None between runs)."""
+    return _bridge
 
 
-def clear_table_queues() -> None:
-    """Forget the per-table stream mapping after the emit pass finishes."""
-    global _table_queues
-    _table_queues = None
+def clear_bridge() -> None:
+    """Forget the stream bridge after the emit pass finishes."""
+    global _bridge
+    _bridge = None
 
 
 def _drain_stream(table_name: str):
-    """Yield rows from one per-table stream until the shared DONE marker.
+    """Yield rows from one per-table queue until quiescence.
 
-    Used by the emit resources. A blocking get() means an empty stream is a
-    *wait*, not an end — the resource stops only on DONE, which is broadcast to
-    every stream once per-host collection reaches quiescence.
+    Delegates to the planted StreamBridge, whose drain does a *blocking* get (an
+    empty queue is a wait, not an end — the resource stops only on the DONE
+    marker the engine broadcasts once per-host collection reaches quiescence).
+    Returns immediately when no bridge is planted, so the emit resources declared
+    on ``app`` at import time are safe no-ops outside a per-host run.
     """
-    streams = get_table_queues()
-    if streams is None:
+    bridge = get_bridge()
+    if bridge is None:
         return
-    stream = streams[table_name]
-    while True:
-        item = stream.get()
-        if item is DONE:
-            return
-        yield item
+    yield from bridge.drain_stream(table_name)
 
 
 def _make_emit_resource(table_name: str):

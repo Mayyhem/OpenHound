@@ -1,6 +1,6 @@
 """Tests for the SCCM wiring: per-table emit resources and the context feeding
 the work queue (with the allow-list preserved upstream of submit)."""
-import queue
+from openhound_collector_common.dlt.source_bridge import StreamBridge
 
 from openhound_sccm import source as source_mod
 from openhound_sccm.context import SourceContext
@@ -37,15 +37,17 @@ def test_one_emit_resource_registered_per_table_and_no_broken_cycle():
 
 
 def test_drain_stream_yields_rows_until_done():
-    q = queue.Queue()
-    q.put({"r": 1})
-    q.put({"r": 2})
-    q.put(DONE)
-    source_mod.set_table_queues({"some_table": q})
+    # source._drain_stream now delegates to a planted StreamBridge, so drive it
+    # through one: push rows + the DONE marker onto the bridge's own queue.
+    bridge = StreamBridge(["some_table"])
+    bridge.streams["some_table"].put({"r": 1})
+    bridge.streams["some_table"].put({"r": 2})
+    bridge.streams["some_table"].put(DONE)
+    source_mod.set_bridge(bridge)
     try:
         assert list(source_mod._drain_stream("some_table")) == [{"r": 1}, {"r": 2}]
     finally:
-        source_mod.clear_table_queues()
+        source_mod.clear_bridge()
 
 
 # ---- context feeds the work queue (allow-list preserved) ------------------

@@ -238,12 +238,21 @@ def test_pipeline_calls_on_target_complete_once_per_target():
 
 
 def test_engine_source_imports_nothing_project_specific():
-    """The engine must stay portable: no SCCM/AD/DLT imports in its modules."""
+    """The engine stays free of the dlt library, ldap3, the openhound framework,
+    and the SCCM extension. It MAY use the shared collector-common infra: the
+    stream primitives (DONE / build_streams / broadcast_done) are pure-queue and
+    pull in neither the dlt library nor the openhound framework, so importing
+    ``openhound_collector_common.dlt.source_bridge`` is allowed (that's the one
+    dependency permitted by relaxing the old zero-dependency rule)."""
     pkg = pathlib.Path(__file__).resolve().parent.parent / "src" / "openhound_sccm" / "phased_pipeline"
     forbidden = ("dlt", "ldap3", "openhound", "openhound_sccm")
     for py in sorted(pkg.glob("*.py")):
         for line in py.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
-            if stripped.startswith("import ") or stripped.startswith("from "):
-                for name in forbidden:
-                    assert not re.search(rf"\b{name}\b", stripped), f"{py.name}: {stripped}"
+            if not (stripped.startswith("import ") or stripped.startswith("from ")):
+                continue
+            # The shared collector-common infra is the one allowed dependency.
+            if "openhound_collector_common" in stripped:
+                continue
+            for name in forbidden:
+                assert not re.search(rf"\b{name}\b", stripped), f"{py.name}: {stripped}"

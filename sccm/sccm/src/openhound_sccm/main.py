@@ -3,7 +3,6 @@ import datetime
 import logging
 import os
 import pathlib
-import queue as _queue
 import platform
 import shutil
 import socket
@@ -773,15 +772,17 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
     ``fire_host_complete`` notifies the ordered-log handler to flush that host's
     block (a no-op when no handler is registered, e.g. in unit tests).
 
-    Not reentrant: it installs a process-global stream registry
-    (``set_table_queues``) and temporarily raises the process-wide
-    ``EXTRACT__WORKERS`` env var, so a single collect run per process is assumed
+    Not reentrant: it plants a process-global stream bridge (``set_bridge``) and
+    temporarily raises the process-wide ``EXTRACT__WORKERS`` env var (via
+    ``extract_workers_for``), so a single collect run per process is assumed
     (true for the CLI).
     """
+    from openhound_collector_common.dlt.source_bridge import StreamBridge, extract_workers_for
+
     from . import source as _source
     from .log_context import fire_host_complete
     from .per_host_phases import PER_HOST_PHASES, all_table_names, should_run_phase
-    from .phased_pipeline import build_streams, run_pipeline
+    from .phased_pipeline import run_pipeline
 
     # `phases` is injectable so integration tests can drive the stage with stub
     # phases; production always uses the real PER_HOST_PHASES.
@@ -789,8 +790,11 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
     if phases is None:
         phases = PER_HOST_PHASES
     table_names = all_table_names(phases)
-    streams = build_streams(table_names, maxsize=maxsize)
-    _source.set_table_queues(streams)
+    # The shared StreamBridge owns this run's bounded per-table queues (the
+    # backpressure bound) and the blocking drain. The engine pushes rows onto
+    # bridge.streams; the emit resources (via source._drain_stream) drain them.
+    bridge = StreamBridge(table_names, maxsize=maxsize)
+    _source.set_bridge(bridge)
     phase_scope = _build_phase_scope()
 
     def _pool() -> None:
@@ -798,60 +802,45 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
             work_queue,
             ctx,
             phases,
-            streams,
+            bridge.streams,
             max_workers=threads,
             should_run=should_run_phase,
             phase_scope=phase_scope,
             on_target_complete=fire_host_complete,
         )
 
-    # Each emit resource blocks on its stream (a blocking get) until DONE, so it
-    # holds a dlt extract worker for the whole run. dlt defaults to 5 workers; if
-    # there are more tables than workers, an undrained table would wedge its
-    # bounded stream and deadlock. Give the pool one worker per table (plus a
-    # margin) for the duration of the emit pass, then restore the prior config.
-    env_overrides = {
-        "EXTRACT__WORKERS": str(len(table_names) + 2),
-        "EXTRACT__MAX_PARALLEL_ITEMS": str(max(20, len(table_names) + 2)),
-    }
-    previous = {key: os.environ.get(key) for key in env_overrides}
-    os.environ.update(env_overrides)
-
     per_host_counts: dict[str, int] = {}
     pool_thread = threading.Thread(target=_pool, name="per-host-pool", daemon=True)
     pool_thread.start()
     try:
-        pipeline.run(
-            # Production reuses the cached emit resources; an injected phase set
-            # gets emit resources matching its own tables.
-            _source.build_emit_resources(None if default_phases else table_names),
-            write_disposition="append",
-            loader_file_format="jsonl",
-        )
+        # Each emit resource blocks on its queue until DONE, so it holds a dlt
+        # extract worker for the whole run. extract_workers_for raises dlt's
+        # worker cap to one-per-table (plus a margin) for the duration and
+        # restores it after — without it, more tables than workers would wedge an
+        # undrained queue and deadlock. (parallelized=True on each emit resource
+        # is the other half of that guard; see source._make_emit_resource.)
+        with extract_workers_for(len(table_names)):
+            pipeline.run(
+                # Production reuses the cached emit resources; an injected phase
+                # set gets emit resources matching its own tables.
+                _source.build_emit_resources(None if default_phases else table_names),
+                write_disposition="append",
+                loader_file_format="jsonl",
+            )
         # Capture this run's per-table row counts from dlt's normalize step while
         # the in-memory trace still reflects the per-host pass — a later run on the
         # same pipeline would replace it.
         per_host_counts = _normalize_row_counts(pipeline)
     finally:
         # Always await the engine thread. If pipeline.run raised, the emit
-        # consumers stopped draining, so a worker may be blocked on a full
-        # stream; drain the streams until the engine finishes so it reaches
-        # quiescence and join() can never hang. No-op on the success path
-        # (streams already drained, engine already finishing).
+        # consumers stopped draining, so a worker may be blocked on a full queue;
+        # empty the queues until the engine finishes so it reaches quiescence and
+        # join() can never hang. No-op on the success path (queues already
+        # drained, engine already finishing).
         while pool_thread.is_alive():
-            for stream in streams.values():
-                try:
-                    while True:
-                        stream.get_nowait()
-                except _queue.Empty:
-                    pass
+            bridge.drain_to_unblock()
             pool_thread.join(timeout=0.1)
-        _source.clear_table_queues()
-        for key, prior in previous.items():
-            if prior is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prior
+        _source.clear_bridge()
     return per_host_counts
 
 
