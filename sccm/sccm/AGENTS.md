@@ -15,6 +15,14 @@ under `.agents/skills/`.
   relevant section of `ARCHITECTURE.md` in the same change** whenever you alter one of those subsystems,
   and fix any `file:line` references your change invalidates. Add a new section if you introduce a new
   category of divergence.
+- **The shared library `openhound-collector-common/` is read-only to this extension — treat it exactly
+  like `openhound/` core.** The Windows auth stacks, the per-target logging layer, the push→pull streaming
+  bridge (`StreamBridge`), and the DNS resolver now *live there* and are shared with the MSSQL collector;
+  SCCM's own `clients/*`, `log_context.py`, and `phased_pipeline/streams.py` are thin adapters/re-exports
+  over it (see `ARCHITECTURE.md` → "Where this code lives"). Trace into the shared library to understand
+  behavior, but **do not edit it** — a change there affects both collectors, so promoting code up or
+  changing shared behavior is an owner-approved act. If a task seems to need a shared-library change,
+  stop and ask.
 - Load the `openhound` skill from `.agents/skills/openhound/` for task-specific workflows.
 
 ## Task Skill

@@ -27,11 +27,23 @@ Every section follows the same spine:
 > under `openhound/`. That constraint is *why* several of these solutions look indirect: when you can't
 > change the framework, you wrap it, feed it, or mutate its instances at runtime.
 
+> ### A second home, added later
+>
+> Several of the divergences below (the Windows auth stacks, the per-target logging layer, the
+> push→pull streaming bridge, the DNS resolver) were originally built *inside this extension* and have
+> since been **promoted into a shared library, `openhound-collector-common`, that both this collector
+> and the MSSQL collector consume.** That library is still not `openhound/` core — the ground rule
+> holds — but it means the *implementation* of those subsystems now lives one directory over, with
+> SCCM's own files reduced to thin adapters. Read
+> [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) next; it explains
+> what moved and why, and the sections that follow point back to it.
+
 ---
 
 ## Table of Contents
 
 - [The big picture: one tenant vs. many hosts](#the-big-picture-one-tenant-vs-many-hosts)
+- [Where this code lives: the shared collector-common library](#where-this-code-lives-the-shared-collector-common-library)
 - [1. Pull-based DLT resources → a push-based per-host phased pipeline](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline)
 - [2. Sequential phases per target, concurrent across targets — and a sequential debug harness](#2-sequential-phases-per-target-concurrent-across-targets--and-a-sequential-debug-harness)
 - [3. Recursive target discovery and collection](#3-recursive-target-discovery-and-collection)
@@ -90,6 +102,74 @@ reproduce a behavior the single-process PowerShell script got "for free" by shar
 
 ---
 
+## Where this code lives: the shared collector-common library
+
+### The framework baseline
+
+A stock OpenHound collector is **one self-contained Python package**. The framework gives you extension
+points to build against, but it has no notion of *code shared between two collectors* — each REST
+collector is small and stands alone, so there is nothing to share and nowhere to put it.
+
+### Why it breaks for SCCM (and MSSQL)
+
+On-prem collectors are not small, and they are not alone. This extension and the sibling **MSSQL
+collector** both have to do the same hard, **security-critical** things: authenticate over Windows
+protocols with the full credential toolkit (Kerberos / NTLM / SSPI / pass-the-hash / pass-the-ticket),
+bridge a *pushing* worker pool to DLT's *pulling* extractor, tag every log line with which target and
+phase produced it, and resolve a domain controller over DNS. Built independently, each collector would
+carry its **own copy** of an NTLM/SPNEGO token minter, an EPA channel-binding probe, a bounded-queue
+stream bridge, and a `contextvars` logging layer. Two copies of code this subtle **drift** — a
+lockout-safety fix or a channel-binding correction lands in one and rots in the other.
+
+### The add-on: a shared library, with the mature implementation promoted *up* into it
+
+The shared code lives in **`openhound-collector-common`** — a separate package pulled in as an editable
+path dependency (`[tool.uv.sources]` in [`pyproject.toml`](pyproject.toml)), so both collectors import
+the *same* module objects, not copies. It is **not** part of `openhound/` core; the ground rule holds.
+
+The direction of travel matters. These subsystems were **proven first in the SCCM collector**, then
+**promoted up** into the shared library as a superset (SCCM's battle-tested behavior plus the
+generalizations MSSQL needed), and both collectors were re-pointed at the shared implementation. Nothing
+was cautiously re-written for the lowest common denominator — the richer, live-validated SCCM version
+became the shared one. What moved:
+
+| Subsystem (section) | Shared home (`openhound_collector_common.*`) | What SCCM keeps locally (the adapter) |
+|---|---|---|
+| Windows auth ladders + token minters ([§6](#6-windows-authentication-across-five-protocols)) | `clients/auth` (`choose_auth`, `is_ip`, `KerberosToken`, `SspiClient`, NTLM type-1/3), `clients/ad` (`AdClient` + lockout-safe bind waterfall), `clients/wmi` (impacket + pywin32 backends), `clients/mssql` (`detect_epa`) | `clients/ad.py` `ADClient(AdClient)` subclass + SCCM attribute maps; `clients/wmi.py` `WmiClient` wrapper; `clients/http_auth.py` negotiators wrapping `KerberosToken`/`SspiClient`; `clients/mssql_epa.py` thin `test_epa` adapter over `detect_epa` |
+| Per-target/-phase/-resource logging ([§7](#7-enhanced-logging-and-diagnostics-for-blind-remote-environments)) | `logging/log_context` (the full superset: `[target][phase]` tagging, `with_log_context`, completion-callback registry, `VERBOSE`, the debug exc-info filter, `cached_with_log`, `trace_node/edge/...`) | `log_context.py` re-exports the shared machinery and binds the two collector-specific helpers (`cached_with_log`, `trace_*`) to SCCM's own logger names |
+| Push→pull streaming bridge ([§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline)) | `dlt/source_bridge` (`StreamBridge`, `DONE`, `build_streams`, `broadcast_done`, `extract_workers_for`) | `phased_pipeline/streams.py` re-exports `DONE`/`build_streams`/`broadcast_done`; `source.py` plants a `StreamBridge` and its emit resources delegate their drain to it |
+| DNS resolution ([§5](#5-an-active-directory-cli-surface-and-context-auto-detection)) | `discovery/dns` (`make_resolver`) | `main.py::_resolve_dc_via_dns` calls the shared `make_resolver`, keeps the SCCM-specific SRV query |
+
+**Governance.** From an extension agent's point of view the shared library is **read-only** — an SCCM
+change may not edit `openhound-collector-common`, exactly as it may not edit `openhound/` core. Promoting
+new code up into the shared library is a deliberate, owner-approved act (it affects *both* collectors, so
+both must be re-validated), not something done casually mid-feature.
+
+**One relaxed invariant.** The phased engine ([§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline))
+used to be provably self-contained: a test forbade *any* import of `dlt` / `ldap3` / `openhound` /
+`openhound_sccm` in `phased_pipeline/*.py`. Adopting the shared stream primitives means the engine now
+imports `openhound_collector_common.dlt.source_bridge` — so that test was relaxed to permit **exactly
+that one** shared dependency, and nothing else ([`tests/test_pp_engine.py`](tests/test_pp_engine.py)).
+The shared bridge is pure-queue standard-library code, so the engine stays free of the dlt library and
+the framework.
+
+### Trade-offs
+
+- **A shared-library change is a two-collector change.** A fix in `clients/auth` or `logging/log_context`
+  now lands in SCCM *and* MSSQL at once — good for consistency, but every such change must be validated
+  against both, not just the collector that motivated it.
+- **A third place to look.** Tracing an auth failure or a log-format quirk may lead out of `sccm/sccm/`
+  into `openhound-collector-common/`. The adapter files above are deliberately thin so the jump is
+  obvious, and each names its shared counterpart in its module docstring.
+- **The behavior did not change — only its home.** The detailed descriptions in [§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline),
+  [§6](#6-windows-authentication-across-five-protocols), and [§7](#7-enhanced-logging-and-diagnostics-for-blind-remote-environments)
+  remain accurate about *what the code does*; they now describe code that lives in the shared library,
+  reached through SCCM's adapters. Where a `file:line` reference in those sections points at a SCCM file
+  that is now a re-export shim, the real implementation is the correspondingly-named module in
+  `openhound_collector_common`.
+
+---
+
 ## 1. Pull-based DLT resources → a push-based per-host phased pipeline
 
 ### The framework baseline
@@ -116,32 +196,40 @@ knowledge, so it's independently testable:
 |---|---|---|
 | `WorkQueue` | [`phased_pipeline/work_queue.py`](src/openhound_sccm/phased_pipeline/work_queue.py) | The to-do list of targets. Dedups, counts in-flight work, signals *quiescence* (see [§3](#3-recursive-target-discovery-and-collection)). |
 | `Phase` + `run_one_target` + `run_pipeline` | [`phased_pipeline/engine.py`](src/openhound_sccm/phased_pipeline/engine.py) | A `Phase` is `(name, output-stream-names, generator)`. `run_one_target` runs one host through its phases **in declaration order** ([engine.py:70-81](src/openhound_sccm/phased_pipeline/engine.py#L70-L81)); `run_pipeline` drives a `ThreadPoolExecutor` over the queue ([engine.py:84-136](src/openhound_sccm/phased_pipeline/engine.py#L84-L136)). |
-| `build_streams` / `DONE` / `broadcast_done` | [`phased_pipeline/streams.py`](src/openhound_sccm/phased_pipeline/streams.py) | One **bounded** `queue.Queue` per output table. Bounded means a fast producer *blocks* until the consumer catches up — **backpressure** that keeps memory flat. `DONE` is the single end-of-stream sentinel. |
+| `build_streams` / `DONE` / `broadcast_done` | [`phased_pipeline/streams.py`](src/openhound_sccm/phased_pipeline/streams.py) — a **re-export** of the shared `openhound_collector_common.dlt.source_bridge` primitives (see [Where this code lives](#where-this-code-lives-the-shared-collector-common-library)) | One **bounded** `queue.Queue` per output table. Bounded means a fast producer *blocks* until the consumer catches up — **backpressure** that keeps memory flat. `DONE` is the single end-of-stream sentinel. Re-exporting (not copying) means the engine broadcasts the *same* `DONE` object the shared bridge compares against — the marker is identity-compared, so producer and consumer must agree on one instance. |
 
 The hard part is making DLT — which insists on *pulling* — consume rows that are *pushed* by a separate
-thread pool. The bridge is in [`source.py`](src/openhound_sccm/source.py):
+thread pool. The bridge itself is the shared **`StreamBridge`** (`openhound_collector_common.dlt.source_bridge`):
+it owns the bounded per-table queues, the blocking drain, and the `DONE` handling. SCCM keeps only the
+glue that `StreamBridge` can't provide, in [`source.py`](src/openhound_sccm/source.py):
 
 - For every per-host output table, the extension registers a one-line DLT **"emit resource"** whose entire
-  body is *block on this table's queue until `DONE`* — [`_drain_stream` / `_make_emit_resource`](src/openhound_sccm/source.py#L144-L178).
-  A blocking `get()` means "an empty queue is a *wait*, not an end." This turns each DLT resource into a
-  **consumer** of the engine's output instead of a producer.
-- The two halves run concurrently in [`_run_per_host_stage`](src/openhound_sccm/main.py#L748-L832):
-  the **engine runs on a background thread**
-  (producing rows onto the bounded streams, then closing them with `DONE` at quiescence) while
-  **`pipeline.run(...)` drains those streams on the main thread**.
-- Each emit resource is declared `parallelized=True` ([source.py:174](src/openhound_sccm/source.py#L174))
-  so DLT gives each its own extract thread. A single-threaded round-robin extractor would block on the
-  first momentarily-empty stream while another stream filled to capacity — a deadlock. To guarantee a
-  worker per table, `_run_per_host_stage` temporarily raises the framework's `EXTRACT__WORKERS` env var to
-  `len(tables) + 2` and restores it afterward ([main.py:796-832](src/openhound_sccm/main.py#L796-L832)).
+  body delegates to the planted bridge's drain — [`_drain_stream` / `_make_emit_resource`](src/openhound_sccm/source.py).
+  The bridge's `drain_stream` does a blocking `get()`: "an empty queue is a *wait*, not an end." This turns
+  each DLT resource into a **consumer** of the engine's output instead of a producer. SCCM must keep this
+  registration glue local (rather than use `StreamBridge.build_emit_resources` directly) because a
+  conformance guard checks `app.dlt_resources` at **import** time — earlier than any run-scoped bridge can
+  exist — so the emit resources are registered up front with the queue **late-bound** through a planted
+  bridge.
+- The two halves run concurrently in [`_run_per_host_stage`](src/openhound_sccm/main.py): the **engine runs
+  on a background thread** (producing rows onto `bridge.streams`, then closing them with `DONE` at
+  quiescence) while **`pipeline.run(...)` drains those queues on the main thread**.
+- Each emit resource is declared `parallelized=True` so DLT gives each its own extract thread. A
+  single-threaded round-robin extractor would block on the first momentarily-empty queue while another
+  filled to capacity — a deadlock. To guarantee a worker per table, `_run_per_host_stage` wraps the run in
+  the shared **`extract_workers_for(len(tables))`** context manager, which raises the framework's
+  `EXTRACT__WORKERS` env var to `len(tables) + 2` for the duration and restores it afterward. (Both this
+  worker bump and the bridge were **generalized from this exact SCCM code**; see
+  [Where this code lives](#where-this-code-lives-the-shared-collector-common-library).)
 
 A second framework-shaped problem: DLT builds the source via **config injection** (every `source()`
 parameter is a `dlt.config.value` / `dlt.secrets.value`, see [source.py:198-231](src/openhound_sccm/source.py#L198-L231)),
 so there is **no constructor** through which to hand the source live Python objects (the shared work
 queue, the AD-resolution cache, the stream registry). The extension threads them through **module-level
 globals** planted just before each `pipeline.run` and cleared after —
-[`set_shared_queue` / `set_table_queues` / `get_last_ctx`](src/openhound_sccm/source.py#L61-L141). It's a
-handshake, not elegance, but it's the only channel the injection model leaves open.
+[`set_shared_queue` / `set_bridge` / `get_last_ctx`](src/openhound_sccm/source.py) (`set_bridge` plants the
+run-scoped `StreamBridge` the emit resources drain). It's a handshake, not elegance, but it's the only
+channel the injection model leaves open.
 
 Finally, collection is explicitly **two-staged** in [`collect_sccm`](src/openhound_sccm/main.py#L842-L1009):
 
@@ -158,11 +246,11 @@ Stage 1 is selected with `src.with_resources(*DISCOVERY_RESOURCE_NAMES)`
 
 ### Trade-offs
 
-- `_run_per_host_stage` installs **process-global** state (the stream registry, the bumped
+- `_run_per_host_stage` installs **process-global** state (the planted `StreamBridge`, the bumped
   `EXTRACT__WORKERS`), so it assumes **one collect run per process** — true for the CLI, documented as
-  "not reentrant" ([main.py:759-762](src/openhound_sccm/main.py#L759-L762)).
-- The `finally` block must drain streams while joining the engine thread so a crashed `pipeline.run`
-  can't leave a worker blocked forever on a full queue ([main.py:813-832](src/openhound_sccm/main.py#L813-L832)).
+  "not reentrant" in the function docstring.
+- The `finally` block must empty the queues (`bridge.drain_to_unblock()`) while joining the engine thread
+  so a crashed `pipeline.run` can't leave a worker blocked forever on a full queue.
 - We pay the cost of running two cooperating schedulers (our engine + DLT's extractor) instead of one.
 
 ---
@@ -351,11 +439,14 @@ every flag into the env var the source expects** before the source is built:
 - [`_suspicious_cli_argument_warnings`](src/openhound_sccm/main.py#L168-L218) catches a real foot-gun:
   Click parses `-dc 10.0.0.1` as `-d c` (because `-d` takes a value), silently turning the intended DC
   into a stray positional. The collector warns on these, masking sensitive values.
-- **Context auto-detection** mirrors CMBP's order: [`_detect_windows_domain`](src/openhound_sccm/main.py#L415-L436)
-  reads `USERDNSDOMAIN` then the FQDN suffix (Windows only); [`_resolve_dc_via_dns`](src/openhound_sccm/main.py#L439-L466)
-  finds a DC via the `_ldap._tcp.dc._msdcs.<domain>` SRV record (cross-platform). When neither yields a
-  domain, [`_require_domain_or_explain`](src/openhound_sccm/main.py#L509-L532) fails fast with a
-  platform-specific message *before* DLT's config resolver throws a noisy `ConfigFieldMissingException`.
+- **Context auto-detection** mirrors CMBP's order: [`_detect_windows_domain`](src/openhound_sccm/main.py)
+  reads `USERDNSDOMAIN` then the FQDN suffix (Windows only); [`_resolve_dc_via_dns`](src/openhound_sccm/main.py)
+  finds a DC via the `_ldap._tcp.dc._msdcs.<domain>` SRV record (cross-platform), building its resolver
+  with the shared `openhound_collector_common.discovery.dns.make_resolver` (see
+  [Where this code lives](#where-this-code-lives-the-shared-collector-common-library)) and keeping the
+  SCCM-specific SRV query. When neither yields a domain,
+  [`_require_domain_or_explain`](src/openhound_sccm/main.py) fails fast with a platform-specific message
+  *before* DLT's config resolver throws a noisy `ConfigFieldMissingException`.
 
 ### Trade-offs
 
@@ -385,6 +476,17 @@ password — single sign-on via SSPI), explicit **username/password** (NTLM and 
 bulk of the divergence and lives under [`clients/`](src/openhound_sccm/clients/).
 
 ### The add-on: per-protocol auth stacks with a shared credential-precedence idea
+
+> **Now in the shared library.** The auth realizers below — `choose_auth`, the NTLM/SPNEGO token
+> minters (`KerberosToken` / `SspiClient` / NTLM type-1/3), the lockout-safe LDAP `AdClient`, the WMI
+> impacket/pywin32 backends, and the MSSQL EPA `detect_epa` probe — were **promoted into
+> `openhound-collector-common`** and are now shared with the MSSQL collector (see
+> [Where this code lives](#where-this-code-lives-the-shared-collector-common-library)). The SCCM files
+> named in the table are the thin **adapters** (`ADClient(AdClient)`, the `WmiClient` wrapper, the
+> `http_auth` negotiators over `KerberosToken`/`SspiClient`, the `mssql_epa.test_epa` adapter over
+> `detect_epa`); the implementation lives in the correspondingly-named `clients/*` modules under
+> `openhound_collector_common`. The precedence philosophy and per-protocol behavior described here are
+> unchanged by that move.
 
 There is no single universal selector — each protocol family has its own realizer — but they share the
 same **credential precedence philosophy**: *explicit credentials win (Kerberos first, NTLM fallback),
@@ -458,6 +560,17 @@ went wrong, and what was the exception?* DLT also interleaves resource output, s
 unreadable braid of 10 hosts' lines.
 
 ### The add-on: a context-tagging, ordered, diagnostics-capturing logging layer
+
+> **Now in the shared library.** The whole `log_context` machinery — `[target][phase]` tagging,
+> `with_log_context`, the completion-callback registry, `VERBOSE`, and the debug exc-info filter — was
+> **promoted into `openhound_collector_common.logging.log_context`** as a superset and is now shared with
+> the MSSQL collector (see [Where this code lives](#where-this-code-lives-the-shared-collector-common-library)).
+> SCCM's [`log_context.py`](src/openhound_sccm/log_context.py) re-exports it and binds the two
+> collector-specific helpers (`cached_with_log`, `trace_*`) to SCCM's own logger names. The two
+> file-handler classes below (`_DiagnosticFileHandler`, `_OrderedLogFileHandler`) stay in SCCM's
+> [`main.py`](src/openhound_sccm/main.py) — they are the SCCM CLI's output artifacts, not shared infra.
+> The behavior described here is unchanged by the move; where a `log_context.py#Lxx` reference below points
+> at what is now a re-export, the implementation is the same-named symbol in the shared module.
 
 All in [`log_context.py`](src/openhound_sccm/log_context.py) and the handler classes in
 [`main.py`](src/openhound_sccm/main.py), built *without editing the framework's handlers* — only by adding
@@ -988,12 +1101,12 @@ This gives operators a single flag to choose between a speculative-complete view
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
 |---|---|---|
-| Per-host phased pipeline | DLT "emit" resources draining queues; `pipeline.run` | A native per-target scheduler |
+| Per-host phased pipeline | DLT "emit" resources draining the shared `StreamBridge`'s queues; `pipeline.run` + `extract_workers_for` | A native per-target scheduler |
 | Recursive discovery | Custom `WorkQueue` + `register_target` funnel | A "collection discovers more work" primitive |
 | Include-only targeting | Allow-list checked in `register_target` | A target-scoping config |
 | AD CLI surface | Typer command registered on the framework's `collect` group + flag→env bridge | A richer `@app.collect()` signature |
-| Windows auth (×5 protocols) | `clients/*` auth stacks carried by the extension | Framework Negotiate/Kerberos/SMB/DCOM support |
-| Logging & diagnostics | Filters + extra handlers + runtime mutation of live handlers | A pluggable logging/formatting API |
+| Windows auth (×5 protocols) | `clients/*` auth stacks — implementation in shared `openhound_collector_common.clients.*`, SCCM `clients/*` are thin adapters | Framework Negotiate/Kerberos/SMB/DCOM support |
+| Logging & diagnostics | Filters + extra handlers + runtime mutation of live handlers — `log_context` machinery in shared `openhound_collector_common.logging`, SCCM re-exports + owns the file handlers | A pluggable logging/formatting API |
 | Windows log-rollover fix | Runtime monkey-patch of core's handler instances | A Windows-safe `doRollover` in core |
 | Convert from DuckDB | `preproc` coalesced tables + a second `convert`-time `dlt.pipeline` (Convert2-Read-DB) | `read_from="duckdb"` on `@app.convert` (proposed) |
 | Tolerant coalesce vs. pinned load schema | `_safe` + `_ensure_columns` + `_arr` in the preproc transforms | Pinning full per-table schemas/types at load (rejected — brittle; it caused the `ldap_sites` freeze crash) |
@@ -1027,6 +1140,7 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-14 | **Shared-library reconciliation (new divergence category).** Added the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) section: the Windows auth stacks, the per-target logging layer, the push→pull streaming bridge, and the DNS resolver were **promoted up** out of this extension into `openhound-collector-common`, a shared library both SCCM and MSSQL now consume (SCCM's own files reduced to thin adapters). Seven promote-up reconciliations landed on branch `integration` (`choose_auth`+`is_ip`; WMI impacket/pywin32 backends; `mssql_epa`→`detect_epa`; DNS `make_resolver`; HTTP negotiators over `KerberosToken`/`SspiClient`; `log_context` superset; `StreamBridge`+unified `DONE`). Updated §1 (streams re-export + `StreamBridge` + `extract_workers_for`; `set_bridge` handshake), §5 (shared `make_resolver`), §6 + §7 (relocation notes), the ground-rule box, and the quick-reference table. Relaxed the engine's zero-dependency test to permit exactly `openhound_collector_common`. Validated: 552 SCCM unit / 5 skipped, 172 MSSQL unit, ruff clean, and a full lab collection streaming 5 per-host sources (1005 rows through one bounded queue) with no lost rows or deadlock. |
 | 2026-07-01 | Stage 7 (docs + validation) — final stage of the preproc/convert port. Whole-document reconciliation of README + ARCHITECTURE.md + in-code docstrings against code-truth (14 node kinds, 37 edge kinds). Fixed the stale Graph Model prose (README claimed 8 emitted). Added three Mermaid diagrams (pipeline data-flow, clustered AD/SCCM/MSSQL overview, complete edge reference). Non-behavioral docstring/`Attributes` completeness pass. Ran ruff/mypy/pytest in an isolated uv env + the validate-extension structural checklist. Verified + closed ope-7f61 (edge-count banner miscount, already corrected to 11 for Stages 1–2). No behavioral code changes; known limitations (e.g. ope-3dbc null-property BloodHound rejection) documented, not fixed. |
 | 2026-06-30 | Stage 6 (coerce-and-relay) shipped. Added §11h: three `CoerceAndRelay*` possible-edge kinds with surgical `--disable-possible-edges` gate (default: null NTLM/EPA assumed vulnerable; flag: only explicit `Off` qualifies). Lazy `_node_authenticated_users` synthesises one `Group` node per domain with at least one relay edge (id = `UPPER(FQDN)-S-1-5-11`, merges with SharpHound). `graph_edges` gains two `VARCHAR[]` coercion columns (`coercion_victim_and_relay_target_pairs`, `coercion_victim_hostnames`); `SCCMRelayEdgeProperties` subclass carries them to the BloodHound entity panel. Fixed `CoerceAndRelayToSMB` traversable mismatch (CMBP allow-list used `CoerceAndRelayNTLMtoSMB`; the port emits and marks traversable `CoerceAndRelayToSMB`). Updated §11c `graph_edges` column list + `SCCMRelayEdgeProperties` note; added `node_computer.smb_signing_source` provenance note. Quick-reference table updated. |
 | 2026-06-30 | Stage 5 (MSSQL) shipped. Added §11g: `MSSQL_Server` is a three-source coalesce (`mssql_server_instances` + `remoteregistry_mssql_servers` + `_mssql_sql_servers`), keyed on `upper(host_sid):port`, capturing multiple SQL hosts per site and non-SCCM servers. Six MSSQL node kinds inferred from SCCM topology (no live SQL enumeration). `environmentid` = AD-domain SID of the SQL host via `domain_environment_id`. MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split`. Quick-reference table updated. |
