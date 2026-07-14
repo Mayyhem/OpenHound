@@ -23,41 +23,26 @@ a 401 (only RPC-style endpoints such as WinRM accept them). Validated live.
 """
 from __future__ import annotations
 
-import base64
-import datetime
 import enum
 import importlib
 import logging
-import struct
 import sys
 from typing import Any, Optional
 
 from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
 
-from impacket.krb5 import constants
-from impacket.krb5.asn1 import AP_REQ, TGS_REP, Authenticator, seq_set
-from impacket.krb5.ccache import CCache
 from impacket.krb5.gssapi import (
-    CheckSumField,
     GSS_C_INTEG_FLAG,
     GSS_C_MUTUAL_FLAG,
     GSS_C_REPLAY_FLAG,
     GSS_C_SEQUENCE_FLAG,
-    KRB5_AP_REQ,
 )
-from impacket.krb5.kerberosv5 import getKerberosTGS, getKerberosTGT
-from impacket.krb5.types import KerberosTime, Principal, Ticket
 from impacket.ntlm import getNTLMSSPType1, getNTLMSSPType3
 from impacket.spnego import (
-    ASN1_AID,
-    ASN1_OID,
     SPNEGO_NegTokenInit,
     SPNEGO_NegTokenResp,
     TypesMech,
-    asn1encode,
 )
-from pyasn1.codec.der import decoder, encoder
-from pyasn1.type.univ import noValue
 
 # EMPTY_LM_HASH / format_hashes / split_user_domain are byte-identical to the
 # shared library's originals (the shared clients/auth.py was generalized from this
@@ -66,6 +51,8 @@ from pyasn1.type.univ import noValue
 # use the single shared implementation instead of a local copy.
 from openhound_collector_common.clients.auth import (  # noqa: F401 (re-exported)
     EMPTY_LM_HASH,
+    KerberosToken,
+    SspiClient,
     choose_auth,
     format_hashes,
     is_ip,
@@ -143,19 +130,19 @@ def _unwrap_spnego_response(server_token: bytes) -> bytes:
 
 
 class SspiNegotiator:
-    """Current-user SSPI Negotiate; mirrors smb_sso._SSPINegotiateClient."""
+    """Current-user SSPI Negotiate; thin wrapper over the shared :class:`SspiClient`.
+
+    ``SspiClient.step`` returns ``(out_token, done)`` with ``done == (error == 0)``
+    (SEC_E_OK); the caller still inspects the HTTP status for the optional mutual
+    leg. Same behavior as before — the pywin32 ``ClientAuth`` handshake now lives
+    in the shared library.
+    """
 
     def __init__(self, *, target_host: str) -> None:
-        import sspi  # Windows-only; imported lazily so the module loads anywhere
-        self._auth = sspi.ClientAuth("Negotiate", targetspn=http_spn(target_host))
+        self._client = SspiClient(package="Negotiate", target_spn=http_spn(target_host))
 
     def step(self, server_token: Optional[bytes]) -> tuple[bytes, bool]:
-        error, buffers = self._auth.authorize(server_token if server_token else None)
-        token = bytes(buffers[0].Buffer) if buffers else b""
-        # pywin32: error == 0 (SEC_E_OK) means the handshake is complete; the
-        # caller still inspects the HTTP status (a non-401 ends the loop even
-        # when SSPI reports SEC_I_CONTINUE_NEEDED for the optional mutual leg).
-        return token, error == 0
+        return self._client.step(server_token)
 
 
 class NtlmNegotiator:
@@ -188,118 +175,33 @@ class NtlmNegotiator:
 
 
 class KerberosNegotiator:
-    """One-shot Kerberos AP-REQ over SPNEGO via impacket.
+    """One-shot Kerberos AP-REQ over SPNEGO for the HTTP Negotiate handshake.
 
-    Sources a service ticket for ``HTTP/<host>`` from one of:
-      * a base64 KRB-CRED (``.kirbi``) ticket — a direct service ticket if it
-        matches the SPN, otherwise a TGT used to request one (pass-the-ticket);
-      * a password / NT hash — a fresh TGT then a service ticket from the KDC.
+    Thin wrapper over the shared :class:`KerberosToken`, which mints the AP-REQ
+    for ``HTTP/<host>`` from a password / NT hash (fresh TGT+TGS) or a base64
+    KRB-CRED ``.kirbi`` ticket (pass-the-ticket), wraps it in an SPNEGO
+    NegTokenInit, and caches the KDC exchange after the first call.
 
-    Decodes the ticket eagerly so a malformed blob fails fast with ValueError.
+    The only HTTP-specific input is the GSS checksum flag set: ``_GSS_HTTP_FLAGS``
+    omits ``GSS_C_DCE_STYLE`` (http.sys/IIS reject DCE-style tokens with a 401).
+    That flexibility is exactly the ``gss_flags`` seam the shared token exposes.
     """
-
-    _MS_KRB5 = TypesMech["MS KRB5 - Microsoft Kerberos 5"]
-    _KRB5 = TypesMech["KRB5 - Kerberos 5"]
 
     def __init__(self, *, target_host: str, realm: str, username: Optional[str],
                  password: Optional[str], nt_hash: Optional[str],
                  ticket: Optional[str], kdc_host: Optional[str]) -> None:
-        self._target_host = target_host
-        self._spn = http_spn(target_host)
-        self._realm = realm.upper()
-        self._username = username
-        self._password = password or ""
-        self._lm = ""
-        self._nt = ""
-        hashes = format_hashes(nt_hash)
-        if hashes:
-            self._lm, self._nt = hashes.split(":")
-        self._kdc_host = kdc_host
-        # Cached (tgs_rep_bytes, cipher, session_key): fetched once, then reused so
-        # each request rebuilds only the cheap AP-REQ — no repeat KDC round-trip.
-        self._service: Optional[tuple] = None
-        self._ccache: Optional[CCache] = None
-        if ticket:
-            try:
-                self._ccache = CCache()
-                self._ccache.fromKRBCRED(base64.b64decode(ticket, validate=True))
-            except Exception as exc:  # malformed base64 / not a KRB-CRED
-                raise ValueError(f"--ticket is not a valid base64 KRB-CRED (.kirbi): {exc}") from exc
+        self._token = KerberosToken(
+            spn=http_spn(target_host),
+            realm=realm,
+            username=username,
+            password=password,
+            nt_hash=nt_hash,
+            ticket=ticket,
+            kdc_host=kdc_host,
+            gss_flags=_GSS_HTTP_FLAGS,
+        )
 
     def step(self, server_token: Optional[bytes]) -> tuple[bytes, bool]:
-        if self._service is None:
-            # First call: one KDC exchange (TGT+TGS, or load from the ticket).
-            # Cached for this negotiator's lifetime so later requests skip the KDC.
-            self._service = self._service_ticket()
-        return self._build_blob(*self._service), True
-
-    def _service_ticket(self):
-        """Return ``(tgs_rep_bytes, cipher, session_key)`` for the HTTP SPN."""
-        if self._ccache is not None:
-            direct = self._ccache.getCredential(self._spn)
-            if direct is not None:
-                logger.verbose("HTTP Kerberos: using service ticket for %s from ticket", self._spn)
-                d = direct.toTGS(self._spn)
-                return d["KDC_REP"], d["cipher"], d["sessionKey"]
-            tgt_cred = self._ccache.getCredential(f"krbtgt/{self._realm}")
-            if tgt_cred is None and self._ccache.credentials:
-                tgt_cred = self._ccache.credentials[0]
-            if tgt_cred is None:
-                raise ValueError("ticket contains no usable TGT or service ticket")
-            logger.verbose("HTTP Kerberos: requesting %s using TGT from ticket", self._spn)
-            tgt = tgt_cred.toTGT()
-            tgs, cipher, _, sk = getKerberosTGS(
-                Principal(self._spn, type=constants.PrincipalNameType.NT_SRV_INST.value),
-                self._realm, self._kdc_host, tgt["KDC_REP"], tgt["cipher"], tgt["sessionKey"],
-            )
-            return tgs, cipher, sk
-
-        logger.verbose("HTTP Kerberos: requesting TGT+TGS for %s from KDC %s", self._spn, self._kdc_host)
-        client = Principal(self._username, type=constants.PrincipalNameType.NT_PRINCIPAL.value)
-        tgt, cipher, _, sk = getKerberosTGT(
-            client, self._password, self._realm, self._lm, self._nt, b"", self._kdc_host,
-        )
-        tgs, cipher, _, sk = getKerberosTGS(
-            Principal(self._spn, type=constants.PrincipalNameType.NT_SRV_INST.value),
-            self._realm, self._kdc_host, tgt, cipher, sk,
-        )
-        return tgs, cipher, sk
-
-    def _build_blob(self, tgs_bytes: bytes, cipher, session_key) -> bytes:
-        """Assemble the AP-REQ and wrap it in an SPNEGO NegTokenInit."""
-        tgs_rep = decoder.decode(tgs_bytes, asn1Spec=TGS_REP())[0]
-        ticket = Ticket()
-        ticket.from_asn1(tgs_rep["ticket"])
-        client_name = Principal()
-        client_name.from_asn1(tgs_rep, "crealm", "cname")
-
-        ap_req = AP_REQ()
-        ap_req["pvno"] = 5
-        ap_req["msg-type"] = int(constants.ApplicationTagNumbers.AP_REQ.value)
-        ap_req["ap-options"] = constants.encodeFlags([constants.APOptions.mutual_required.value])
-        seq_set(ap_req, "ticket", ticket.to_asn1)
-
-        authenticator = Authenticator()
-        authenticator["authenticator-vno"] = 5
-        authenticator["crealm"] = str(tgs_rep["crealm"])
-        seq_set(authenticator, "cname", client_name.components_to_asn1)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        authenticator["cusec"] = now.microsecond
-        authenticator["ctime"] = KerberosTime.to_asn1(now)
-        authenticator["cksum"] = noValue
-        authenticator["cksum"]["cksumtype"] = 0x8003
-        chk = CheckSumField()
-        chk["Lgth"] = 16
-        chk["Flags"] = _GSS_HTTP_FLAGS
-        authenticator["cksum"]["checksum"] = chk.getData()
-        authenticator["seq-number"] = 0
-
-        encrypted = cipher.encrypt(session_key, 11, encoder.encode(authenticator), None)
-        ap_req["authenticator"] = noValue
-        ap_req["authenticator"]["etype"] = cipher.enctype
-        ap_req["authenticator"]["cipher"] = encrypted
-
-        mech_token = struct.pack("B", ASN1_AID) + asn1encode(
-            struct.pack("B", ASN1_OID) + asn1encode(self._KRB5)
-            + KRB5_AP_REQ + encoder.encode(ap_req))
-        return _spnego_init(self._MS_KRB5, mech_token)
+        # Kerberos completes in one leg (no server challenge needed); the shared
+        # token does the KDC exchange on first call and caches it.
+        return self._token.ap_req_spnego(), True

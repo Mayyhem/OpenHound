@@ -88,8 +88,9 @@ def test_ntlm_negotiator_accepts_nt_hash():
 
 
 def test_kerberos_negotiator_caches_service_ticket(monkeypatch):
-    # The service ticket (KDC exchange) is fetched once; later steps reuse it and
-    # rebuild only the AP-REQ.
+    # KerberosNegotiator now delegates minting to the shared KerberosToken, which
+    # does the KDC exchange once and reuses the cached service ticket; later steps
+    # rebuild only the AP-REQ. Patch the token's internals to prove the caching.
     neg = ha.KerberosNegotiator(target_host="mp.mayyhem.com", realm="MAYYHEM.COM",
                                 username="admin", password="Pw", nt_hash=None,
                                 ticket=None, kdc_host="dc.mayyhem.com")
@@ -99,12 +100,12 @@ def test_kerberos_negotiator_caches_service_ticket(monkeypatch):
         calls["n"] += 1
         return (b"TGS", object(), object())
 
-    monkeypatch.setattr(neg, "_service_ticket", fake_service_ticket)
-    monkeypatch.setattr(neg, "_build_blob", lambda tgs, cipher, sk: b"APREQ")
+    monkeypatch.setattr(neg._token, "_service_ticket", fake_service_ticket)
+    monkeypatch.setattr(neg._token, "_build_blob", lambda tgs, cipher, sk: b"APREQ")
     t1, d1 = neg.step(None)
     t2, d2 = neg.step(None)
     assert (t1, t2) == (b"APREQ", b"APREQ") and d1 and d2
-    assert calls["n"] == 1  # one KDC exchange, reused
+    assert calls["n"] == 1  # one KDC exchange, reused (cached inside KerberosToken)
 
 
 def test_kerberos_negotiator_rejects_bad_ticket():
