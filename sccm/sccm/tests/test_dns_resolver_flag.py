@@ -24,20 +24,27 @@ def test_resolve_dc_via_dns_uses_custom_resolver_when_provided():
         assert result == "dc1.corp.local"
 
 
-def test_resolve_dc_via_dns_uses_module_resolver_when_not_provided():
-    """When dns_resolver is None, the module-level dns.resolver.resolve() is used."""
+def test_resolve_dc_via_dns_uses_host_resolver_when_not_provided():
+    """When dns_resolver is None, the shared make_resolver builds a host-configured
+    Resolver() (no explicit nameserver) and its resolve() is used.
+
+    (Previously this asserted the module-level dns.resolver.resolve() was called;
+    _resolve_dc_via_dns now delegates resolver construction to the shared
+    discovery.dns.make_resolver, which always builds a Resolver instance.)
+    """
     from openhound_sccm.main import _resolve_dc_via_dns
 
+    mock_resolver_instance = MagicMock()
     mock_answer = MagicMock()
     mock_answer.target.__str__ = lambda self: "dc1.corp.local."
+    mock_resolver_instance.resolve.return_value = [mock_answer]
 
-    with patch.object(_dns_resolver, "resolve", return_value=[mock_answer]) as mock_resolve:
-        with patch.object(_dns_resolver, "Resolver") as mock_cls:
-            result = _resolve_dc_via_dns("corp.local", dns_resolver=None)
+    with patch.object(_dns_resolver, "Resolver", return_value=mock_resolver_instance) as mock_cls:
+        result = _resolve_dc_via_dns("corp.local", dns_resolver=None)
 
-            mock_resolve.assert_called_once()
-            mock_cls.assert_not_called()
-            assert result == "dc1.corp.local"
+        # make_resolver(None) builds a host-configured Resolver() (no explicit nameserver).
+        mock_cls.assert_called_once_with()
+        assert result == "dc1.corp.local"
 
 
 # ---------------------------------------------------------------------------

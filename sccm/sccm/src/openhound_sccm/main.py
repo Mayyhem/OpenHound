@@ -464,20 +464,17 @@ def _resolve_dc_via_dns(domain: str, dns_resolver: Optional[str] = None) -> Opti
     Cross-platform: works wherever the host has DNS reachability to the AD
     DNS zone, not just Windows.
 
-    When ``dns_resolver`` is provided, a ``Resolver(configure=False)`` is
-    created with that IP as the sole nameserver. When omitted the module-level
-    ``dns.resolver.resolve()`` call is used (system default).
+    The resolver is built via the shared ``discovery.dns.make_resolver`` (explicit
+    nameserver when ``dns_resolver`` is set, else the host's configured resolvers).
+    SCCM keeps its own SRV query here — ``_ldap._tcp.dc._msdcs.<domain>`` is the
+    precise DC-Locator record (.NET ``Domain.FindDomainController``), narrower than
+    the shared ``resolve_dc``'s general ``_ldap._tcp.<domain>``.
     """
     try:
-        import dns.resolver  # type: ignore[import-not-found]
+        from openhound_collector_common.discovery.dns import make_resolver
 
-        if dns_resolver:
-            resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = [dns_resolver]
-            resolver.lifetime = 5
-            answers = resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV")
-        else:
-            answers = dns.resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV", lifetime=5)
+        resolver = make_resolver(dns_resolver, lifetime=5)
+        answers = resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV")
         srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
         if srvs:
             return str(srvs[0].target).rstrip(".")
