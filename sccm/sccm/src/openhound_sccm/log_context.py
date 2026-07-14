@@ -1,573 +1,87 @@
-"""Per-target / per-phase logging context for the OpenHound SCCM extension.
+"""Per-target / per-phase / per-resource logging context for the SCCM extension.
 
-Adds three pieces on top of stdlib ``logging``:
+The full logging-context machinery — ``VERBOSE`` + ``logger.verbose()``, the
+``contextvars``-backed ``target_context`` / ``phase_context`` / resource context,
+``LogContextFilter`` (the ``[target][phase]`` prefix), ``install_filter``,
+``with_log_context`` (including per-``next()`` generator handling), the
+resource/host completion-callback registry, ``per_host_iter`` / ``per_pair_iter``,
+``VerboseLogger`` / ``get_logger``, the debug exc-info filter, the cache-with-log
+decorator, and the OpenGraph build-trace helpers — now lives in the shared library
+(``openhound_collector_common.logging.log_context``). It was proven here first and
+promoted so the MSSQL collector and future collectors share one implementation.
 
-1. ``contextvars``-backed ``target_context()`` / ``phase_context()`` context
-   managers. Whatever is on the stack at log-emission time is folded into the
-   record as a ``[target][phase]`` prefix on the message.
-2. A ``LogContextFilter`` that reads those contextvars and rewrites the
-   record's ``msg`` field so the prefix becomes part of the message content
-   itself. This means the OpenHound framework's existing log handler (Rich)
-   keeps formatting timestamps, levels, and colors exactly as before — the
-   prefix just shows up inside each line.
-3. Two iterator helpers — ``per_host_iter()`` and ``per_pair_iter()`` —
-   that push ``target_context(hostname)`` around each iteration so a plain
-   ``for host in per_host_iter(ctx.ldap_computer_hosts()): logger.info(...)``
-   automatically gets ``[hostname][PHASE]`` on every line.
-4. A ``with_log_context`` decorator factory that wraps ``@app.resource``
-   bodies so the right phase (and optionally the domain target) are active
-   for every line emitted inside the resource generator — even across
-   ``yield`` boundaries.
+This module re-exports the shared machinery unchanged, and keeps only SCCM's
+*logger bindings* for the two helpers that emit under SCCM's own logger namespace
+(so SCCM's log routing / ordered-log file handler, which key on the
+``openhound_sccm.*`` names, are unchanged):
 
-Stdlib only — no custom formatter, no replacement of the framework's log
-handlers. Apply by installing the filter on the root logger once (see
-``install_filter()``); after that, every ``logger.info(...)`` inside a
-``with target_context(...):`` / ``with phase_context(...):`` block sees the
-prefix prepended automatically.
+  * ``trace_node`` / ``trace_edge`` / ``trace_property_added`` /
+    ``trace_node_with_properties`` -> ``openhound_sccm.graph``;
+  * ``cached_with_log`` -> ``openhound_sccm.lookup``.
 """
-
 from __future__ import annotations
 
-import contextlib
-import contextvars
-import functools
-import inspect
 import logging
-import sys
-import threading
-from typing import Any, Callable, Iterator, List, Optional, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
-# The VERBOSE level (15, between INFO and DEBUG) + the ``logger.verbose()`` shortcut
-# live in the shared library so SCCM and MSSQL share one definition. Importing it
-# runs the ``addLevelName`` + ``Logger.verbose`` monkeypatch as a side effect. It's
-# re-exported (see ``__all__``) so the many ``from openhound_sccm.log_context import
-# VERBOSE`` call sites keep working unchanged.
-from openhound_collector_common.logging.log_context import VERBOSE
-
-
-class VerboseLogger(logging.Logger):
-    """A stdlib ``Logger`` plus the project's custom ``verbose`` level method.
-
-    ``verbose`` is attached to ``logging.Logger`` at import time (above), but a
-    static type checker can't see that runtime monkeypatch, so it flags every
-    ``logger.verbose(...)`` call as an unknown attribute. Modules obtain their
-    logger via :func:`get_logger` and get this type instead, so ``verbose`` is
-    known while the full stdlib ``Logger`` interface is still inherited.
-    """
-
-    def verbose(self, message: str, *args: Any, **kwargs: Any) -> None: ...
-
-
-def get_logger(name: str) -> VerboseLogger:
-    """Return a module logger typed to include the custom ``verbose`` level.
-
-    Drop-in for ``logging.getLogger(__name__)``; the returned object is the
-    same plain ``Logger`` at runtime, only re-typed so ``.verbose(...)`` checks.
-    """
-    return logging.getLogger(name)  # type: ignore[return-value]
-
-
-# ---------------------------------------------------------------------------
-# Per-target / per-phase context vars
-# ---------------------------------------------------------------------------
-_current_target: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "openhound_sccm_target", default=None,
+from openhound_collector_common.logging.log_context import (  # noqa: F401 (re-exported)
+    VERBOSE,
+    LogContextFilter,
+    VerboseLogger,
+    fire_host_complete,
+    get_current_resource,
+    get_current_target,
+    get_logger,
+    install_filter,
+    per_host_iter,
+    per_pair_iter,
+    phase_context,
+    register_host_complete_callback,
+    register_resource_complete_callback,
+    target_context,
+    unregister_host_complete_callback,
+    unregister_resource_complete_callback,
+    with_log_context,
 )
-_current_phase: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "openhound_sccm_phase", default=None,
-)
-_current_resource: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "openhound_sccm_resource", default=None,
+from openhound_collector_common.logging.log_context import (
+    cached_with_log as _shared_cached_with_log,
+    trace_edge as _shared_trace_edge,
+    trace_node as _shared_trace_node,
+    trace_node_with_properties as _shared_trace_node_with_properties,
+    trace_property_added as _shared_trace_property_added,
 )
 
-# ---------------------------------------------------------------------------
-# Resource-completion callback registry
-# ---------------------------------------------------------------------------
-# Callables registered here are invoked with (resource_name: str) when a
-# resource generator exhausts naturally.  Used by _OrderedLogFileHandler in
-# main.py to flush each resource's buffered records to disk as a labelled
-# block the moment that resource finishes.
-_resource_complete_callbacks: List[Callable[[str], None]] = []
-_resource_complete_callbacks_lock = threading.Lock()
-
-# Callables registered here are invoked with (hostname: str) when a per-host
-# target finishes its full phase sequence in the worker pool. Used by
-# _OrderedLogFileHandler to flush each host's buffered records as a labelled
-# block the moment that host completes — the per-host analogue of the
-# resource-completion callbacks above.
-_host_complete_callbacks: List[Callable[[str], None]] = []
-_host_complete_callbacks_lock = threading.Lock()
-
-
-def get_current_resource() -> Optional[str]:
-    """Return the name of the resource generator currently executing, or None."""
-    return _current_resource.get(None)
-
-
-def get_current_target() -> Optional[str]:
-    """Return the target (host/domain) currently in log context, or None."""
-    return _current_target.get(None)
-
-
-def register_resource_complete_callback(cb: Callable[[str], None]) -> None:
-    """Register *cb* to be called with the resource name when a generator exhausts."""
-    with _resource_complete_callbacks_lock:
-        if cb not in _resource_complete_callbacks:
-            _resource_complete_callbacks.append(cb)
-
-
-def unregister_resource_complete_callback(cb: Callable[[str], None]) -> None:
-    """Remove a previously registered completion callback."""
-    with _resource_complete_callbacks_lock:
-        try:
-            _resource_complete_callbacks.remove(cb)
-        except ValueError:
-            pass
-
-
-def register_host_complete_callback(cb: Callable[[str], None]) -> None:
-    """Register *cb* to be called with the hostname when a target finishes all phases."""
-    with _host_complete_callbacks_lock:
-        if cb not in _host_complete_callbacks:
-            _host_complete_callbacks.append(cb)
-
-
-def unregister_host_complete_callback(cb: Callable[[str], None]) -> None:
-    """Remove a previously registered host-completion callback."""
-    with _host_complete_callbacks_lock:
-        try:
-            _host_complete_callbacks.remove(cb)
-        except ValueError:
-            pass
-
-
-def fire_host_complete(hostname: str) -> None:
-    """Notify every registered host-completion callback that *hostname* is done.
-
-    Passed to the per-host engine as ``on_target_complete``; runs in worker
-    threads, so callbacks must be thread-safe. Exceptions are swallowed so a
-    logging hiccup never aborts collection.
-    """
-    with _host_complete_callbacks_lock:
-        callbacks = list(_host_complete_callbacks)
-    for cb in callbacks:
-        try:
-            cb(hostname)
-        except Exception:
-            pass
-
-
-@contextlib.contextmanager
-def target_context(target: Optional[str]) -> Iterator[None]:
-    """Push *target* onto the log-context stack for the duration of the block.
-
-    Usage::
-
-        with target_context(hostname):
-            logger.info("Probing port 445...")
-
-    Reentrant: nested blocks shadow the outer value and restore it on exit.
-    """
-    token = _current_target.set(target)
-    try:
-        yield
-    finally:
-        _current_target.reset(token)
-
-
-@contextlib.contextmanager
-def phase_context(phase: Optional[str]) -> Iterator[None]:
-    """Push *phase* onto the log-context stack for the duration of the block.
-
-    Usage::
-
-        with phase_context("LDAP"):
-            logger.info("Searching for mSSMSSite objects...")
-    """
-    token = _current_phase.set(phase)
-    try:
-        yield
-    finally:
-        _current_phase.reset(token)
-
-
-# ---------------------------------------------------------------------------
-# Filter that folds the [target][phase] prefix into the message text
-# ---------------------------------------------------------------------------
-class LogContextFilter(logging.Filter):
-    """Prepend ``[target][phase]`` (whichever of the two are set) to every
-    record's message, so the framework's handler renders it inline.
-
-    Applied once on the root logger — see ``install_filter()`` below.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        # Filters run once per handler invocation. The same ``LogRecord`` may
-        # be passed through multiple handlers (e.g. a file handler + a stream
-        # handler when ``-v`` is set) — mutating ``record.msg`` each time
-        # would duplicate the prefix. Use a sentinel attribute to short-circuit
-        # on subsequent passes.
-        if getattr(record, "_oh_sccm_prefixed", False):
-            return True
-        target = _current_target.get(None)
-        phase = _current_phase.get(None)
-        if not target and not phase:
-            return True
-        parts = []
-        if target:
-            parts.append(f"[{target}]")
-        if phase:
-            parts.append(f"[{phase}]")
-        prefix = "".join(parts) + " "
-        # ``record.getMessage()`` applies args to msg — but we only want to
-        # prepend the prefix to the *format string*, leaving the args alone.
-        # Mutating ``msg`` is the conventional way; ``args`` stay untouched
-        # so percent-format substitution still works.
-        record.msg = prefix + str(record.msg)
-        record._oh_sccm_prefixed = True  # type: ignore[attr-defined]
-        return True
-
-
-_FILTER_SINGLETON = LogContextFilter()
-
-
-class _DebugExcInfoFilter(logging.Filter):
-    """Inject ``exc_info`` into WARNING+ records emitted inside an active
-    exception handler when the root logger is at DEBUG level.
-
-    Bridges the common pattern of a warning without exc_info + a companion
-    debug line, making the warning automatically carry the traceback in
-    debug mode. A sentinel attribute prevents double-injection when the
-    same record passes through multiple handlers.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if (
-            record.levelno >= logging.WARNING
-            and not record.exc_info
-            and not getattr(record, "_oh_sccm_exc_injected", False)
-            and logging.root.isEnabledFor(logging.DEBUG)
-        ):
-            exc = sys.exc_info()
-            if exc[0] is not None and exc[0] is not StopIteration:
-                record.exc_info = exc
-                record._oh_sccm_exc_injected = True  # type: ignore[attr-defined]
-        return True
-
-
-_EXC_INFO_FILTER_SINGLETON = _DebugExcInfoFilter()
-
-
-def install_filter() -> None:
-    """Install the ``[target][phase]`` prefix filter on the root logger
-    and disable Rich markup parsing on any ``RichHandler`` it finds.
-
-    Idempotent: re-running it adds the singleton at most once. The framework
-    configures its own root handler at import time — we just plug into it.
-
-    Two runtime adjustments to each ``RichHandler`` (no framework code edits,
-    just attribute writes on the existing handler instance):
-
-    1. ``markup = False`` — the framework sets ``markup=True``, so Rich
-       treats ``[mayyhem.com]`` as a malformed markup tag (the ``.`` trips
-       the parser) and silently drops it. With markup off, brackets render
-       literally.
-    2. ``_log_render.show_path = False`` — drop the trailing ``ldap.py:117``
-       column, which steals width and forces long messages to wrap.
-    """
-    root = logging.getLogger()
-    if _FILTER_SINGLETON not in root.filters:
-        root.addFilter(_FILTER_SINGLETON)
-    if _EXC_INFO_FILTER_SINGLETON not in root.filters:
-        root.addFilter(_EXC_INFO_FILTER_SINGLETON)
-    # Each existing handler gets the filter too, in case the handler ignores
-    # logger-level filters (RichHandler historically has).
-    for logger_name in ("", "dlt"):
-        target_logger = logging.getLogger(logger_name)
-        for handler in target_logger.handlers:
-            if _FILTER_SINGLETON not in handler.filters:
-                handler.addFilter(_FILTER_SINGLETON)
-            if _EXC_INFO_FILTER_SINGLETON not in handler.filters:
-                handler.addFilter(_EXC_INFO_FILTER_SINGLETON)
-            # Tidy up RichHandler instances — duck-typed checks so we don't
-            # depend on importing rich here. RichHandler stores show_path on
-            # its internal LogRender, not as a direct instance attr, so we
-            # reach into ``_log_render``.
-            if getattr(handler, "markup", False):
-                handler.markup = False
-            log_render = getattr(handler, "_log_render", None)
-            if log_render is not None and hasattr(log_render, "show_path"):
-                log_render.show_path = False
-
-
-# ---------------------------------------------------------------------------
-# Decorator factory
-# ---------------------------------------------------------------------------
 _F = TypeVar("_F", bound=Callable)
 
-
-def with_log_context(
-    *,
-    phase: Optional[str] = None,
-    target: Optional[str] = None,
-    target_from_ctx_domain: bool = False,
-) -> Callable[[_F], _F]:
-    """Decorator that pushes a phase/target log context around a call.
-
-    Works for both regular functions and generator functions. The target/phase
-    contextvars are active for the duration of the call (including across
-    every ``yield`` in a generator) so any ``logger.*`` call inside the body
-    sees the correct context.
-
-    Apply it BELOW ``@app.resource(...)`` so DLT's decorator wraps our
-    wrapper, not the other way round::
-
-        @app.resource(name="ldap_computers", columns=Computer)
-        @with_log_context(phase="LDAP", target_from_ctx_domain=True)
-        def ldap_computers(ctx):
-            ...
-    """
-
-    def _resolve_target(args: tuple, kwargs: dict) -> Optional[str]:
-        if target is not None:
-            return target
-        # Populate the logged target from the context's domain if requested (e.g., [MAYYHEM.COM])
-        if target_from_ctx_domain:
-            ctx = args[0] if args else kwargs.get("ctx")
-            if ctx is not None:
-                domain = getattr(ctx, "domain", None)
-                return str(domain) if domain else None
-        return None
-
-    def decorator(func: _F) -> _F:
-        if inspect.isgeneratorfunction(func):
-            @functools.wraps(func)
-            def gen_wrapper(*args, **kwargs):
-                # DLT runs resource generators interleaved — it pulls one
-                # value from generator A, then one from B, then A again,
-                # etc. If we push ``phase_context(phase)`` once around the
-                # whole generator, the contextvar set by the LAST
-                # generator-to-enter leaks into other generators' yields
-                # because contextvars are process/thread-wide.
-                #
-                # Solution: push the phase / target / resource context
-                # **per next() call** so each iteration of the inner
-                # generator sees the right values exclusively. The yield
-                # itself happens outside the context (no logging there) so
-                # no interleaved caller sees our values.
-                resolved_target = _resolve_target(args, kwargs)
-                resource_name = func.__name__
-                inner = func(*args, **kwargs)
-                while True:
-                    phase_token = _current_phase.set(phase) if phase is not None else None
-                    target_token = _current_target.set(resolved_target) if resolved_target is not None else None
-                    resource_token = _current_resource.set(resource_name)
-                    try:
-                        value = next(inner)
-                    except StopIteration:
-                        # Fire completion callbacks before finally resets
-                        # the resource contextvar so any log lines emitted
-                        # by a callback still carry the correct resource.
-                        with _resource_complete_callbacks_lock:
-                            cbs = list(_resource_complete_callbacks)
-                        for cb in cbs:
-                            try:
-                                cb(resource_name)
-                            except Exception:
-                                pass
-                        return
-                    finally:
-                        _current_resource.reset(resource_token)
-                        if target_token is not None:
-                            _current_target.reset(target_token)
-                        if phase_token is not None:
-                            _current_phase.reset(phase_token)
-                    yield value
-            return gen_wrapper  # type: ignore[return-value]
-
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            resolved_target = _resolve_target(args, kwargs)
-            phase_token = _current_phase.set(phase) if phase is not None else None
-            target_token = _current_target.set(resolved_target) if resolved_target is not None else None
-            try:
-                return func(*args, **kwargs)
-            finally:
-                if target_token is not None:
-                    _current_target.reset(target_token)
-                if phase_token is not None:
-                    _current_phase.reset(phase_token)
-        return wrapper  # type: ignore[return-value]
-
-    return decorator
+# SCCM's graph-build traces and lookup-cache logs land under these logger names;
+# SCCM's log filtering / ordered-log handler key on them.
+_GRAPH_LOGGER = logging.getLogger("openhound_sccm.graph")
+_LOOKUP_LOGGER = logging.getLogger("openhound_sccm.lookup")
 
 
-# ---------------------------------------------------------------------------
-# Per-host iteration helpers
-# ---------------------------------------------------------------------------
-def per_host_iter(items, *, key: str = "hostname") -> Iterator:
-    """Iterate a list of host-dicts, pushing ``target_context(host[key])`` per item.
-
-    The target contextvar is set before each ``yield`` and restored after the
-    caller's loop body finishes the iteration, so any ``logger.*`` call inside
-    the loop body sees the correct ``[hostname]`` prefix even when the loop
-    body itself is plain (no ``with`` block needed)::
-
-        for host in per_host_iter(ctx.ldap_computer_hosts()):
-            hostname = host["hostname"]
-            # logger.info(...) here is automatically tagged with [hostname][PHASE]
-
-    Items that aren't dicts are coerced via ``str()``. Items without a value
-    for *key* are yielded without a target context push (so generic
-    "skipping" log lines from a malformed entry still appear).
-    """
-    for h in items:
-        if isinstance(h, dict):
-            target = h.get(key)
-        else:
-            target = str(h) if h is not None else None
-        if target:
-            with target_context(str(target)):
-                yield h
-        else:
-            yield h
-
-
-def per_pair_iter(items) -> Iterator:
-    """Iterate ``(target, value)`` pairs, pushing ``target_context(target)`` per pair.
-
-    Useful for ``dict.items()`` iteration where the key is already the host
-    name (e.g. ``ctx.adminservice_payloads().items()``)::
-
-        for host, payload in per_pair_iter(ctx.adminservice_payloads().items()):
-            logger.info("processing %s", host)  # auto-tagged with [host][PHASE]
-    """
-    for key, value in items:
-        if key:
-            with target_context(str(key)):
-                yield key, value
-        else:
-            yield key, value
-
-
-# ---------------------------------------------------------------------------
-# Cache-with-verbose-logging — replaces ``@lru_cache`` on hot lookups so
-# we can emit PS1-equivalent "Resolved X from cache" / "Resolving X" traces.
-# ``lru_cache`` itself has no per-call hit indicator, so we keep our own
-# dict and log explicitly.
-# ---------------------------------------------------------------------------
 def cached_with_log(label: str) -> Callable[[_F], _F]:
-    """Decorate an instance method so every call logs at VERBOSE whether the
-    lookup hit the cache or fell through to the underlying query.
-
-    ``label`` is a short noun phrase used in the log line — typically the
-    kind of thing being resolved (e.g. ``"Computer SID"``, ``"User SAM"``).
-    Mirrors PS1's ``"Resolved <key> in domain <d> from cache"`` /
-    ``"Attempting to resolve <key>"`` Upsert-Node trace.
-
-    Replaces ``@lru_cache`` 1:1: drop-in compatible with bound methods,
-    keyed on the positional argument tuple.
-    """
-    logger = logging.getLogger("openhound_sccm.lookup")
-
-    def decorator(func: _F) -> _F:
-        cache: dict[tuple, object] = {}
-
-        @functools.wraps(func)
-        def wrapper(self, *args):
-            key = args
-            verbose_enabled = logger.isEnabledFor(VERBOSE)
-            if key in cache:
-                if verbose_enabled:
-                    key_text = ", ".join(repr(a) for a in args)
-                    logger.verbose("Resolved %s %s from cache", label, key_text)
-                return cache[key]
-            if verbose_enabled:
-                key_text = ", ".join(repr(a) for a in args)
-                logger.verbose("Resolving %s %s via DuckDB", label, key_text)
-            result = func(self, *args)
-            cache[key] = result
-            if result is None and verbose_enabled:
-                logger.verbose("No %s found for %s", label, key_text)
-            return result
-
-        wrapper.cache_clear = lambda: cache.clear()  # type: ignore[attr-defined]
-        return wrapper  # type: ignore[return-value]
-
-    return decorator
+    """SCCM cache-with-log: the shared decorator bound to the SCCM lookup logger."""
+    return _shared_cached_with_log(label, logger=_LOOKUP_LOGGER)
 
 
-# ---------------------------------------------------------------------------
-# Per-node / per-edge VERBOSE trace helpers used by SCCM model classes.
-# PS1's Upsert-Node / Upsert-Edge emit these at the framework boundary; in
-# OH the equivalent boundary is each model's ``as_node`` / ``edges`` body.
-# ---------------------------------------------------------------------------
 def trace_node(kind: str, node_id: str, name: Optional[str] = None) -> None:
-    """Emit a PS1-equivalent ``Found existing <kind> node: <id> (<name>)`` line."""
-    logger = logging.getLogger("openhound_sccm.graph")
-    suffix = f" ({name})" if name else ""
-    logger.verbose("Found existing %s node: %s%s", kind, node_id, suffix)
+    """SCCM graph node trace (shared ``trace_node`` bound to ``openhound_sccm.graph``)."""
+    _shared_trace_node(kind, node_id, name, logger=_GRAPH_LOGGER)
 
 
 def trace_edge(kind: str, start: str, end: str) -> None:
-    """Emit a PS1-equivalent ``Found existing edge X -[K]-> Y with identical
-    properties, no changes made`` line. OH's emission stage dedupes upstream,
-    so this fires for every yielded edge (same intent as PS1's per-touch log)."""
-    logger = logging.getLogger("openhound_sccm.graph")
-    logger.verbose("Found existing edge %s -[%s]-> %s with identical properties, no changes made", start, kind, end)
+    """SCCM graph edge trace (shared ``trace_edge`` bound to ``openhound_sccm.graph``)."""
+    _shared_trace_edge(kind, start, end, logger=_GRAPH_LOGGER)
 
 
 def trace_property_added(kind: str, node_id: str, prop_name: str, value) -> None:
-    """Emit a PS1-equivalent multi-line ``Added: <prop>: <value>`` trace
-    fragment as a single verbose line per property. PS1 emits these inside
-    ``Upsert-Node``'s structured update report; we flatten to one line
-    per property so each event is independently filterable / greppable.
-    Only call when ``value`` is non-None / non-empty to avoid log spam."""
-    logger = logging.getLogger("openhound_sccm.graph")
-    logger.verbose("    Added on %s %s: %s = %r", kind, node_id, prop_name, value)
+    """SCCM property-added trace (shared, bound to ``openhound_sccm.graph``)."""
+    _shared_trace_property_added(kind, node_id, prop_name, value, logger=_GRAPH_LOGGER)
 
 
 def trace_node_with_properties(kind: str, node_id: str, name: Optional[str], properties: Any) -> None:
-    """Emit a PS1-equivalent multi-line block: ``Found existing <kind> node:
-    <id> (<name>)`` followed by one ``    Added: <prop>: <value>`` line per
-    non-None / non-empty property.
-
-    Designed to be called *after* the SCCMNode has been built. ``properties``
-    is the SCCM ``*Properties`` dataclass instance (Pydantic model classes
-    don't gain ``__dataclass_fields__`` since these are stdlib dataclasses
-    that happen to layer on ``SCCMNodeProperties``). We iterate
-    ``dataclasses.fields(properties)`` and emit a line for each populated
-    field, skipping framework boilerplate (``node_id``, ``displayname``,
-    ``name``, ``environmentid``, ``last_seen``).
-    """
-    # Walking dataclass fields and reading every attribute is non-trivial work
-    # per node; short-circuit when VERBOSE is filtered so the convert hot path
-    # pays nothing.
-    if not logging.getLogger("openhound_sccm.graph").isEnabledFor(VERBOSE):
-        return
-    import dataclasses
-    trace_node(kind, node_id, name)
-    if properties is None:
-        return
-    skip = {"node_id", "displayname", "name", "environmentid", "last_seen"}
-    try:
-        if not dataclasses.is_dataclass(properties):
-            return
-        for field in dataclasses.fields(properties):
-            if field.name in skip:
-                continue
-            try:
-                value = getattr(properties, field.name)
-            except Exception:
-                continue
-            # Skip None / empty list / empty string — PS1 only logs values that
-            # actually change. ``False`` and ``0`` are real values worth showing.
-            if value is None or value == [] or value == "":
-                continue
-            trace_property_added(kind, node_id, field.name, value)
-    except Exception:
-        # Belt-and-suspenders: a logging helper must never crash the caller.
-        pass
+    """SCCM node+properties trace (shared, bound to ``openhound_sccm.graph``)."""
+    _shared_trace_node_with_properties(kind, node_id, name, properties, logger=_GRAPH_LOGGER)
 
 
 __all__ = [

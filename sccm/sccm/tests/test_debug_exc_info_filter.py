@@ -3,7 +3,10 @@ import pathlib
 
 import pytest
 
-from openhound_sccm.log_context import (
+# The debug exc-info filter + its singleton now live in the shared library
+# (SCCM's install_filter re-exports the shared one, which installs the shared
+# singleton), so test them at their new home.
+from openhound_collector_common.logging.log_context import (
     _DebugExcInfoFilter,
     _EXC_INFO_FILTER_SINGLETON,
     install_filter,
