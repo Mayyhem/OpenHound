@@ -11,6 +11,7 @@ import threading
 import time
 import traceback as _traceback
 import types
+from enum import Enum
 import typer
 from openhound.cli.collect import collect as _collect_typer  # noqa: E402
 
@@ -48,6 +49,53 @@ from .models.user import UserNode
 from .transforms import transforms
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Progress backend selection (`--progress`)
+# ---------------------------------------------------------------------------
+# dlt draws a live counter for every resource it extracts (the
+# `adminservice_r_system: 69it [...]` lines). Those redraws smear into the
+# collector's own [target][phase] INFO/VERBOSE records, so the default here is
+# "off": no dlt progress at all, leaving only our structured logs. tqdm / log /
+# alive_progress stay available as opt-ins for anyone who wants a live bar.
+#
+# The framework's core Progress enum (off-limits to edit) has no "off" member,
+# and core's Collector always forwards `progress.value` to
+# `dlt.pipeline(progress=...)`. dlt maps a `None` progress arg to its no-op
+# NULL_COLLECTOR, so we express "off" as a tiny stand-in whose `.value` is None
+# rather than touching OpenHound core.
+# ---------------------------------------------------------------------------
+class ProgressOption(str, Enum):
+    off = "off"
+    tqdm = "tqdm"
+    log = "log"
+    alive_progress = "alive_progress"
+
+
+class _SilentProgress:
+    """Progress stand-in that disables dlt's progress output entirely.
+
+    Collector reads only `.value` and hands it to `dlt.pipeline(progress=...)`;
+    `None` resolves to dlt's NULL_COLLECTOR (no bars, no periodic log dumps).
+    """
+
+    value = None
+
+
+def _resolve_progress(choice: ProgressOption):
+    """Translate a `--progress` choice into what core's Collector expects.
+
+    'off' -> silent stand-in (dlt NULL_COLLECTOR); anything else -> the matching
+    core Progress enum member (tqdm / log / alive_progress).
+    """
+    if choice is ProgressOption.off:
+        logger.debug("Progress output disabled (--progress off); using dlt NULL_COLLECTOR")
+        return _SilentProgress()
+    # A real backend was explicitly requested; hand core the matching enum member.
+    logger.debug("Progress backend selected: %s", choice.value)
+    return Progress(choice.value)
+
 
 # ---------------------------------------------------------------------------
 # OpenHound app instance. Still owns `source_kind` (flows into the OpenGraph
@@ -855,7 +903,11 @@ def collect_sccm(
     # ---- standard framework arguments ----
     output_path: OutputPath,
     resources: Optional[List[str]] = typer.Argument(None, help="Optional subset of resource names; default = all."),
-    progress: Progress = typer.Option(Progress.tqdm, help="Progress tracker (tqdm / log / alive_progress)."),
+    progress: ProgressOption = typer.Option(
+        ProgressOption.off,
+        help="Progress backend. 'off' (default) silences dlt's progress counters so only the "
+        "collector's own logs print; 'tqdm' / 'log' / 'alive_progress' re-enable a live tracker.",
+    ),
     tables: Contract = typer.Option(Contract.evolve, help="Contract for newly-seen resources/tables."),
     columns: Contract = typer.Option(Contract.evolve, help="Contract for unknown fields."),
     data_type: Contract = typer.Option(Contract.freeze, help="Contract for type mismatches."),
@@ -952,7 +1004,7 @@ def collect_sccm(
         set_shared_ad_cache({})
         set_shared_discovered_domains(set())
 
-        collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=progress)
+        collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=_resolve_progress(progress))
         ctx = CollectContext(pipeline=collector)
 
         src = sccm_source()

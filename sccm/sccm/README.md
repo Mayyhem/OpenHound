@@ -387,7 +387,7 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 
 | Option | Description |
 |---|---|
-| `--progress` | Progress tracker: `tqdm` (default), `log`, or `alive_progress`. |
+| `--progress` | Progress backend. `off` (default) silences dlt's per-resource progress counters so only the collector's own `[target][phase]` logs print; pass `tqdm`, `log`, or `alive_progress` to re-enable a live tracker. |
 | `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
 | `-v`, `--verbose` | Repeatable. `-v` → INFO (step summaries), `-vv` → VERBOSE (per-resolution / per-node traces). |
 | `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). |
