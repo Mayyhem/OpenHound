@@ -59,14 +59,20 @@ class SCCMAdminUser(BaseAsset):
 
         root = self.root_site_code or ""
         node_id = f"{key}@{root}" if root else key
-        display = self.display_name or logon or node_id
 
         return SCCMNode(
             id=node_id,
             kinds=[nk.SCCM_ADMIN_USER],
             properties=SCCMAdminUserProperties(
                 name=logon or node_id,
-                displayname=display,
+                # CMBP parity: admin-user nodes carry ONLY the camelCase `displayName`
+                # (below), never the framework base lowercase `displayname`. Setting both
+                # would put two keys that differ only by case on one node's properties,
+                # which every case-insensitive consumer rejects as a duplicate key —
+                # BloodHound/Neo4j ingestion and the PowerShell unit-test kit's
+                # ConvertFrom-Json alike. CMBP never emits the lowercase key, so we drop
+                # it here by passing None (pruned on emit).
+                displayname=None,
                 environmentid=root or key,
                 adminID=self.admin_id,
                 adminSid=self.admin_sid,
@@ -74,7 +80,8 @@ class SCCMAdminUser(BaseAsset):
                 isGroup=self.is_group,
                 accountType=self.account_type,
                 rootSiteCode=self.root_site_code,
-                displayName=self.display_name,
+                # CMBP parity: empty display name is omitted, not emitted as "".
+                displayName=self.display_name or None,
                 sourceSiteCode=self.source_site_code,
                 createdBy=self.created_by,
                 createdDate=self.created_date,

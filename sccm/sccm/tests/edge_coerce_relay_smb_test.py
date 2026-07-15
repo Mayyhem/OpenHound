@@ -40,9 +40,22 @@ def test_smb_relay_default_emits():
     assert victims == ["SS01.mayyhem.com"]        # the coerced site server
 
 
-def test_smb_relay_flag_drops_null_ntlm():
+def test_smb_relay_flag_keeps_null_ntlm():
+    # New semantics: an unset RestrictReceivingNTLMTraffic is the Windows default (0 = allow all
+    # inbound NTLM) = genuinely vulnerable, so the confirmed edge (target signing NOT required)
+    # survives --disable-possible-edges. NTLM is flag-independent; the confirmed gate is
+    # smb_signing_required = false. Matches CMBP, which emits this confirmed edge under its flag.
     con = duckdb.connect()
     _seed(con, target_ntlm=None)
+    _edge_coerce_relay_smb(con, "sccm", disable_possible=True)
+    assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1
+
+
+def test_smb_relay_drops_explicit_ntlm_restricted():
+    # An explicitly restricted inbound NTLM (a value other than 'Off') means the target refuses the
+    # relayed NTLM, so no edge -- regardless of the flag.
+    con = duckdb.connect()
+    _seed(con, target_ntlm="DenyAll")
     _edge_coerce_relay_smb(con, "sccm", disable_possible=True)
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 0
 

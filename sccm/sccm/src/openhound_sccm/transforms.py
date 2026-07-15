@@ -394,14 +394,15 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- smb_computers: smb_signing_required; sccm_hosts_content_library; sccm_is_pxe_support_enabled ---
-    # smb_computers spreads **ad_object which includes distinguished_name (primary source).
-    # sam_account_name is not emitted by the SMB collector — use NULL so the LDAP sources win via any_value.
+    # smb_computers spreads **ad_object, which includes distinguished_name AND sam_account_name
+    # (both resolved from the AD computer object). Read sam here so a host seen only over SMB
+    # still gets its account name (any_value picks the first non-null across all sources).
     _safe(
         con,
         "node_computer<-smb_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -420,14 +421,16 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- remoteregistry_computers: disable_loopback_check; restrict_receiving_ntlm_traffic (string) ---
-    # remoteregistry_computers also spreads **ad_object, providing distinguished_name.
-    # sam_account_name is not emitted by the RemoteRegistry collector — use NULL.
+    # remoteregistry_computers spreads **ad_object, providing distinguished_name AND
+    # sam_account_name. Read sam here: a site system reached over RemoteRegistry but not via a
+    # user/LDAP source (e.g. a CAS-side site server) would otherwise have a NULL account name,
+    # which blocks the MSSQL-login inference (transforms.py::_node_mssql_login).
     _safe(
         con,
         "node_computer<-remoteregistry_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -446,13 +449,13 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     )
 
     # --- adminservice_site_definitions_computers: object_sid; sccm_site_system_roles ---
-    # This source also spreads **ad_object, providing distinguished_name.
+    # This source also spreads **ad_object, providing distinguished_name AND sam_account_name.
     _safe(
         con,
         "node_computer<-adminservice_site_definitions_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -475,7 +478,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "node_computer<-wmi_site_definitions_computers",
         f"INSERT INTO {schema}.node_computer BY NAME "
         f"SELECT upper(object_sid) AS sid, name, "
-        f"dns_host_name AS dnshostname, NULL AS sam_account_name, distinguished_name, "
+        f"dns_host_name AS dnshostname, sam_account_name, distinguished_name, "
         f"NULL AS resource_id_str, "
         f"{_arr('sccm_site_system_roles')} AS roles, "
         f"coalesce(sccm_infra, false) AS sccm_infra, "
@@ -589,6 +592,44 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_computer "
         f"GROUP BY sid"
     )
+
+    # Augment site_system_roles from SMS_SCI_SysResUse (adminservice_site_systems / wmi_site_systems).
+    # That source lists EVERY site system — including passive site servers and SMS Providers — each
+    # with its role_name + site_code, but keyed by hostname (network_os_path), not SID, so it can't be
+    # a SID-keyed staging arm above. The only other source of "@<site>"-suffixed roles is
+    # SMS_SCI_SiteDefinition, which covers just the ACTIVE site server + SQL host per site. Without this
+    # step a passive server / SMS Provider never gets "SMS Site Server@<site>" / "SMS Provider@<site>",
+    # so the MSSQL-login inference (_node_mssql_login, mirroring CMBP ps1:1912) skips it and only the
+    # active site server gets a site-DB login. CMBP builds SCCMSiteSystemRoles from this same
+    # per-site-system data. Join by dnshostname since SysResUse carries no SID; strip the leading
+    # "\\" from network_os_path (e.g. "\\ps1-psv.mayyhem.com").
+    con.execute("CREATE OR REPLACE TEMP TABLE _sysres_roles (host VARCHAR, roles VARCHAR[])")
+    for _ss in ("adminservice_site_systems", "wmi_site_systems"):
+        _ensure_columns(con, schema, _ss, {
+            "network_os_path": "VARCHAR", "role_name": "VARCHAR", "site_code": "VARCHAR",
+        })
+        _safe(
+            con, f"_sysres_roles<-{_ss}",
+            f"INSERT INTO _sysres_roles "
+            f"SELECT lower(ltrim(network_os_path, '\\')) AS host, "
+            f"  list_distinct(list(role_name || '@' || site_code)) AS roles "
+            f"FROM {schema}.{_ss} "
+            f"WHERE role_name IS NOT NULL AND site_code IS NOT NULL "
+            f"  AND network_os_path IS NOT NULL AND trim(network_os_path) != '' "
+            f"GROUP BY host",
+        )
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_computer AS "
+        f"WITH _sr AS ("
+        f"  SELECT host, list_distinct(flatten(list(roles))) AS roles FROM _sysres_roles GROUP BY host"
+        f") "
+        f"SELECT nc.* REPLACE ("
+        f"  list_distinct(list_concat(nc.site_system_roles, "
+        f"    coalesce(sr.roles, CAST([] AS VARCHAR[])))) AS site_system_roles"
+        f") "
+        f"FROM {schema}.node_computer nc "
+        f"LEFT JOIN _sr sr ON nc.dnshostname IS NOT NULL AND lower(nc.dnshostname) = sr.host"
+    )
     logger.info("node_computer built in schema %r", schema)
 
 
@@ -616,7 +657,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "sccm_infra BOOLEAN, "
         "stored_in_sccm_site VARCHAR, "   # site_code where the account is stored (reserved)
         "distinguished_name VARCHAR, "
-        "user_principal_name VARCHAR"
+        "user_principal_name VARCHAR, "
+        "sam_account_name VARCHAR"        # bare SAM (e.g. 'sqlsccmsvc'); any_value below
         ")"
     )
 
@@ -626,6 +668,7 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "resource_id": "BIGINT",
         "source_site_code": "VARCHAR",
         "sam_account_name": "VARCHAR",
+        "user_name": "VARCHAR",
         "logon_name": "VARCHAR",
         "is_group": "BOOLEAN",
         "site_code": "VARCHAR",
@@ -651,7 +694,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"false AS sccm_infra, "
         f"NULL AS stored_in_sccm_site, "
         f"distinguished_name, "
-        f"user_principal_name "
+        f"user_principal_name, "
+        f"user_name AS sam_account_name "  # SMS_R_User.UserName is the bare SAM (e.g. 'sqlsccmsvc')
         f"FROM {schema}.adminservice_r_user "
         f"WHERE sid IS NOT NULL",
     )
@@ -667,7 +711,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"false AS sccm_infra, "
         f"NULL AS stored_in_sccm_site, "
         f"distinguished_name, "
-        f"user_principal_name "
+        f"user_principal_name, "
+        f"user_name AS sam_account_name "
         f"FROM {schema}.wmi_r_user "
         f"WHERE sid IS NOT NULL",
     )
@@ -682,7 +727,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"false AS sccm_infra, "
         f"NULL AS stored_in_sccm_site, "
         f"NULL AS distinguished_name, "
-        f"NULL AS user_principal_name "
+        f"NULL AS user_principal_name, "
+        f"sam_account_name "  # remoteregistry_users carries the bare SAM directly
         f"FROM {schema}.remoteregistry_users "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -697,7 +743,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"true AS sccm_infra, "
         f"NULL AS stored_in_sccm_site, "
         f"NULL AS distinguished_name, "
-        f"NULL AS user_principal_name "
+        f"NULL AS user_principal_name, "
+        f"NULL AS sam_account_name "  # admins carry only logon_name (DOMAIN\\user), not a bare SAM
         f"FROM {schema}.adminservice_admins "
         f"WHERE admin_sid IS NOT NULL AND NOT coalesce(is_group, false)",
     )
@@ -712,7 +759,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"true AS sccm_infra, "
         f"NULL AS stored_in_sccm_site, "
         f"NULL AS distinguished_name, "
-        f"NULL AS user_principal_name "
+        f"NULL AS user_principal_name, "
+        f"NULL AS sam_account_name "
         f"FROM {schema}.wmi_admins "
         f"WHERE admin_sid IS NOT NULL AND NOT coalesce(is_group, false)",
     )
@@ -728,7 +776,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"false AS sccm_infra, "
         f"site_code AS stored_in_sccm_site, "
         f"NULL AS distinguished_name, "
-        f"NULL AS user_principal_name "
+        f"NULL AS user_principal_name, "
+        f"NULL AS sam_account_name "
         f"FROM {schema}.adminservice_reserved_accounts "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -743,7 +792,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"false AS sccm_infra, "
         f"site_code AS stored_in_sccm_site, "
         f"NULL AS distinguished_name, "
-        f"NULL AS user_principal_name "
+        f"NULL AS user_principal_name, "
+        f"NULL AS sam_account_name "
         f"FROM {schema}.wmi_reserved_accounts "
         f"WHERE object_sid IS NOT NULL",
     )
@@ -762,7 +812,8 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  bool_or(sccm_infra) AS sccm_infra, "
         f"  any_value(stored_in_sccm_site) AS stored_in_sccm_site, "
         f"  any_value(distinguished_name) AS distinguished_name, "
-        f"  any_value(user_principal_name) AS user_principal_name "
+        f"  any_value(user_principal_name) AS user_principal_name, "
+        f"  any_value(sam_account_name) AS sam_account_name "
         f"FROM {schema}.node_user "
         f"GROUP BY sid"
     )
@@ -2752,23 +2803,27 @@ def _edge_mssql_service_account(con: duckdb.DuckDBPyConnection, schema: str) -> 
 
 
 def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Database -SCCM_AssignAllPermissions-> every non-secondary site (CMBP :6173-6180).
+    """Database -SCCM_AssignAllPermissions-> its OWN (non-secondary) site (CMBP :6173-6180).
 
-    The site DB has full control of the hierarchy. Mirrors the non-secondary site set used
-    by _edge_assign_all_permissions (coalesce(site_type, 0) != 1; site_code IS NOT NULL).
-    The site node id is the bare site_code (SCCMSite model id), matching the existing
-    assign-all builder.
+    Each PRIMARY site database can assign all permissions to its own site (it holds that site's
+    RBAC). The join keys the DB to its own `sccm_site` and the `site_type != 1` filter drops
+    secondary-site databases (e.g. CM_SEC), whose DB holds no assignable RBAC. CMBP's code loops
+    `Get-SitesInHierarchy -ExcludeSecondarySites`, but on a CAS+primary topology its live output
+    is own-site only — matching that avoids DB->every-site false positives (e.g. PS1-DB->CAS,
+    which would imply a child primary controlling the CAS). The site node id is the bare
+    site_code (SCCMSite model id). (Unlike the SMS-Provider *computer* assign-all edge, which
+    legitimately fans out to every primary site via the AdminService.)
     """
     from .kinds.edges import SCCM_ASSIGN_ALL_PERMISSIONS
-    nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
-              f"WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL)")
     _safe(con, "edge_mssql_db_assign_all",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT d.database_id AS start_id, site.site_code AS end_id, "
+          f"SELECT d.database_id AS start_id, sh.site_code AS end_id, "
           f"  '{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, "
           f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
           f"FROM {schema}.node_mssql_database d "
-          f"CROSS JOIN {nonsec} site")
+          f"JOIN {schema}.site_hierarchy sh "
+          f"  ON upper(sh.site_code) = upper(d.sccm_site) "
+          f"  AND coalesce(sh.site_type, 0) != 1 AND sh.site_code IS NOT NULL")
 
 
 def _edge_coerce_relay_adminservice(
@@ -2789,10 +2844,11 @@ def _edge_coerce_relay_adminservice(
     from .kinds.edges import COERCE_AND_RELAY_TO_ADMIN_SERVICE
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_computer always emits VARCHAR but be explicit.
-    # Default: null/Off => vulnerable. Flag: only explicit 'Off'.
-    ntlm_ok = ("upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
-               if not disable_possible
-               else "upper(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'")
+    # NTLM gate is flag-INDEPENDENT: an unset RestrictReceivingNTLMTraffic is the Windows default
+    # (0 = allow all inbound NTLM) = genuinely vulnerable, so NULL counts as vulnerable even under
+    # --disable-possible-edges (matches CMBP, which emits these confirmed edges under its flag).
+    # The confirmed gate for this edge is the provider's SMS Provider role, always applied below.
+    ntlm_ok = "upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
     _safe(
         con, "edge_coerce_relay_adminservice",
         f"INSERT INTO {schema}.graph_edges BY NAME "
@@ -2842,13 +2898,15 @@ def _edge_coerce_relay_mssql(
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_mssql_server and node_computer always emit
     # VARCHAR but be explicit (same pattern as _edge_coerce_relay_adminservice).
-    # Default: null/Off => vulnerable. Flag: only explicit 'Off'.
+    # EPA is the CONFIRMED gate: default treats null-or-'Off' as vulnerable; the flag requires an
+    # explicit 'Off' (a known EPA other than 'Off' always disqualifies). NTLM is flag-INDEPENDENT:
+    # an unset RestrictReceivingNTLMTraffic is the Windows default (0 = allow all inbound NTLM) =
+    # genuinely vulnerable, so NULL counts even under --disable-possible-edges (matches CMBP).
+    ntlm_ok = "upper(coalesce(CAST(h.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
     if not disable_possible:
         epa_ok = "(s.extended_protection IS NULL OR upper(CAST(s.extended_protection AS VARCHAR)) = 'OFF')"
-        ntlm_ok = "upper(coalesce(CAST(h.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
     else:
         epa_ok = "upper(CAST(s.extended_protection AS VARCHAR)) = 'OFF'"
-        ntlm_ok = "upper(CAST(h.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'"
     _safe(
         con, "edge_coerce_relay_mssql",
         f"INSERT INTO {schema}.graph_edges BY NAME "
@@ -2889,9 +2947,11 @@ def _edge_coerce_relay_smb(
     # Cast restrict_receiving_ntlm_traffic to VARCHAR before upper() — DuckDB types a
     # ?-bound NULL column as INTEGER at bind time, causing upper() to fail. This CAST is
     # harmless in production (the real column is VARCHAR). Same fix as E1/F1.
-    ntlm_ok = ("upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
-               if not disable_possible
-               else "upper(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR)) = 'OFF'")
+    # NTLM gate is flag-INDEPENDENT: unset RestrictReceivingNTLMTraffic = Windows default
+    # (0 = allow all inbound NTLM) = vulnerable, so NULL counts even under --disable-possible-edges
+    # (matches CMBP). The CONFIRMED gate for SMB is the target's smb_signing_required = false,
+    # applied strictly below regardless of the flag.
+    ntlm_ok = "upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
     _safe(
         con, "edge_coerce_relay_smb",
         f"INSERT INTO {schema}.graph_edges BY NAME "

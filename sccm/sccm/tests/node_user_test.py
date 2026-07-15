@@ -118,6 +118,45 @@ def test_node_user_carries_ad_attrs():
     assert r == ("CN=alice,DC=lab", "alice@lab")
 
 
+def test_node_user_sam_account_name_from_user_name():
+    """SMS_R_User.UserName (raw column user_name) is the bare SAM (e.g. 'sqlsccmsvc');
+    node_user must surface it as sam_account_name.
+
+    Regression guard: without this, User nodes carry no samAccountName, so every edge
+    keyed on the User endpoint by samAccountName fails — the SQL service account
+    (HasSession, MSSQL_GetTGS/GetAdminTGS/ServiceAccountFor) and AD users alike.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_r_user AS SELECT "
+        "'S-1-5-21-1-2-3-1116' AS sid, 'mayyhem\\svc (svc)' AS name, "
+        "NULL AS resource_id, 'PS1' AS source_site_code, 'sqlsccmsvc' AS user_name"
+    )
+    transforms(con)
+    r = con.execute(
+        "SELECT sam_account_name FROM sccm.node_user WHERE sid='S-1-5-21-1-2-3-1116'"
+    ).fetchone()
+    assert r is not None
+    assert r[0] == "sqlsccmsvc"
+
+
+def test_node_user_sam_account_name_from_remoteregistry():
+    """remoteregistry_users carries the bare SAM directly; it must reach node_user.sam_account_name."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.remoteregistry_users AS SELECT "
+        "'S-1-5-21-1-2-3-1301' AS object_sid, 'localsvc' AS sam_account_name"
+    )
+    transforms(con)
+    r = con.execute(
+        "SELECT sam_account_name FROM sccm.node_user WHERE sid='S-1-5-21-1-2-3-1301'"
+    ).fetchone()
+    assert r is not None
+    assert r[0] == "localsvc"
+
+
 def test_node_user_ad_attrs_any_value_coalesce():
     """When both adminservice_r_user and wmi_r_user have the same SID,
     any_value picks one non-null distinguished_name (idempotent)."""

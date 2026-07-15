@@ -227,6 +227,107 @@ def test_node_computer_distinguished_name_from_wmi_site_definitions_computers():
     assert row[0] == "CN=WMIHOST,OU=Computers,DC=lab,DC=local"
 
 
+def test_node_computer_sam_account_name_from_remoteregistry():
+    """remoteregistry_computers spreads **ad_object which includes sam_account_name; it must
+    not be dropped to NULL.
+
+    Regression guard for the MSSQL-login bug: the arm used to emit NULL AS sam_account_name,
+    so a site server seen only over RemoteRegistry (e.g. a CAS-side server not in a user/LDAP
+    source) ended up with a NULL account name, which the MSSQL-login inference filters out.
+    """
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.remoteregistry_computers AS SELECT "
+        "'S-1-5-21-1-2-3-2100' AS object_sid, 'RRHOST' AS name, "
+        "'rrhost.lab' AS dns_host_name, 'RRHOST$' AS sam_account_name, "
+        "false AS disable_loopback_check, NULL AS restrict_receiving_ntlm_traffic, "
+        "false AS smb_signing_required, true AS sccm_infra, "
+        "NULL AS sccm_site_system_roles"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT sam_account_name FROM sccm.node_computer WHERE sid = 'S-1-5-21-1-2-3-2100'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "RRHOST$"
+
+
+def test_node_computer_sam_account_name_from_site_definitions():
+    """adminservice_site_definitions_computers spreads **ad_object incl. sam_account_name.
+
+    Same regression guard as above for the site-definition arm — the source that gives the
+    active site server its 'SMS Site Server@<site>' role must also forward its account name.
+    """
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions_computers ("
+        "object_sid VARCHAR, name VARCHAR, dns_host_name VARCHAR, sam_account_name VARCHAR, "
+        "distinguished_name VARCHAR, sccm_site_system_roles VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO sccm.adminservice_site_definitions_computers VALUES (?, ?, ?, ?, ?, ?)",
+        ["S-1-5-21-1-2-3-2200", "SDCHOST", "sdchost.lab", "SDCHOST$",
+         "CN=SDCHOST,DC=lab,DC=local", "SMS Site Server@CAS"],
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT sam_account_name FROM sccm.node_computer WHERE sid = 'S-1-5-21-1-2-3-2200'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "SDCHOST$"
+
+
+def test_node_computer_site_system_roles_augmented_from_sysresuse():
+    """SMS_SCI_SysResUse (adminservice_site_systems) lists every site system with role_name +
+    site_code, keyed by hostname (network_os_path), not SID. node_computer must fold these in as
+    'role@site' so a passive site server / SMS Provider — which SMS_SCI_SiteDefinition never
+    lists — still gets 'SMS Site Server@<site>' / 'SMS Provider@<site>'. Without those suffixed
+    roles the MSSQL-login inference (_node_mssql_login, mirroring CMBP ps1:1912) skips the host.
+    """
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    # Host known via RemoteRegistry (SID + hostname), with no @site role from that source...
+    con.execute(
+        "CREATE TABLE sccm.remoteregistry_computers AS SELECT "
+        "'S-1-5-21-1-2-3-2300' AS object_sid, 'PSV' AS name, "
+        "'psv.lab' AS dns_host_name, 'PSV$' AS sam_account_name, "
+        "false AS disable_loopback_check, NULL AS restrict_receiving_ntlm_traffic, "
+        "false AS smb_signing_required, true AS sccm_infra, "
+        "NULL AS sccm_site_system_roles"
+    )
+    # ...its per-site roles live only in SysResUse, keyed by network_os_path (leading '\\'), no SID.
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_systems ("
+        "network_os_path VARCHAR, role_name VARCHAR, site_code VARCHAR)"
+    )
+    con.executemany(
+        "INSERT INTO sccm.adminservice_site_systems VALUES (?, ?, ?)",
+        [["\\\\psv.lab", "SMS Site Server", "PS1"],
+         ["\\\\psv.lab", "SMS Provider", "PS1"],
+         ["\\\\PSV.LAB", "SMS Component Server", "PS1"]],
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT site_system_roles FROM sccm.node_computer WHERE sid = 'S-1-5-21-1-2-3-2300'"
+    ).fetchone()
+    assert row is not None
+    roles = row[0]
+    assert "SMS Site Server@PS1" in roles, roles
+    assert "SMS Provider@PS1" in roles, roles
+    assert "SMS Component Server@PS1" in roles, roles
+
+
 def test_node_computer_distinguished_name_any_value_wins():
     """When smb_computers and remoteregistry_computers both have distinguished_name
     for the same SID, any_value picks the first non-null (idempotent)."""

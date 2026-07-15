@@ -1,0 +1,7 @@
+# Bulky per-run artifacts are saved on disk for inspection but not committed.
+# The comparison report.md and the *.ps1 / *.py harness scripts ARE tracked.
+results/*.txt
+results/*.log
+results/*.zip
+results/*.duckdb
+results/*.json

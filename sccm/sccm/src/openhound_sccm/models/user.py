@@ -33,6 +33,7 @@ class UserNode(BaseAsset):
     stored_in_sccm_site: str | None = None
     distinguished_name: str | None = None
     user_principal_name: str | None = None
+    sam_account_name: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -71,6 +72,7 @@ class UserNode(BaseAsset):
                 storedInSCCMSite=self.stored_in_sccm_site,
                 distinguishedName=self.distinguished_name,
                 userPrincipalName=self.user_principal_name,
+                samAccountName=self.sam_account_name,
             ),
         )
 

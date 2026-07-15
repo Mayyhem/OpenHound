@@ -70,13 +70,16 @@ class SCCMClientDevice(BaseAsset):
             return None
 
         root = self.root_site_code or ""
+        # CMBP names a client device "<netbios>@<siteCode>" (e.g. "PS1-DEV@PS1") because the same
+        # device can be a client of multiple sites, each with its own record. `name` (not just
+        # `displayname`) must carry the suffix so edges/tests that resolve the device by name match.
         display = f"{self.name}@{self.site_code}" if (self.name and self.site_code) else (self.name or sid)
 
         return SCCMNode(
             id=sid,
             kinds=[nk.SCCM_CLIENT_DEVICE],
             properties=SCCMClientDeviceProperties(
-                name=self.name or sid,
+                name=display,
                 displayname=display,
                 environmentid=root or sid,
                 SMSID=sid,

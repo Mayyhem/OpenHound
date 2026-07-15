@@ -60,8 +60,20 @@ def test_mssql_relay_flag_drops_assumed_epa():
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 0
 
 
-def test_mssql_relay_flag_drops_assumed_ntlm():
+def test_mssql_relay_flag_keeps_null_ntlm_with_confirmed_epa():
+    # New semantics: host NTLM unset = Windows default (allow all inbound NTLM) = vulnerable, so
+    # with EPA explicitly 'Off' (the confirmed gate) the edge survives --disable-possible-edges.
+    # NTLM is flag-independent; only EPA must be explicit 'Off' under the flag. Matches CMBP.
     con = duckdb.connect()
-    _seed(con, host_ntlm=None, epa="Off")  # EPA explicit Off, host NTLM unknown
+    _seed(con, host_ntlm=None, epa="Off")  # EPA explicit Off (confirmed), host NTLM unset (default-vulnerable)
+    _edge_coerce_relay_mssql(con, "sccm", disable_possible=True)
+    assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1
+
+
+def test_mssql_relay_drops_explicit_ntlm_restricted():
+    # Explicitly restricted host NTLM (not 'Off') -> the relayed NTLM is refused -> no edge, even
+    # with EPA off and even without the flag.
+    con = duckdb.connect()
+    _seed(con, host_ntlm="DenyAll", epa="Off")
     _edge_coerce_relay_mssql(con, "sccm", disable_possible=True)
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 0

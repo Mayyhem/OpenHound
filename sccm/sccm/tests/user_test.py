@@ -81,3 +81,16 @@ def test_user_exposes_distinguished_name_and_upn(distinguished_name, user_princi
     assert n is not None
     assert n.properties.distinguishedName == distinguished_name
     assert n.properties.userPrincipalName == user_principal_name
+
+
+def test_user_exposes_sam_account_name():
+    """sam_account_name must flow through to UserProperties.samAccountName so edges keyed
+    on the User endpoint by samAccountName (HasSession, MSSQL_GetTGS/GetAdminTGS/
+    ServiceAccountFor, SCCM_HasPrimaryUser/HasADLastLogonUser/IsMappedTo) can resolve it."""
+    n = UserNode(
+        sid="S-1-5-21-1-2-3-1116",
+        name="mayyhem\\sqlsccmsvc (sqlsccmsvc)",
+        sam_account_name="sqlsccmsvc",
+    ).as_node
+    assert n is not None
+    assert n.properties.samAccountName == "sqlsccmsvc"

@@ -57,3 +57,30 @@ def test_admin_user_list_fields_default_empty():
     assert n.properties.collectionIds == []
     assert n.properties.roleIDs == []
     assert n.properties.memberOf == []
+
+
+def test_admin_user_no_displayname_displayName_case_collision():
+    """Admin-user nodes must NOT carry both `displayName` and `displayname`.
+
+    The two differ only by case, so a case-insensitive consumer (BloodHound/Neo4j
+    ingestion, or the PowerShell unit-test kit's ConvertFrom-Json) treats them as one
+    duplicate key and rejects the whole payload. CMBP emits only the camelCase key, so
+    the port drops the framework base lowercase `displayname` on admin-user nodes.
+    """
+    from dataclasses import asdict
+
+    # display_name set: camelCase kept, base lowercase suppressed -> no collision.
+    n = SCCMAdminUser(logon_name="MAYYHEM\\adm", root_site_code="CAS",
+                      display_name="Adm Disp").as_node
+    props = asdict(n.properties)
+    assert props["displayName"] == "Adm Disp"
+    assert props["displayname"] is None  # pruned on emit; absent from output JSON
+    populated = [k for k, v in props.items() if k.lower() == "displayname" and v is not None]
+    assert populated == ["displayName"], f"case-collision on display name: {populated}"
+
+    # display_name empty: camelCase also None (CMBP omits empty), so neither key emits.
+    n2 = SCCMAdminUser(logon_name="MAYYHEM\\adm", root_site_code="CAS",
+                       display_name="").as_node
+    props2 = asdict(n2.properties)
+    assert props2["displayName"] is None
+    assert props2["displayname"] is None

@@ -183,6 +183,13 @@ class UserProperties(NodeProperties):
             in the AD tree, e.g. ``CN=User1,OU=People,DC=corp,DC=local``).
         userPrincipalName: The user's AD logon name in email-address form (e.g.
             ``user1@corp.local``).
+        samAccountName: The user's pre-Windows-2000 logon name (its AD "SAM account name",
+            e.g. ``sqlsccmsvc``). camelCase to match ``ComputerProperties.samAccountName`` —
+            OpenHound normalizes this LDAP attribute to camelCase (CMBP writes it PascalCase,
+            but BloodHound/Neo4j property lookup is case-insensitive). Needed so edges keyed on
+            the SQL service account or AD users (HasSession, MSSQL_GetTGS/GetAdminTGS/
+            ServiceAccountFor, SCCM_HasPrimaryUser/HasADLastLogonUser/IsMappedTo) can resolve
+            their User endpoint by ``samAccountName``.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
@@ -190,6 +197,7 @@ class UserProperties(NodeProperties):
     storedInSCCMSite: str | None = field(default=None, kw_only=True)
     distinguishedName: str | None = field(default=None, kw_only=True)
     userPrincipalName: str | None = field(default=None, kw_only=True)
+    samAccountName: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -352,9 +360,11 @@ class SCCMAdminUserProperties(NodeProperties):
             key) captured for completeness; not otherwise interpreted by the collector.
         rootSiteCode: The site code of the top-most site in this admin-user's site
             hierarchy.
-        displayName: The admin-user's display name as recorded by SCCM. This is a
-            separate field from the framework's own `displayname` — CMBP sets both, so
-            the port mirrors that rather than deduplicating them.
+        displayName: The admin-user's display name as recorded by SCCM. Admin-user nodes
+            emit ONLY this camelCase key (CMBP parity) and deliberately drop the framework
+            base lowercase `displayname`: the two differ only by case and would collide as
+            a duplicate key for any case-insensitive consumer (BloodHound/Neo4j ingestion,
+            the PowerShell unit-test kit). See ``SCCMAdminUser.to_node``.
         sourceSiteCode: The site code of the SCCM site where this admin-user was created.
         createdBy: Who (which account) created this admin-user assignment in SCCM.
         createdDate: When this admin-user assignment was created, as reported by SCCM.
@@ -375,8 +385,10 @@ class SCCMAdminUserProperties(NodeProperties):
     isGroup: bool | None = field(default=None, kw_only=True)
     accountType: int | None = field(default=None, kw_only=True)  # port-added (no CMBP key)
     rootSiteCode: str | None = field(default=None, kw_only=True)
-    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3). displayName is a distinct key from
-    # the framework base `displayname` — CMBP sets both, so we mirror that.
+    # Audit fields from ADMIN_COLUMNS (CMBP parity, Stage 3 C3). displayName is the ONLY display-name
+    # key on admin-user nodes: the model sets the base lowercase `displayname` to None (pruned on emit)
+    # so the two casings can't collide as a duplicate key for case-insensitive consumers. See
+    # sccm_admin_user.py::SCCMAdminUser.to_node.
     displayName: str | None = field(default=None, kw_only=True)
     sourceSiteCode: str | None = field(default=None, kw_only=True)
     createdBy: str | None = field(default=None, kw_only=True)
