@@ -1,6 +1,6 @@
 ---
 id: ope-7e54
-status: open
+status: closed
 deps: [ope-0112]
 links: []
 created: 2026-06-03T19:29:20Z

@@ -1,6 +1,6 @@
 ---
 id: Ope-6cei
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-28T13:27:29Z
@@ -9,6 +9,7 @@ priority: 1
 assignee: Mayyhem
 tags: [sccm, performance]
 ---
+
 # Concurrency / Parallelism
 
 Implement per-host parallel collection using the existing --threads CLI flag. The flag is parsed and mapped to SOURCES__SCCM__THREADS but no collector uses it. Phase 3 (per-host: WMI, HTTP, SMB, AdminService, RemoteRegistry, MSSQL) is the bottleneck in large environments.

@@ -1,6 +1,6 @@
 ---
 id: ope-3f2a
-status: in_progress
+status: closed
 deps: []
 links: [Ope-ew5k, ope-38ad]
 created: 2026-06-11T22:47:52Z

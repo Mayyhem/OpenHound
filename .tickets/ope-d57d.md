@@ -1,6 +1,6 @@
 ---
 id: ope-d57d
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-09T20:43:02Z

@@ -1,6 +1,6 @@
 ---
 id: ope-38ad
-status: in_progress
+status: closed
 deps: []
 links: [ope-3f2a]
 created: 2026-06-12T17:29:00Z

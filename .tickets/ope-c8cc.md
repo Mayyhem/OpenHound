@@ -1,6 +1,6 @@
 ---
 id: ope-c8cc
-status: in_progress
+status: closed
 deps: []
 links: [Ope-l6fu]
 created: 2026-06-08T20:48:22Z

@@ -1,6 +1,6 @@
 ---
 id: ope-065f
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-08T20:55:10Z

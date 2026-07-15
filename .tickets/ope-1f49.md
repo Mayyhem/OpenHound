@@ -1,6 +1,6 @@
 ---
 id: ope-1f49
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-07-13T14:57:26Z
@@ -70,3 +70,7 @@ Reconciliation #2b (auth token-minting) COMPLETE + LIVE-VALIDATED. SCCM http_aut
 **2026-07-14T14:53:53Z**
 
 Reconciliation #6 (log_context) COMPLETE (promote-up, generalized) + validated. Promoted SCCM's FULL log_context superset into shared openhound_collector_common.logging.log_context: contextvars(+resource)/target_context/phase_context/LogContextFilter/install_filter(superset)/with_log_context(supports BOTH target_from_ctx_domain[SCCM] + target_from_ctx_attr[mssql] + resource ctx + resource-complete callback firing)/completion-callback registry/per_host_iter/per_pair_iter/VerboseLogger/get_logger/_DebugExcInfoFilter. Collector-specific helpers GENERALIZED via logger param: cached_with_log(label, logger) + trace_node/edge/property/node_with_properties(..., logger). SCCM log_context.py -> re-export shared + thin trace_*/cached_with_log wrappers binding openhound_sccm.graph/openhound_sccm.lookup (call sites + log routing unchanged). shared logging/__init__ re-exports full public surface. mssql GAINS debug exc-info filter, dlt-logger [target][phase] tagging, VerboseLogger, iterators, resource ctx, generalized trace/cache. test_debug_exc_info_filter repointed to shared; test_per_host_log_blocks unchanged. VALIDATION: SCCM unit 552/5skip; mssql 172; shared log_context test 9; ruff clean; functional [MAYYHEM.COM][LDAP] prefix intact through re-exports (rewiring risk cleared). Overrides earlier D13 per user direction (mssql is also dev/single-user).
+
+**2026-07-15T19:04:33Z**
+
+Audit close (2026-07-15): shared-library migration complete through Reconciliation #7 + the shared-library governance flip. Note for record: ticket notes stop at #6; #7, the governance flip (ARCHITECTURE.md/AGENTS.md, commit 2cb30d9), the SCCM per-host streaming adoption of shared StreamBridge (3eca9c6), and the integration-test validation (f074fc1) exist as commits. Supersedes the bare duplicate ope-f651.

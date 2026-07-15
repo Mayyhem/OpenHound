@@ -1,6 +1,6 @@
 ---
 id: ope-4c6f
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-29T16:59:40Z
