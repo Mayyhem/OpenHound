@@ -73,3 +73,32 @@ def test_non_sccm_server_kept_as_bare_node():
         "WHERE host_sid = 'S-1-5-21-1-2-3-9999'"
     ).fetchone()
     assert row == ("S-1-5-21-1-2-3-9999:1433", None, False)
+
+
+def test_registry_only_server_kept_with_string_port():
+    """A registry-discovered SQL server survives even though its port is a VARCHAR.
+
+    Regression for the arm-3 coalesce: the remote registry stores TcpPort as a
+    REG_SZ string, so dlt types the port column VARCHAR. Coalescing it against an
+    integer literal (1433) is a DuckDB type mix that safe_execute swallows,
+    silently dropping every registry-only server. The port default must be a
+    string, matching the arm-1 idiom.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    _standalone_primary(con)
+    con.execute(
+        "CREATE TABLE sccm.remoteregistry_mssql_servers AS SELECT "
+        "'S-1-5-21-1-2-3-7777' AS domain_computer_sid, '1433' AS port, 'REGSQL.lab' AS name, "
+        "true AS force_encryption, 'On' AS extended_protection, 'MSSQLSERVER' AS instance_names"
+    )
+    transforms(con)
+    row = con.execute(
+        "SELECT server_id, sccm_site, sccm_infra, instance_names FROM sccm.node_mssql_server "
+        "WHERE host_sid = 'S-1-5-21-1-2-3-7777'"
+    ).fetchone()
+    assert row is not None, "registry-only server was dropped (arm-3 coalesce failed)"
+    sid, site, infra, instances = row
+    assert sid == "S-1-5-21-1-2-3-7777:1433"
+    assert site is None and infra is False
+    assert instances == ["MSSQLSERVER"]

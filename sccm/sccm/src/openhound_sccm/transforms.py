@@ -2071,13 +2071,15 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
           f"  NULL AS service_account_domain_sid, ['MSSQL-ScanForEPA'] AS collection_source "
           f"FROM {schema}.mssql_server_instances WHERE domain_computer_sid IS NOT NULL")
     # Arm 3: remote-registry.
+    # port is a REG_SZ string in the registry, so dlt types it VARCHAR (unlike the
+    # EPA scan's INTEGER). Declare/coalesce it as VARCHAR so the arm binds either way.
     _ensure_columns(con, schema, "remoteregistry_mssql_servers", {
-        "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR",
+        "domain_computer_sid": "VARCHAR", "port": "VARCHAR", "name": "VARCHAR",
         "extended_protection": "VARCHAR", "force_encryption": "BOOLEAN", "instance_names": "VARCHAR",
     })
     _safe(con, "node_mssql_server<-remoteregistry_mssql_servers",
           f"INSERT INTO {schema}.node_mssql_server BY NAME "
-          f"SELECT upper(domain_computer_sid) AS host_sid, CAST(coalesce(port, 1433) AS VARCHAR) AS port, "
+          f"SELECT upper(domain_computer_sid) AS host_sid, coalesce(port, '1433') AS port, "
           f"  name, name AS dns_host_name, NULL AS sccm_site, false AS sccm_infra, "
           f"  CAST([] AS VARCHAR[]) AS databases, force_encryption, extended_protection, NULL AS strict_encryption, "
           f"  {_arr('instance_names')} AS instance_names, NULL AS service_account_name, "
