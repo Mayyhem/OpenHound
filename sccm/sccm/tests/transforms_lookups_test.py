@@ -16,7 +16,7 @@ def _seed(con):
 
 def test_lookups_built():
     con = duckdb.connect(":memory:"); _seed(con); transforms(con)
-    assert con.execute("SELECT sid FROM sccm.resource_to_sid WHERE resource_key='9@PS1'").fetchone()[0] == "S-1-5-21-1-2-3-1106"
+    assert con.execute("SELECT sid FROM sccm.principal_by_resourceid WHERE resource_key='9@PS1'").fetchone()[0] == "S-1-5-21-1-2-3-1106"
     assert con.execute("SELECT smsid FROM sccm.device_by_resourceid WHERE resource_key='7@PS1'").fetchone()[0] == "GUID-1"
     assert con.execute("SELECT collection_id FROM sccm.collection_by_name WHERE name='ALL SYSTEMS'").fetchone()[0] == "PS100016"
     assert con.execute("SELECT role_id FROM sccm.role_by_name WHERE name='FULL ADMINISTRATOR'").fetchone()[0] == "SMS000AR"

@@ -1856,44 +1856,38 @@ def _node_client_device_possible(
     logger.info("node_client_device_possible built in schema %r", schema)
 
 
-def _resource_to_sid(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Build resource_key '<resource_id>@<site>' -> SID lookup.
+def _principal_by_resourceid(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Build resource_key '<resource_id>@<site>' -> User/Group SID lookup.
 
-    Covers r_system (computers), r_user (users), and user_group (groups). The
-    r_system source filters out obsolete rows; the others do not carry that flag.
-    SIDs are uppercased for consistent joins. Used by Stage 2 edge builders that
-    receive resource_id fields and need to resolve them to a SID.
+    Sibling of `device_by_resourceid` (resource_key -> SCCM_ClientDevice smsid).
+    Together they mirror how CMBP resolves a collection member to a node
+    (ps1:7617-7619): a member is matched to a User node, a Group node, or an
+    SCCM_ClientDevice node -- never to a plain Computer node.
+
+    So this lookup deliberately covers ONLY user (r_user) and group (user_group)
+    resources; it does NOT include r_system (computers). A computer that is a real
+    SCCM client resolves through `device_by_resourceid` to its SCCM_ClientDevice; a
+    computer SCCM only discovered (never installed the client) matches nothing and
+    correctly gets no SCCM_HasMember edge (CMBP logs "No node found for member",
+    ps1:7646). Including computer SIDs here would wrongly land SCCM_HasMember on the
+    Computer node.
+
+    SIDs are uppercased for consistent joins. Neither source carries an obsolete flag.
     """
-    con.execute(f"CREATE OR REPLACE TABLE {schema}.resource_to_sid (resource_key VARCHAR, sid VARCHAR)")
+    con.execute(f"CREATE OR REPLACE TABLE {schema}.principal_by_resourceid (resource_key VARCHAR, sid VARCHAR)")
 
-    # r_system sources: filter obsolete rows
-    for _src in ("adminservice_r_system", "wmi_r_system"):
-        _ensure_columns(con, schema, _src, {"resource_id": "BIGINT", "source_site_code": "VARCHAR", "sid": "VARCHAR", "obsolete": "BOOLEAN"})
-        _safe(con, f"resource_to_sid<-{_src}",
-              f"INSERT INTO {schema}.resource_to_sid "
-              f"SELECT CAST(resource_id AS VARCHAR)||'@'||CAST(source_site_code AS VARCHAR), upper(sid) "
-              f"FROM {schema}.{_src} WHERE resource_id IS NOT NULL AND sid IS NOT NULL AND NOT coalesce(obsolete, false)")
-
-    # r_user sources: no obsolete flag
-    for _src in ("adminservice_r_user", "wmi_r_user"):
+    # Users (r_user) and groups (user_group) share identical shaping -- one loop.
+    for _src in ("adminservice_r_user", "wmi_r_user", "adminservice_user_group", "wmi_user_group"):
         _ensure_columns(con, schema, _src, {"resource_id": "BIGINT", "source_site_code": "VARCHAR", "sid": "VARCHAR"})
-        _safe(con, f"resource_to_sid<-{_src}",
-              f"INSERT INTO {schema}.resource_to_sid "
+        _safe(con, f"principal_by_resourceid<-{_src}",
+              f"INSERT INTO {schema}.principal_by_resourceid "
               f"SELECT CAST(resource_id AS VARCHAR)||'@'||CAST(source_site_code AS VARCHAR), upper(sid) "
               f"FROM {schema}.{_src} WHERE resource_id IS NOT NULL AND sid IS NOT NULL")
 
-    # user_group sources: no obsolete flag
-    for _src in ("adminservice_user_group", "wmi_user_group"):
-        _ensure_columns(con, schema, _src, {"resource_id": "BIGINT", "source_site_code": "VARCHAR", "sid": "VARCHAR"})
-        _safe(con, f"resource_to_sid<-{_src}",
-              f"INSERT INTO {schema}.resource_to_sid "
-              f"SELECT CAST(resource_id AS VARCHAR)||'@'||CAST(source_site_code AS VARCHAR), upper(sid) "
-              f"FROM {schema}.{_src} WHERE resource_id IS NOT NULL AND sid IS NOT NULL")
-
-    con.execute(f"CREATE OR REPLACE TABLE {schema}.resource_to_sid AS "
-                f"SELECT DISTINCT resource_key, sid FROM {schema}.resource_to_sid "
+    con.execute(f"CREATE OR REPLACE TABLE {schema}.principal_by_resourceid AS "
+                f"SELECT DISTINCT resource_key, sid FROM {schema}.principal_by_resourceid "
                 f"WHERE resource_key IS NOT NULL AND sid IS NOT NULL")
-    logger.info("resource_to_sid built in schema %r", schema)
+    logger.info("principal_by_resourceid built in schema %r", schema)
 
 
 def _device_by_resourceid(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -2262,12 +2256,17 @@ def _edge_replication(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
 
 def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Append SCCM_HasMember edges: Collection -> member (CMBP ps1:7617-7647).
+    """Append SCCM_HasMember edges: Collection -> member (CMBP ps1:7613-7647).
 
-    Device member -> ClientDevice smsid (via device_by_resourceid); user/group
-    member -> SID (via resource_to_sid). coalesce prefers the device lookup so
-    device members point at the ClientDevice node rather than the Computer node,
-    matching CMBP behaviour. Built-in pseudo-resources are skipped.
+    Mirrors CMBP's member->node resolution (ps1:7617-7619): a member resolves to an
+    SCCM_ClientDevice (device_by_resourceid -> smsid), a User, or a Group
+    (principal_by_resourceid -> SID) -- never to a plain Computer node. coalesce prefers
+    the device lookup so a member that is a real client points at its ClientDevice.
+
+    A member that matches none of those -- e.g. a computer SCCM only discovered but that
+    never installed the client -- gets NO edge (CMBP logs "No node found for member",
+    ps1:7646); the diagnostic below counts these so operators notice them. Built-in
+    pseudo-resources (x86/x64 Unknown Computer, Provisioning Device) are skipped.
 
     Collection start id is upper(collection_id)@root (matches the SCCMCollection
     node id built in _node_collection). Because _safe() does not accept SQL params,
@@ -2278,6 +2277,11 @@ def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     root_lit = _root_code(con, schema) or ""
     start_expr = (f"upper(cm.collection_id) || '@{root_lit}'" if root_lit
                   else "upper(cm.collection_id)")
+    # A member's resource key ('<resource_id>@<site>') joins both lookups; built-ins are
+    # never real members. Defined once and reused by the insert and the diagnostic below.
+    key_expr = "CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR)"
+    not_builtin = ("CAST(cm.resource_id AS VARCHAR) NOT IN ('2046820352', '2046820353') "
+                   "AND CAST(cm.resource_id AS VARCHAR) NOT LIKE '203004%'")
     _src_tags = {
         "adminservice_collection_members": "AdminService-SMS_FullCollectionMembership",
         "wmi_collection_members": "WMI-SMS_FullCollectionMembership",
@@ -2287,17 +2291,41 @@ def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _tag = _src_tags[_src]
         _safe(con, f"edge_has_member<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
-              f"SELECT {start_expr} AS start_id, coalesce(d.smsid, r.sid) AS end_id, "
+              f"SELECT {start_expr} AS start_id, coalesce(d.smsid, p.sid) AS end_id, "
               f"'{SCCM_HAS_MEMBER}' AS kind, ['{_tag}'] AS collection_source "
               f"FROM {schema}.{_src} cm "
-              f"LEFT JOIN {schema}.device_by_resourceid d "
-              f"  ON d.resource_key = CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR) "
-              f"LEFT JOIN {schema}.resource_to_sid r "
-              f"  ON r.resource_key = CAST(cm.resource_id AS VARCHAR) || '@' || CAST(cm.site_code AS VARCHAR) "
+              f"LEFT JOIN {schema}.device_by_resourceid d ON d.resource_key = {key_expr} "
+              f"LEFT JOIN {schema}.principal_by_resourceid p ON p.resource_key = {key_expr} "
               f"WHERE cm.collection_id IS NOT NULL "
-              f"  AND coalesce(d.smsid, r.sid) IS NOT NULL "
-              f"  AND CAST(cm.resource_id AS VARCHAR) NOT IN ('2046820352', '2046820353') "
-              f"  AND CAST(cm.resource_id AS VARCHAR) NOT LIKE '203004%'")
+              f"  AND coalesce(d.smsid, p.sid) IS NOT NULL "
+              f"  AND {not_builtin}")
+        # Diagnostic: members matching neither a client device nor a user/group principal
+        # (and not a built-in) get no edge -- CMBP logs "No node found for member"
+        # (ps1:7646). Count distinct (collection, resource) so duplicate membership rows
+        # don't inflate the number. Most such members are discovery-only, non-client
+        # computers (only in SMS_R_System), which correctly have no ClientDevice node --
+        # so this is INFO, not a warning: it fires in every normal environment.
+        if con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?",
+                       [_src]).fetchone() is None:
+            continue  # this transport wasn't collected; _safe already skipped the insert
+        try:
+            unresolved = con.execute(
+                f"SELECT count(DISTINCT cm.collection_id || '|' || CAST(cm.resource_id AS VARCHAR)) "
+                f"FROM {schema}.{_src} cm "
+                f"LEFT JOIN {schema}.device_by_resourceid d ON d.resource_key = {key_expr} "
+                f"LEFT JOIN {schema}.principal_by_resourceid p ON p.resource_key = {key_expr} "
+                f"WHERE cm.collection_id IS NOT NULL AND coalesce(d.smsid, p.sid) IS NULL "
+                f"  AND {not_builtin}"
+            ).fetchone()[0]
+        except duckdb.Error as err:
+            logger.warning("edge_has_member: unresolved-member audit failed for %s: %s", _src, err)
+            unresolved = 0
+        if unresolved:
+            logger.info("edge_has_member: %d collection member(s) in %s matched no User, Group, or "
+                        "SCCM_ClientDevice node and were skipped (e.g. discovery-only, non-client "
+                        "computers; matches CMBP ps1:7646)", unresolved, _src)
+        else:
+            logger.debug("edge_has_member: every resolvable collection member in %s produced an edge", _src)
 
 
 def _edge_is_mapped_to(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -3181,7 +3209,7 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # These read from the raw source tables (not the node_* coalesces) and must
     # run after all _node_* builders (which may add columns via _ensure_columns)
     # and before _graph_edges_init so edge builders can reference them.
-    _resource_to_sid(con, schema)
+    _principal_by_resourceid(con, schema)
     _device_by_resourceid(con, schema)
     _collection_by_name(con, schema)
     _role_by_name(con, schema)

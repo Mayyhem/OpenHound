@@ -960,10 +960,10 @@ Links a site to each of its confirmed (and possible, if enabled) SCCM-managed cl
 
 ## SCCM_HasMember
 
-Links a collection to each of its members (devices, users, or groups).
+Links a collection to each member that resolves to a client device, user, or group. A member SCCM only *discovered* — e.g. a computer that never installed the client, so it has no `SCCM_ClientDevice` node — is not linked (matching ConfigManBearPig, which logs "No node found for member").
 
 - **Start:** `SCCM_Collection`
-- **End:** `Computer` / `User` / `Group` (resolved by SID or name lookup)
+- **End:** `SCCM_ClientDevice` (device members, by ResourceID → SMSID) / `User` / `Group` (user & group members, by ResourceID → SID)
 - **Traversable:** no
 
 ## SCCM_IsMappedTo
