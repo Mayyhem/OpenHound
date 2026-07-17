@@ -138,6 +138,48 @@ def test_summary_no_orphan_warning_when_all_known(caplog, tmp_path):
     assert not any("stale table folder" in r.getMessage() for r in caplog.records)
 
 
+def test_summary_prints_runnable_next_steps(caplog):
+    """The next-steps hint must be real, copy-pasteable commands (no <...>
+    placeholders), with every path derived from OUTPUT_PATH."""
+    import pathlib
+
+    caplog.set_level(logging.INFO, logger=sccm_main.__name__)
+    raw = pathlib.Path("out")
+    sccm_main._log_collect_summary(
+        discovery_counts={"ldap_sites": 2},
+        per_host_counts={},
+        per_host_expected=False,
+        output_path=raw,
+    )
+    next_steps = next(
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("Next steps:")
+    )
+    # No leftover placeholders from the old hard-coded hint.
+    for placeholder in ("<raw>", "<lookup.duckdb>", "<graph>"):
+        assert placeholder not in next_steps
+    # Commands are `uv run`-prefixed (README style) so they resolve to the sccm
+    # venv, and every path is derived from OUTPUT_PATH ("out").
+    assert f"uv run openhound preprocess sccm {raw} {raw / 'lookup.duckdb'}" in next_steps
+    assert (
+        f"uv run openhound convert sccm {raw / 'sccm'} {raw / 'graph'} "
+        f"--lookup-file {raw / 'lookup.duckdb'}"
+    ) in next_steps
+
+
+def test_cli_path_arg_leaves_plain_path_bare():
+    import pathlib
+
+    assert sccm_main._cli_path_arg(pathlib.Path("out")) == "out"
+
+
+def test_cli_path_arg_quotes_path_with_spaces():
+    import pathlib
+
+    # A path with spaces must stay a single argument when pasted into a shell.
+    p = pathlib.Path("C:/Program Files/out")
+    assert sccm_main._cli_path_arg(p) == f'"{p}"'
+
+
 def test_run_per_host_stage_returns_dlt_counts(monkeypatch):
     """The stage must return this run's dlt row counts so collect_sccm can
     feed them to the summary."""

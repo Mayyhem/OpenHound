@@ -235,3 +235,64 @@ Tasks: 0 scaffold(controller); 1 code-truth matrix; 2 README reconcile; 3 three 
   -7 comments folded into docstrings, intent preserved); ldap.py/main.py/raw_table.py = dead-import/f-string removals
   with 0 remaining refs. No Critical/Important. 4 Minors ALL triaged ACCEPTABLE (gitignored .sdd artifacts + flagged
   manual Mermaid visual check). STAGE 7 COMPLETE. NO COMMIT (user commits after testing per CLAUDE.md).
+
+## Edge entity-panel help content — gtk ope-aa39 — subagent-driven, started 2026-07-15
+Plan: sccm/sccm/docs/superpowers/plans/2026-07-15-edge-entity-panel-help.md
+Spec: sccm/sccm/docs/superpowers/specs/2026-07-15-edge-entity-panel-help-design.md
+Baseline: HEAD d0857d4 "Fix SCCM_HasMember" (working tree has M .tickets/ope-aa39.md + new spec/plan; unrelated).
+NO-COMMIT regime (CLAUDE.md): implementers stop at green tests, never commit. Per-task diff via
+.sdd/mkdiff.sh (no transforms.py this run, so PREV_TF arg unused). Briefs/reports/diffs in
+sccm/sccm/.sdd/{briefs,reports,diffs}/.
+Design: EDGE_HELP dict (per-kind bespoke help) -> 5 nullable fields on SCCMEdgeProperties ->
+GraphEdge merges non-None fields; convert prunes null keys. Vertical slice wires
+SCCM_AdminsReplicatedTo; PENDING_HELP_KINDS holds 34 kinds awaiting user prose. Decisions in
+[[sccm-property-casing-cmbp]] context + spec. Tasks: 1 edge_help.py; 2 graph fields+wiring;
+3 e2e+README; FINAL review.
+
+- [x] Task 1: complete (no commit; spec ✅, quality Approved; edge_help.py + tests/edge_help_test.py; 6/6 green; 0 findings; scope=35 verified vs kinds/edges.py)
+- [x] Task 2: complete (no commit; spec ✅, quality Approved; graph.py +5 nullable help fields, graph_edge.py merges as_fields into both branches; tests/edge_help_emit_test.py; 5/5 new + 19/19 regression green; 1 Minor [unused imports] fixed + added base-class isinstance coverage; ruff clean)
+- [x] Task 3: complete (no commit; spec ✅, quality Approved after fixes; tests/edge_help_integration_test.py + README Edge Reference; 2 Important [vacuous negative assertion -> now seeds SCCM_HasClient PENDING edge; README 2-col -> 3-col] + 1 Minor [heading ####->##] fixed; cross-task mypy fix: as_fields -> dict[str,Any]; 12/12 help tests green; mypy clean of new errors [2 pre-existing openhound import-untyped remain]; ruff clean)
+- [x] FINAL whole-branch review (opus): Ready-to-merge WITH FIXES; all fixes applied+verified. 1 Important [README example collectionSource ["AdminService"]->["SCCM_Invoke-PostProcessing"] code-truth] + 3 Minor [TOC entry; test kind-literals->ek.*; windowsAbuse excerpt faithful] + 2 hardening [scope test now closure-assertion (self-maintaining); coupling guard test EdgeHelp fields <= SCCMEdgeProperties]. 13/13 help tests green; ruff clean; mypy no-new-errors.
+- [x] COMPLETE (no commit; awaiting user commit). Files: src/openhound_sccm/edge_help.py (NEW), graph.py, models/graph_edge.py, tests/edge_help_test.py + edge_help_emit_test.py + edge_help_integration_test.py (NEW), README.md. PENDING_HELP_KINDS = 34 kinds awaiting user prose.
+
+## collect sccm --run-all end-to-end flag + shared orchestrator — gtk ope-f27c — subagent-driven, started 2026-07-16
+Plan: sccm/sccm/docs/superpowers/plans/2026-07-16-openhound-run-all-shared-orchestrator.md
+Baseline: HEAD d0857d4 "Fix SCCM_HasMember". Working tree PRE-DIRTY (edge-help ope-aa39 awaiting user commit):
+  M sccm/sccm/README.md, M sccm/sccm/src/openhound_sccm/main.py (+ graph.py, models/graph_edge.py, collect_summary_test.py).
+NO-COMMIT regime (CLAUDE.md): implementers stop at green tests, never commit. Per-task diff isolation:
+  T1 all-NEW files (openhound-collector-common/.../orchestration/* + tests/test_orchestration.py) -> git diff --no-index /dev/null.
+  T2 main.py PRE-DIRTY -> diff vs snapshot sccm/sccm/.sdd/prev_main_runall.py (taken 2026-07-16 pre-T2); collect_run_all_test.py NEW.
+  T3 README.md PRE-DIRTY -> snapshot sccm/sccm/.sdd/prev_README_runall.md pre-T3; ARCHITECTURE.md CLEAN -> git diff HEAD.
+Decisions (locked, [[openhound-cli-extension-seam]] + [[silence-dlt-progress]]): flag-not-verb (no core edit),
+  in-process app.preprocessor/app.converter, land shared fn in openhound-collector-common now (MSSQL adopts later),
+  stop-on-first-failure, zero-config derived paths, single --progress; progress contract = Progress|None (shim convert-side).
+Tasks: 1 shared orchestrator+tests; 2 SCCM --run-all glue+tests; 3 README+ARCHITECTURE docs; FINAL review.
+
+- [x] Task 1: complete (no commit; spec ✅, quality Approved, 0 issues; orchestration/__init__.py + run.py + tests/test_orchestration.py; 9/9 green; reviewer independently verified None-vs-shim asymmetry vs openhound/core preproc.py:81 + convert.py:84, and path layout == main.py:1201-1203)
+- [x] Task 2: complete (no commit; spec ✅, quality Approved, 0 Critical/Important; --run-all option + _log_collect_summary(run_all) hint-suppression + _run_e2e_after_collect(off->None,else Progress(value); resume-log+re-raise) + return moved after finally; uv run KEPT (controller-authorized) w/ derive_stage_paths values; 5/5 new + 14/14 regression green; reviewer verified 3 named risks live)
+- [x] Task 3: complete (no commit; spec ✅ after 1 fix, quality Approved; README --run-all option row + uv-run Quick Start example (surgical, 2 hunks) + ARCHITECTURE §12 + 2 table rows + TOC + changelog. Review found 1 Important: §12 baseline had mount-vs-import order INVERTED -> controller-fixed to code-true (extensions load inside TyperOverride.__init__ via from_entrypoint at override.py:22, BEFORE add_typer mounting at main.py:31-36) + quick-ref cell; reviewer re-verified RESOLVED vs main.py:18-36+override.py:20-25)
+
+## run-all Minor findings (FINAL review triage; not fix-dispatched)
+- [T2] DRY: _log_collect_summary next-steps block and _run_e2e_after_collect failure-log each format the same `uv run openhound preprocess/convert sccm ...` strings from derive_stage_paths (brief-inherited). Optional: extract `_format_resume_commands(paths)->(str,str)`. Non-blocking.
+- [T2] Pre-existing/unrelated: `openhound collect sccm --help` throws UnicodeEncodeError on cp1252 Windows consoles due to a `→` char in an UNRELATED existing help string (not --run-all). Worth its own ticket; out of this feature's scope.
+- [T3] Minor (final-triage): §12 links [collect_sccm]/[_run_e2e_after_collect] omit #Lxx line anchors (several existing ARCHITECTURE links also do; style-only).
+- [T3] Observation (pre-existing, NOT this feature): §11b TOC entry text (ARCHITECTURE.md:59 "for 'possible' nodes") mismatches the real ### 11b heading ("for inferred client nodes"). Left untouched.
+
+- [x] FINAL whole-branch review (opus): READY TO MERGE = YES. 0 Critical / 0 Important. All 5 cross-file invariants verified code-true vs real framework (progress contract convert.py:84/preproc.py:81/app.py:163,226,278; derived paths==manual hint; --run-all only on success path incl early return None + exception-past-finally; no runtime openhound/dlt import; no core file touched). Both adjudicated items confirmed (uv run kept + derive_stage_paths; §12 order code-true). In-process handoff DuckDB-lock/dlt-trace risk traced clean. Minors all DEFER (T2 DRY cmd strings; T3 §12 #Lxx anchors; resume-hint always says preproc+convert [harmless, write_disposition=replace]; twin _SilentProgress/_NullProgress shims justified by layering).
+- [x] OFFLINE E2E SMOKE (controller): copied lab raw C:\tmp\redo\sccm (78 tables) -> C:\tmp\runall-smoke (original untouched); ran run_end_to_end(m.app, C:\tmp\runall-smoke, progress=None) in ONE process. EXIT 0. preproc built lookup.duckdb (23M); convert emitted split graph: sccm_nodes 55K / sccm_edges 372K (~205) / ad_nodes 78K / ad_edges 226K (~194). Real in-process preproc->convert handoff VERIFIED (DuckDB lock release, dlt trace reuse, progress=None shim through run_convert). Full network --run-all (collect phase) still needs lab -> user to run.
+- FEATURE COMPLETE (no commit; awaiting user commit). Files: openhound-collector-common/src/openhound_collector_common/orchestration/{__init__,run}.py (NEW) + tests/test_orchestration.py (NEW); sccm/sccm/src/openhound_sccm/main.py (MOD, also carries unrelated pre-existing edits); sccm/sccm/tests/collect_run_all_test.py (NEW); sccm/sccm/README.md (MOD, also carries edge-help rows); sccm/sccm/ARCHITECTURE.md (MOD §12). 28/28 feature tests green.
+
+## FOLLOW-UP (user, 2026-07-17): --run-all shows ALL output file locations at end of convert
+Change: _run_e2e_after_collect now RETURNS StagePaths; new _log_all_output_locations(output_path, paths,
+collect_log, diag_log, issue_count) helper logs a consolidated block (output dir, raw JSONL, collect log,
+diagnostics log w/ warn/err count, lookup DB, each OpenGraph json) as the last step of collect_sccm's run_all
+block. README --run-all row + ARCHITECTURE §12 note updated. +4 tests (return passthrough, full listing,
+no-warn/empty-graph, absent-logs/missing-graph). LIVE RUN: `uv run openhound collect sccm --run-all ./output -v
+--debug` EXIT 0 -> fresh lookup.duckdb(37M)+graph(sccm/ad nodes+edges)+collect logs @10:41; 0 UnicodeEncodeError
+/0 Traceback in this run's logs (the earlier subagent report was a non-interactive cp1252 pipe artifact, NOT a
+bug — user confirmed they don't see it; no ticket). Summary rendered against real output dir = correct.
+- Delta review (sonnet): 3 Important -> ALL FIXED: (1) StagePaths F821/mypy name-defined -> module TYPE_CHECKING
+  import (ruff "All checks passed", mypy no name-defined); (2) false "diag file always created" comment (it's
+  delay=True, absent on clean runs) -> comment corrected + README reworded ("whichever logs were produced");
+  (3) README overstatement -> reworded. +test for absent-logs/missing-graph branches. 32 feature tests pass.
+  Re-review (sonnet): RESOLVED - reviewer re-ran ruff (All checks passed) + mypy (no name-defined) + pytest itself; delta APPROVED, no remaining findings.

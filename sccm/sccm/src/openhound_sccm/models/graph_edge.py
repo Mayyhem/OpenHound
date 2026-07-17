@@ -16,11 +16,12 @@ relay-only coercion columns, and overrides `edges` to emit SCCM's richer,
 CMBP-cased edge properties.
 """
 import logging
-from typing import Iterator
+from typing import Any, Iterator
 
 from openhound.core.models.entries_dataclass import Edge, EdgePath
 from openhound_collector_common.graph.graph_edge import GraphEdge as _BaseGraphEdge
 
+from ..edge_help import EDGE_HELP
 from ..graph import SCCMEdgeProperties, SCCMRelayEdgeProperties
 from ..kinds.edges import (
     COERCE_AND_RELAY_TO_ADMIN_SERVICE,
@@ -62,7 +63,9 @@ class GraphEdge(_BaseGraphEdge):
         """Yield one Edge for this row.
 
         If start_id, end_id, or kind is missing, the row is dropped with a
-        warning rather than emitting a malformed edge.
+        warning rather than emitting a malformed edge. Entity-panel help content
+        (edge_help.py) is merged into the property bag for kinds we document; other
+        kinds leave the help fields None and convert prunes them on emit.
         """
         if not self.start_id or not self.end_id or not self.kind:
             logger.warning(
@@ -71,6 +74,15 @@ class GraphEdge(_BaseGraphEdge):
             )
             return
         traversable = self.kind in self.traversable_kinds
+        # Merge entity-panel help for this kind, if any is authored.
+        help_block = EDGE_HELP.get(self.kind)
+        help_fields: dict[str, Any]
+        if help_block:
+            help_fields = help_block.as_fields()
+            logger.debug("GraphEdge: attached entity-panel help for kind %r", self.kind)
+        else:
+            help_fields = {}
+            logger.debug("GraphEdge: no entity-panel help authored for kind %r", self.kind)
         if self.kind in _RELAY_KINDS:
             # Relay edges carry the operator-facing coercion context (CMBP).
             properties = SCCMRelayEdgeProperties(
@@ -78,12 +90,14 @@ class GraphEdge(_BaseGraphEdge):
                 collectionSource=self.collection_source or [],
                 coercionVictimAndRelayTargetPairs=self.coercion_victim_and_relay_target_pairs or [],
                 coercionVictimHostnames=self.coercion_victim_hostnames or [],
+                **help_fields,
             )
         else:
             # Every other edge keeps the lean base properties.
             properties = SCCMEdgeProperties(
                 traversable=traversable,
                 collectionSource=self.collection_source or [],
+                **help_fields,
             )
         yield Edge(
             kind=self.kind,

@@ -51,15 +51,31 @@ class SCCMEdgeProperties(EdgeProperties):
 
     Property names mirror ConfigManBearPig.ps1 exactly so BloodHound entity panels
     render the keys operators know from the original tool. `traversable`/`composed`
-    come from the framework EdgeProperties base and already match CMBP.
+    come from the framework EdgeProperties base and already match CMBP. The five
+    help fields carry entity-panel documentation (see edge_help.py); they default to
+    None so edges without authored content omit them (convert prunes null values).
 
     Attributes:
         collectionSource: Which collection method(s) produced this edge (e.g.
             ``AdminService``, ``LDAP``, ``RemoteRegistry``), as a list of tags. An edge
             can be confirmed by more than one method, in which case the list has
             more than one entry.
+        general: Entity-panel "General" text — what this edge means and why it
+            matters — or None if no help content is authored for this edge kind.
+        windowsAbuse: Entity-panel "Windows Abuse" text — how to abuse this edge from
+            a Windows host — or None.
+        linuxAbuse: Entity-panel "Linux Abuse" text — how to abuse this edge from a
+            Linux host — or None.
+        opsec: Entity-panel "OPSEC" text — detection / operational-security
+            considerations for abusing this edge — or None.
+        references: Entity-panel "References" URLs for this edge kind, or None.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
+    general: str | None = field(default=None, kw_only=True)
+    windowsAbuse: str | None = field(default=None, kw_only=True)
+    linuxAbuse: str | None = field(default=None, kw_only=True)
+    opsec: str | None = field(default=None, kw_only=True)
+    references: list[str] | None = field(default=None, kw_only=True)
 
 
 @dataclass

@@ -63,6 +63,7 @@ Every section follows the same spine:
   - [11f. Split output: an untagged AD payload beside the SCCM source](#11f-split-output-an-untagged-ad-payload-beside-the-sccm-source)
   - [11g. Stage 5: MSSQL node merge and topology inference](#11g-stage-5-mssql-node-merge-and-topology-inference)
   - [11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node](#11h-stage-6-coerce-and-relay-possible-edges-and-the-synthetic-authenticated-users-node)
+- [12. One-command end-to-end: a `--run-all` flag, not a new verb](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -139,6 +140,7 @@ became the shared one. What moved:
 | Per-target/-phase/-resource logging ([§7](#7-enhanced-logging-and-diagnostics-for-blind-remote-environments)) | `logging/log_context` (the full superset: `[target][phase]` tagging, `with_log_context`, completion-callback registry, `VERBOSE`, the debug exc-info filter, `cached_with_log`, `trace_node/edge/...`) | `log_context.py` re-exports the shared machinery and binds the two collector-specific helpers (`cached_with_log`, `trace_*`) to SCCM's own logger names |
 | Push→pull streaming bridge ([§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline)) | `dlt/source_bridge` (`StreamBridge`, `DONE`, `build_streams`, `broadcast_done`, `extract_workers_for`) | `phased_pipeline/streams.py` re-exports `DONE`/`build_streams`/`broadcast_done`; `source.py` plants a `StreamBridge` and its emit resources delegate their drain to it |
 | DNS resolution ([§5](#5-an-active-directory-cli-surface-and-context-auto-detection)) | `discovery/dns` (`make_resolver`) | `main.py::_resolve_dc_via_dns` calls the shared `make_resolver`, keeps the SCCM-specific SRV query |
+| End-to-end phase chaining ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | `orchestration/run` (`run_end_to_end`, `derive_stage_paths`, `StagePaths`) | `main.py::_run_e2e_after_collect` maps `--progress` and delegates; the `--run-all` flag on `collect_sccm` triggers it |
 
 **Governance.** From an extension agent's point of view the shared library is **read-only** — an SCCM
 change may not edit `openhound-collector-common`, exactly as it may not edit `openhound/` core. Promoting
@@ -1097,6 +1099,71 @@ This gives operators a single flag to choose between a speculative-complete view
 
 ---
 
+## 12. One-command end-to-end: a `--run-all` flag, not a new verb
+
+### The framework baseline
+
+OpenHound models the pipeline as three separate top-level CLI verbs — `collect`,
+`preprocess`, `convert` — each a Typer group created as a module-level singleton
+and mounted on the root app with `add_typer` (`openhound/main.py`). There is no
+"run everything" verb, and no hook for an extension to add its own top-level verb.
+The reason is import order: an extension's module is imported *inside* the root
+app's constructor — `TyperOverride.__init__` calls
+`CollectorManager.from_entrypoint("openhound.sources")` (`openhound/cli/override.py`),
+which loads every extension *before* `main.py` binds the root `app` or mounts the
+verb groups onto it. So when an extension runs it can import and hang commands off
+the pre-existing verb *groups* (that is how it registers `collect sccm`), but it
+never receives a reference to the root app instance and there is no registry to
+attach a new verb to.
+
+### Why it breaks for SCCM
+
+Operators expect to point the tool at an environment and get a graph — one
+command, not three, and without hand-deriving the intermediate `lookup.duckdb` /
+dataset-dir / `graph` paths each time. But the natural shape (`openhound run
+sccm`) is exactly the thing the framework can't express without a core edit.
+
+### The add-on: a flag on `collect`, backed by a shared orchestrator
+
+- **CLI surface:** a `--run-all` flag on the already-hand-registered `collect sccm`
+  command ([`collect_sccm`](src/openhound_sccm/main.py)), so no new verb and no
+  core edit. When set, `collect_sccm` runs collection as usual, then calls
+  [`_run_e2e_after_collect`](src/openhound_sccm/main.py) once the collect log
+  handlers are torn down, so the two follow-on stages log through the normal
+  console handlers.
+- **The chaining itself is shared.** The actual "preproc then convert" logic lives
+  in `openhound_collector_common.orchestration.run_end_to_end` (see
+  [Where this code lives](#where-this-code-lives-the-shared-collector-common-library)),
+  which invokes the app's registered `preprocessor` / `converter` hooks
+  **in-process** and derives every path from the single collect `OUTPUT_PATH`.
+  It is framework-agnostic (duck-types the app; no `openhound`/`dlt` import), so
+  the MSSQL collector can adopt the same flag by calling it.
+- **Progress plumbing quirk:** the framework stages read progress inconsistently
+  (`Converter` uses `progress.value`; `PreProcessor` forwards the object straight
+  to `dlt.pipeline()`), so the orchestrator's contract is `Progress | None` and it
+  applies a `.value=None` shim on the convert side for the silent case.
+- **Consolidated output summary:** because the three phases each write their own
+  artifacts (collect: raw JSONL + the ordered/diagnostics logs; preproc:
+  `lookup.duckdb`; convert: the `graph/*.json` files) and interleave their logs,
+  `_run_e2e_after_collect` returns the `StagePaths` and `collect_sccm` calls
+  [`_log_all_output_locations`](src/openhound_sccm/main.py) as the very last step —
+  re-surfacing every file location in one block. It runs *after* collect's
+  finally-block tears down the ordered/diagnostics file handlers, so the summary
+  points back at those files by path rather than duplicating their content.
+
+### Trade-offs
+
+- `--run-all` runs all three stages in **one process**, an execution mode the
+  manual three-command workflow never exercises. Collect's process-global state
+  (the planted `StreamBridge`, the bumped `EXTRACT__WORKERS`) is cleaned up in its
+  `finally` before the chain starts, so the follow-on stages start clean.
+- It is a *flag*, not the `openhound run sccm` verb an operator might expect —
+  the price of not editing core.
+- On failure the chain stops and re-raises, leaving raw data intact and logging
+  the manual resume commands (stop-on-first-failure).
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -1116,6 +1183,7 @@ This gives operators a single flag to choose between a speculative-complete view
 | Split output (untagged AD payload) | A second `convert`-time emit pass through an extension `opengraph_file_untagged` destination (no `metadata`); preproc `_graph_edges_split` partitions edges | A `source_kind=None` / multi-source option on `@app.convert` |
 | MSSQL node merge + topology inference | `_mssql_sql_servers` temp table + three-source `UNION`/`GROUP BY` coalesce in `_node_mssql_server`; Login/DatabaseUser inferred from SCCM sysadmin-computer topology in `_node_mssql_login` / `_node_mssql_database_user`; MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split` | No new framework extension point — extends the existing Convert2-Read-DB pipeline and output-split (§11f) |
 | Coerce-and-relay possible edges + synthetic Authenticated Users node | Three relay edge builders in `_edge_coerce_relay_*`; `_node_authenticated_users` inserts lazily after relay builders; `SCCMRelayEdgeProperties` subclass for relay-only props; surgical `--disable-possible-edges` gate; `graph_edges` gains two `VARCHAR[]` coercion columns | No new framework extension point — extends §11b (persist-at-collect/gate-in-preproc), §11c (graph_edges + GraphEdge), and §11f (output-split routing) |
+| One-command end-to-end ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | A flag on the hand-registered `collect` Typer command + in-process calls to the app's registered `preproc`/`convert` hooks | A new top-level `run` verb in core (extensions load inside the root app's constructor and never get a reference to it, so they cannot mount a new verb) |
 
 ---
 
@@ -1140,6 +1208,7 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-16 | **Added §12: a `--run-all` flag on `collect sccm`** that chains preprocess + convert in-process via the new framework-agnostic `openhound_collector_common.orchestration.run_end_to_end`. New kind of divergence (end-to-end orchestration without a new top-level verb). Added a row to the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) table and the quick-reference table, plus a TOC entry. |
 | 2026-07-14 | **Shared-library reconciliation (new divergence category).** Added the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) section: the Windows auth stacks, the per-target logging layer, the push→pull streaming bridge, and the DNS resolver were **promoted up** out of this extension into `openhound-collector-common`, a shared library both SCCM and MSSQL now consume (SCCM's own files reduced to thin adapters). Seven promote-up reconciliations landed on branch `integration` (`choose_auth`+`is_ip`; WMI impacket/pywin32 backends; `mssql_epa`→`detect_epa`; DNS `make_resolver`; HTTP negotiators over `KerberosToken`/`SspiClient`; `log_context` superset; `StreamBridge`+unified `DONE`). Updated §1 (streams re-export + `StreamBridge` + `extract_workers_for`; `set_bridge` handshake), §5 (shared `make_resolver`), §6 + §7 (relocation notes), the ground-rule box, and the quick-reference table. Relaxed the engine's zero-dependency test to permit exactly `openhound_collector_common`. Validated: 552 SCCM unit / 5 skipped, 172 MSSQL unit, ruff clean, and a full lab collection streaming 5 per-host sources (1005 rows through one bounded queue) with no lost rows or deadlock. |
 | 2026-07-01 | Stage 7 (docs + validation) — final stage of the preproc/convert port. Whole-document reconciliation of README + ARCHITECTURE.md + in-code docstrings against code-truth (14 node kinds, 37 edge kinds). Fixed the stale Graph Model prose (README claimed 8 emitted). Added three Mermaid diagrams (pipeline data-flow, clustered AD/SCCM/MSSQL overview, complete edge reference). Non-behavioral docstring/`Attributes` completeness pass. Ran ruff/mypy/pytest in an isolated uv env + the validate-extension structural checklist. Verified + closed ope-7f61 (edge-count banner miscount, already corrected to 11 for Stages 1–2). No behavioral code changes; known limitations (e.g. ope-3dbc null-property BloodHound rejection) documented, not fixed. |
 | 2026-06-30 | Stage 6 (coerce-and-relay) shipped. Added §11h: three `CoerceAndRelay*` possible-edge kinds with surgical `--disable-possible-edges` gate (default: null NTLM/EPA assumed vulnerable; flag: only explicit `Off` qualifies). Lazy `_node_authenticated_users` synthesises one `Group` node per domain with at least one relay edge (id = `UPPER(FQDN)-S-1-5-11`, merges with SharpHound). `graph_edges` gains two `VARCHAR[]` coercion columns (`coercion_victim_and_relay_target_pairs`, `coercion_victim_hostnames`); `SCCMRelayEdgeProperties` subclass carries them to the BloodHound entity panel. Fixed `CoerceAndRelayToSMB` traversable mismatch (CMBP allow-list used `CoerceAndRelayNTLMtoSMB`; the port emits and marks traversable `CoerceAndRelayToSMB`). Updated §11c `graph_edges` column list + `SCCMRelayEdgeProperties` note; added `node_computer.smb_signing_source` provenance note. Quick-reference table updated. |

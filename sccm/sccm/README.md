@@ -44,6 +44,7 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [MSSQL_Login](#mssql_login)
   - [MSSQL_DatabaseUser](#mssql_databaseuser)
 - [Edge Reference](#edge-reference)
+  - [Entity-panel help properties](#entity-panel-help-properties)
   - [SCCM_AdminsReplicatedTo](#sccm_adminsreplicatedto)
   - [SCCM_HasClient](#sccm_hasclient)
   - [SCCM_HasMember](#sccm_hasmember)
@@ -132,6 +133,26 @@ This loads the raw JSONL into DuckDB and builds the lookup/derived tables that `
 ```powershell
 uv run openhound convert sccm .\out\sccm .\graph --lookup-file .\lookup.duckdb
 ```
+
+#### One command, end to end
+
+Run all three stages against the lab in a single command:
+
+```powershell
+uv run openhound collect sccm .\out --run-all -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!"
+```
+
+This collects into `.\out`, builds `.\out\lookup.duckdb`, and writes the OpenGraph
+files to `.\out\graph\`. It is exactly equivalent to running:
+
+```powershell
+uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!"
+uv run openhound preprocess sccm .\out .\out\lookup.duckdb
+uv run openhound convert sccm .\out\sccm .\out\graph --lookup-file .\out\lookup.duckdb
+```
+
+If preprocess or convert fails, your raw collected data in `.\out` is left intact
+and the exact resume commands are logged, so you never have to recollect.
 
 ### 5. Upload to BloodHound
 
@@ -334,6 +355,7 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 | `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 | `-t`, `--threads` | Per-host worker-pool size. Default `10`. |
 | `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
+| `--run-all` | After collecting, automatically run **preprocess** and **convert** in-process, producing the OpenGraph files in a single command. All paths are derived from `OUTPUT_PATH`: `lookup.duckdb`, the `sccm/` dataset dir, and `graph/`. On completion it logs a consolidated list of the run's output files — raw JSONL, the lookup DB, each OpenGraph JSON, and whichever collection/diagnostics logs were produced (a clean run with no warnings writes no diagnostics file) — so you don't have to scroll back through the run. Omit it to run the three stages manually (the default; a "next steps" hint is printed). |
 
 #### `--disable-possible-edges` and the coerce-and-relay edges
 
@@ -938,6 +960,40 @@ Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdg
 
 - **`traversable`** — set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only traversable edges are followed by BloodHound's attack-path engine.
 - **`collectionSource`** — a list of strings identifying which collectors contributed the data behind this edge (e.g. `["AdminService-SMS_Admin"]`, `["SCCM_Invoke-PostProcessing"]`). Matches the `collectionSource` provenance tags used by ConfigManBearPig.
+
+## Entity-panel help properties
+
+Edges that describe an SCCM-specific attack path carry documentation in their
+property bag so BloodHound's entity panel explains the edge when you click it.
+The keys mirror BloodHound's built-in edge help:
+
+| Property | Type | Description |
+|---|---|---|
+| `general` | string | What the edge means and why it matters. |
+| `windowsAbuse` | string | How to abuse the edge from a Windows host. |
+| `linuxAbuse` | string | How to abuse the edge from a Linux host. |
+| `opsec` | string | Detection / operational-security considerations. |
+| `references` | list\<string\> | Source URLs. |
+
+Only sections that apply are emitted; an edge kind with no authored content carries
+none of these keys. Kinds BloodHound already documents natively (`MemberOf`,
+`AdminTo`, `HasSession`) are intentionally left to BloodHound's own help. The content
+lives in `src/openhound_sccm/edge_help.py`; kinds still awaiting content are listed
+there in `PENDING_HELP_KINDS`.
+
+Example (`SCCM_AdminsReplicatedTo`, abbreviated):
+
+```json
+"properties": {
+  "traversable": true,
+  "collectionSource": ["SCCM_Invoke-PostProcessing"],
+  "general": "SCCM security roles assigned to users are replicated to every other site...",
+  "windowsAbuse": "There is no specific abuse required to follow this attack path... execute SharpSCCM.exe <command> <subcommand> -sms <sms_provider_ip> -sc <site_code>...",
+  "linuxAbuse": "python3 sccmhunter.py admin -u <username> -p <password> -ip <sms_provider_ip>...",
+  "opsec": "An EDR product may detect your attempt to run SharpSCCM...",
+  "references": ["https://posts.specterops.io/sccm-hierarchy-takeover-41929c61e087", "..."]
+}
+```
 
 ## SCCM_AdminsReplicatedTo
 

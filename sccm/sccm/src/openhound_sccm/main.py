@@ -15,7 +15,7 @@ from enum import Enum
 import typer
 from openhound.cli.collect import collect as _collect_typer  # noqa: E402
 
-from typing import List, Optional, Sequence
+from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from openhound.core.app import (
     Contract,
@@ -47,6 +47,12 @@ from .models.sccm_site import SCCMSite
 from .models.stub_node import StubNode
 from .models.user import UserNode
 from .transforms import transforms
+
+if TYPE_CHECKING:
+    # Type-only import: StagePaths annotates the --run-all output-summary helpers.
+    # The runtime import stays deferred inside the functions so importing this
+    # module never pulls the shared library in at import time.
+    from openhound_collector_common.orchestration import StagePaths
 
 logger = logging.getLogger(__name__)
 
@@ -933,6 +939,12 @@ def collect_sccm(
     enable_bad_opsec: bool = typer.Option(False, "--enable-bad-opsec", help="Enable bad-opsec operations (NAA decryption, etc.)."),
     threads: int = typer.Option(10, "-t", "--threads", help="Number of machines collected concurrently (per-host worker pool size; default 10)."),
     show_cleartext_passwords: bool = typer.Option(False, "--show-cleartext-passwords", help="Display cleartext passwords when discovered."),
+    run_all: bool = typer.Option(
+        False, "--run-all",
+        help="After collecting, automatically run preprocess and convert in-process so a "
+        "single command produces the OpenGraph files. All paths are derived from OUTPUT_PATH "
+        "(lookup.duckdb, the sccm/ dataset dir, and graph/).",
+    ),
     # ---- Machine Account / CRED-2 ----
     machine_name: Optional[str] = typer.Option(None, "--machine-name", help="DOMAIN\\\\MACHINE$ for SCCM client registration. CRED-2 chain not yet implemented."),
     machine_pass: Optional[str] = typer.Option(None, "--machine-pass", help="Machine account password. CRED-2 chain not yet implemented."),
@@ -1047,8 +1059,9 @@ def collect_sccm(
         # global section rather than inheriting whatever phase ran last.
         from .log_context import phase_context, target_context
         with target_context(None), phase_context(None):
-            _log_collect_summary(discovery_counts, per_host_counts, per_host_expected, output_path)
-        return load_info
+            _log_collect_summary(
+                discovery_counts, per_host_counts, per_host_expected, output_path, run_all=run_all
+            )
     finally:
         _oh_logger.setLevel(_oh_original_level)
         unregister_resource_complete_callback(_ordered.flush_resource)
@@ -1076,6 +1089,22 @@ def collect_sccm(
                     "%s detected. Run with --debug to display traceback details after WARNING/ERROR logs.",
                     detail,
                 )
+
+    # Collection succeeded here — an exception in the try above would have
+    # propagated past the finally and never reached this point. Chain the
+    # remaining phases only when the operator asked for it.
+    if run_all:
+        _paths = _run_e2e_after_collect(output_path, progress)
+        # Re-surface every artifact's location in one block at the very end, so the
+        # operator doesn't have to scroll back through the collect/preproc/convert
+        # logs to find where each output landed.
+        _log_all_output_locations(
+            output_path, _paths, _ordered_log_path, log_path,
+            _diag.warning_count + _diag.error_count,
+        )
+    else:
+        logger.debug("--run-all not set; leaving preprocess/convert to the operator.")
+    return load_info
 
 def _normalize_row_counts(pipeline) -> dict[str, int]:
     """Return ``{table_name: rows}`` from *pipeline*'s most recent normalize step.
@@ -1108,11 +1137,25 @@ def _normalize_row_counts(pipeline) -> dict[str, int]:
         logger.warning("Could not read dlt row counts for the collection summary: %s", ex)
         return {}
 
+def _cli_path_arg(path: pathlib.Path) -> str:
+    """Render *path* as one shell argument for the copy-pasteable "next steps" hint.
+
+    Wraps the path in double quotes only when it contains whitespace, so a normal
+    path prints bare (``.\\out``) while one with spaces stays a single argument
+    (``"C:\\Program Files\\out"``). Double quotes are honored by both cmd.exe and
+    PowerShell, the shells an operator is most likely pasting into on Windows.
+    """
+    text = str(path)
+    # Pure string formatting for a log line — a no-whitespace path needs no
+    # quoting, so leave it bare for readability; nothing here warrants a log.
+    return f'"{text}"' if any(ch.isspace() for ch in text) else text
+
 def _log_collect_summary(
     discovery_counts: dict[str, int],
     per_host_counts: dict[str, int],
     per_host_expected: bool,
     output_path: pathlib.Path,
+    run_all: bool = False,
 ) -> None:
     """Emit an end-of-collection summary at INFO level.
 
@@ -1178,10 +1221,136 @@ def _log_collect_summary(
         # Orphan detection is best-effort — never fail collect because of it.
         logger.error("Orphan-folder check failed: %s", ex)
 
-    logger.info(
-        "Next steps: 'openhound preprocess sccm <raw> <lookup.duckdb>' then "
-        "'openhound convert sccm <raw>/sccm <graph> --lookup-file <lookup.duckdb>'"
+    # When --run-all is set, preprocess and convert run automatically right after
+    # this summary, so the manual copy-paste hint would only mislead. Derive the
+    # printed paths from the shared convention so this hint and --run-all can
+    # never disagree about where files land.
+    if run_all:
+        logger.info("--run-all set: preprocess and convert will run automatically next.")
+        return
+
+    # Derive every next-stage path from the one path the operator gave collect
+    # (OUTPUT_PATH), so both printed commands are ready to copy and run: the
+    # lookup DB and graph land alongside the raw data, and convert reads the
+    # "sccm" dataset dir dlt wrote beneath it. Commands are prefixed with
+    # `uv run` (matching the README) so they resolve to the sccm project's venv
+    # when run from the sccm/sccm dir — a bare `openhound` would resolve to
+    # whatever venv happens to be active, which may lack the SCCM extension.
+    from openhound_collector_common.orchestration import derive_stage_paths
+
+    paths = derive_stage_paths(app, output_path)
+    preprocess_cmd = (
+        f"uv run openhound preprocess sccm {_cli_path_arg(output_path)} {_cli_path_arg(paths.lookup_db)}"
     )
+    convert_cmd = (
+        f"uv run openhound convert sccm {_cli_path_arg(paths.dataset_dir)} {_cli_path_arg(paths.graph_out)} "
+        f"--lookup-file {_cli_path_arg(paths.lookup_db)}"
+    )
+    logger.info("Next steps: '%s' then '%s'", preprocess_cmd, convert_cmd)
+
+
+def _run_e2e_after_collect(output_path: pathlib.Path, progress: ProgressOption) -> "StagePaths":
+    """Chain preprocess + convert in-process after a successful --run-all collect.
+
+    Maps the collector's --progress choice to what the shared orchestrator wants
+    (a framework Progress member, or None for silent), then delegates to
+    run_end_to_end and returns the StagePaths it produced (dataset dir, lookup DB,
+    graph dir) so the caller can report every output location. If a stage fails,
+    the raw collected data is left intact and the equivalent manual commands are
+    logged so the operator can resume from preprocess without recollecting.
+    """
+    from openhound_collector_common.orchestration import (
+        derive_stage_paths,
+        run_end_to_end,
+    )
+
+    # 'off' -> None (dlt NULL_COLLECTOR in both stages); any real backend -> the
+    # matching framework Progress member. (Note: unlike collect, we can't reuse
+    # _resolve_progress here — its 'off' path returns a .value=None *object*,
+    # which the preprocess stage would hand raw to dlt. run_end_to_end needs the
+    # None/Progress form and applies the convert-side shim itself.)
+    if progress is ProgressOption.off:
+        e2e_progress = None
+        logger.debug("--run-all: preprocess/convert progress disabled (matches --progress off).")
+    else:
+        e2e_progress = Progress(progress.value)
+        logger.debug("--run-all: preprocess/convert progress backend: %s", progress.value)
+
+    logger.info("--run-all: continuing with preprocess and convert (in-process).")
+    try:
+        return run_end_to_end(app, output_path, progress=e2e_progress)
+    except Exception:
+        # Collect already succeeded, so the raw data on disk is still good; tell
+        # the operator exactly how to resume rather than lose that work. Commands
+        # are prefixed with `uv run`, matching the manual "Next steps" hint above,
+        # so they resolve to the sccm project's venv regardless of which venv
+        # happens to be active.
+        paths = derive_stage_paths(app, output_path)
+        logger.error(
+            "--run-all: preprocess/convert failed after a successful collect. Your raw data "
+            "is intact at %s. Resume manually: 'uv run openhound preprocess sccm %s %s' then "
+            "'uv run openhound convert sccm %s %s --lookup-file %s'.",
+            output_path,
+            _cli_path_arg(output_path), _cli_path_arg(paths.lookup_db),
+            _cli_path_arg(paths.dataset_dir), _cli_path_arg(paths.graph_out),
+            _cli_path_arg(paths.lookup_db),
+        )
+        raise
+
+
+def _log_all_output_locations(
+    output_path: pathlib.Path,
+    paths: "StagePaths",
+    collect_log_path: pathlib.Path,
+    collect_diag_path: pathlib.Path,
+    diag_issue_count: int,
+) -> None:
+    """Log a consolidated list of every artifact a ``--run-all`` run produced.
+
+    Printed once at the very end (after convert) so the operator sees, in a single
+    block, where the raw data, collect logs, lookup DB, and OpenGraph files all
+    landed — the collect-phase paths plus the preprocess/convert outputs, gathered
+    back together rather than scattered across three phases of log output.
+    """
+    # output_path, the raw dataset dir, and the lookup DB always exist on the
+    # success path (a completed run_end_to_end guarantees them), so they are listed
+    # unconditionally; the logs and graph files below are guarded on existence.
+    logger.info("--run-all complete. Output files:")
+    logger.info("    Output directory:    %s", output_path)
+    logger.info("    Raw data (JSONL):    %s", paths.dataset_dir)
+
+    # Collect-phase logs (written during collection; re-surfaced here for one-stop
+    # reference). Both are created lazily and may be absent: the ordered log only
+    # if collection produced records, and the diagnostics file (delay=True) only
+    # if a WARNING+ was emitted — so a clean run has no diagnostics file to list.
+    # Each line is therefore guarded on existence.
+    if collect_log_path.exists():
+        logger.info("    Collection log:      %s", collect_log_path)
+    else:
+        logger.debug("Collection log not found at %s; omitting from summary.", collect_log_path)
+    if collect_diag_path.exists():
+        note = (
+            f"{diag_issue_count} warning(s)/error(s), with tracebacks"
+            if diag_issue_count
+            else "no warnings/errors"
+        )
+        logger.info("    Diagnostics log:     %s  (%s)", collect_diag_path, note)
+    else:
+        logger.debug("Diagnostics log not found at %s; omitting from summary.", collect_diag_path)
+
+    logger.info("    Lookup DB:           %s", paths.lookup_db)
+
+    # OpenGraph files emitted by convert (SCCM + untagged-AD split, one or more each).
+    if paths.graph_out.exists():
+        graph_files = sorted(paths.graph_out.glob("*.json"))
+        if graph_files:
+            logger.info("    OpenGraph files (%d):", len(graph_files))
+            for graph_file in graph_files:
+                logger.info("        %s", graph_file)
+        else:
+            logger.warning("    OpenGraph output has no .json files: %s", paths.graph_out)
+    else:
+        logger.warning("    OpenGraph output directory is missing: %s", paths.graph_out)
 
 
 # Set at module scope so `CollectorManager.validate_extension` (which runs at
