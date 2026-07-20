@@ -1217,7 +1217,42 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"           FROM _site_def_computers WHERE role_kind = 'SQL' GROUP BY site_code) sql_srv "
         f"  USING (site_code)"
     )
+    _coalesce_http_site_version(con, schema)
     logger.info("node_site built in schema %r", schema)
+
+
+def _coalesce_http_site_version(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Fill node_site.version from the HTTP ccmsetup.exe fingerprint where privileged
+    collection provided none (privileged-preferred).
+
+    Skips entirely when http_site_versions was not loaded this run (no MP fingerprinted,
+    so dlt created no such table). We must NOT create it ourselves: http_site_versions is
+    a dlt-managed resource table, and a bare hand-made version (lacking dlt's constrained
+    ``_dlt_id`` column) makes the NEXT run's dlt load crash with DuckDB "Adding columns
+    with constraints not yet supported" when it tries to ALTER in ``_dlt_id``. So we let
+    dlt own creation and only read the table when it exists.
+    """
+    exists = con.execute(
+        f"SELECT count(*) FROM information_schema.tables "
+        f"WHERE table_schema = '{schema}' AND table_name = 'http_site_versions'"
+    ).fetchone()[0]
+    if not exists:
+        logger.debug("http_site_versions absent (no MP fingerprinted); skipping version coalesce")
+        return
+    # dlt drops an all-NULL column, so a load where every row had a null site_code (or
+    # sccm_version) leaves the table without it. Restore it as a plain NULL column (no
+    # constraint -> DuckDB-safe, and dlt reconciles it on the next load) so the WHERE /
+    # GROUP BY below always binds instead of raising a BinderException. See _ensure_columns.
+    _ensure_columns(con, schema, "http_site_versions", {"site_code": "VARCHAR", "sccm_version": "VARCHAR"})
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_site AS "
+        f"SELECT ns.* REPLACE (coalesce(ns.version, hv.http_version) AS version) "
+        f"FROM {schema}.node_site ns "
+        f"LEFT JOIN (SELECT upper(site_code) AS u, any_value(sccm_version) AS http_version "
+        f"           FROM {schema}.http_site_versions "
+        f"           WHERE site_code IS NOT NULL AND sccm_version IS NOT NULL "
+        f"           GROUP BY upper(site_code)) hv ON hv.u = upper(ns.site_code)"
+    )
 
 
 def _root_code(con: duckdb.DuckDBPyConnection, schema: str) -> str | None:
@@ -2870,8 +2905,11 @@ def _edge_coerce_relay_adminservice(
     NTLM gate is on the PROVIDER (the relay target must accept NTLM): default treats
     null-or-'Off' as vulnerable; with --disable-possible-edges only explicit 'Off' qualifies
     (Stage 6 decision #1). collectionSource is the static ['Post-processing'] CMBP passes at
-    ps1:1955. _safe() skips+logs if site_hierarchy / node_computer is missing."""
+    ps1:1955. Sites confirmed running SCCM 2509+ (build >= ADMINSERVICE_NTLM_MIN_BUILD) are
+    excluded — the AdminService rejects NTLM there; unknown versions fail open (edge kept).
+    _safe() skips+logs if site_hierarchy / node_computer is missing."""
     from .kinds.edges import COERCE_AND_RELAY_TO_ADMIN_SERVICE
+    from .cve_table import ADMINSERVICE_NTLM_MIN_BUILD
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_computer always emits VARCHAR but be explicit.
     # NTLM gate is flag-INDEPENDENT: an unset RestrictReceivingNTLMTraffic is the Windows default
@@ -2879,12 +2917,23 @@ def _edge_coerce_relay_adminservice(
     # --disable-possible-edges (matches CMBP, which emits these confirmed edges under its flag).
     # The confirmed gate for this edge is the provider's SMS Provider role, always applied below.
     ntlm_ok = "upper(coalesce(CAST(c.restrict_receiving_ntlm_traffic AS VARCHAR), 'OFF')) = 'OFF'"
+    # Guarantee node_site exists so the join below never fails the whole INSERT (safe_execute
+    # would otherwise skip every site's edge on a CatalogException) when this runs before
+    # _node_site has built it (e.g. a caller invoking this builder in isolation).
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS {schema}.node_site (site_code VARCHAR, version VARCHAR)"
+    )
     _safe(
         con, "edge_coerce_relay_adminservice",
         f"INSERT INTO {schema}.graph_edges BY NAME "
         f"WITH nonsec AS ("
-        f"  SELECT site_code, upper(site_code) AS u FROM {schema}.site_hierarchy "
-        f"  WHERE coalesce(site_type, 0) != 1 AND site_code IS NOT NULL"
+        f"  SELECT sh.site_code, upper(sh.site_code) AS u FROM {schema}.site_hierarchy sh "
+        f"  LEFT JOIN {schema}.node_site nsite ON upper(nsite.site_code) = upper(sh.site_code) "
+        f"  WHERE coalesce(sh.site_type, 0) != 1 AND sh.site_code IS NOT NULL "
+        # Fail open: NULL/unparseable version -> coalesce to 0 -> kept. Build >= 9141
+        # (SCCM 2509+) rejects NTLM at the AdminService -> suppress the relay edge.
+        f"    AND coalesce(try_cast(split_part(nsite.version, '.', 3) AS INTEGER), 0) "
+        f"        < {ADMINSERVICE_NTLM_MIN_BUILD}"
         f"), "
         f"providers AS ("
         f"  SELECT c.sid, c.dnshostname, upper(regexp_extract(role, '@(.+)$', 1)) AS site "

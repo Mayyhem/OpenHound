@@ -33,7 +33,7 @@ class _FakeHttp:
         self.fail_on = fail_on
         self.calls = []
 
-    def get(self, url):
+    def get(self, url, headers=None):  # headers mirrors the real HttpClient.get signature
         self.calls.append(url)
         for sub in self.fail_on:
             if sub in url:

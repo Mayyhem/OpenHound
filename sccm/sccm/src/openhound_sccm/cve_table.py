@@ -4,13 +4,22 @@ Ported from CMBP ``sccm/ConfigManBearPig/python/lib/collectors/version_fingerpri
 (originally authored by Mehdi Elyassa at Synacktiv:
 https://github.com/synacktiv/SCCMVersionGuesser/blob/main/SCCMVersionGuesser.py).
 
-Used by ``models/sccm_site.py`` to populate the ``versionCVEs`` property when
-the site's ``version`` string maps to a known build.
+``lookup_cves`` is called from ``models/sccm_site.py`` during convert to populate the
+``SCCM_Site`` node's ``versionCVEs`` property from the site's ``version`` (sourced from
+privileged AdminService/WMI collection or the unauthenticated HTTP ccmsetup.exe
+fingerprint). ``ADMINSERVICE_NTLM_MIN_BUILD`` is also consumed by ``transforms.py`` to
+gate the ``CoerceAndRelayToAdminService`` edge (SCCM 2509+ rejects NTLM at the AdminService).
 """
 
 from __future__ import annotations
 
+import re
 from typing import Optional
+
+# SCCM 2509 (build 9141) and later reject NTLM at the AdminService, mitigating the
+# coerce-and-relay-to-AdminService attack (Misconfiguration Manager TAKEOVER-5). Used by
+# transforms.py to gate the CoerceAndRelayToAdminService edge.
+ADMINSERVICE_NTLM_MIN_BUILD = 9141
 
 
 CVE_MAP: dict[str, list[str]] = {
@@ -136,22 +145,40 @@ def _normalize(version: str) -> str:
     return version.replace(".00.", ".0.")
 
 
+def _build_number(version: str) -> Optional[int]:
+    """Extract the SCCM build number (e.g. 9135) from a version string.
+
+    Prefers the third dotted field (``5.00.9135.1013`` -> 9135); falls back to the
+    first run of >= 3 digits so a major-version-only input (``"9135"``) still resolves.
+    """
+    parts = version.split(".")
+    if len(parts) >= 3 and parts[2].isdigit():
+        return int(parts[2])
+    m = re.search(r"\d{3,}", version)
+    return int(m.group(0)) if m else None
+
+
 def _locate_build(detected_ver: str) -> Optional[str]:
-    for build_id, data in BUILD_MAP.items():
-        for item in data["Stack"]:
-            if detected_ver in item[0]:
-                return build_id
-    return None
+    """Return the BUILD_MAP key for the version's build, or None if unknown.
+
+    BUILD_MAP is keyed by build number (e.g. ``"9135"``), so a version whose exact
+    hotfix row is absent (or a major-version-only input) still resolves to its build.
+    """
+    build = _build_number(detected_ver)
+    if build is None:
+        return None
+    return str(build) if str(build) in BUILD_MAP else None
 
 
 def lookup_cves(version: Optional[str]) -> list[str]:
-    """Return the list of CVE strings that ``version`` is still vulnerable to.
+    """Return the CVE strings that ``version`` is still vulnerable to (sorted).
 
-    Returns an empty list when ``version`` is None / unknown / fully patched.
-    Walks the build's ordered hotfix stack — rows at-or-before the first row
-    whose client version matches are treated as installed; later rows as
-    missing. A CVE is considered patched if any of its fix KBs appears in the
-    installed portion.
+    Empty list when ``version`` is None / unknown / fully patched. Walks the build's
+    ordered hotfix stack: KBs at-or-before the first row whose client version matches
+    are treated as installed. When NO row matches (we only know the build / major
+    version), the installed set stays empty -- the build is treated as its base
+    release (no hotfixes) so every CVE for that build is reported (conservative).
+    A CVE is patched if any of its fix KBs is in the installed set.
     """
     if not version:
         return []
@@ -161,16 +188,14 @@ def lookup_cves(version: Optional[str]) -> list[str]:
     stack = BUILD_MAP[build_id]["Stack"]
     detected_norm = _normalize(version)
     installed_kbs: set[str] = set()
-    found_current = False
+    accum: set[str] = set()
     for client_v, kb, _name, _full_v in stack:
-        is_match = version == client_v or detected_norm == _normalize(client_v)
-        if not found_current:
-            if kb != "Base":
-                installed_kbs.add(kb)
-            if is_match:
-                found_current = True
-    missing: list[str] = []
-    for cve, fix_kbs in CVE_MAP.items():
-        if not any(kb in installed_kbs for kb in fix_kbs):
-            missing.append(cve)
-    return sorted(missing)
+        if kb != "Base":
+            accum.add(kb)
+        if version == client_v or detected_norm == _normalize(client_v):
+            installed_kbs = set(accum)  # commit KBs up to and including the matched row
+            break
+    return sorted(
+        cve for cve, fix_kbs in CVE_MAP.items()
+        if not any(kb in installed_kbs for kb in fix_kbs)
+    )

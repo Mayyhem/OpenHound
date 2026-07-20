@@ -10,6 +10,7 @@ import logging
 from openhound.core.asset import BaseAsset
 from pydantic import ConfigDict, Field
 
+from ..cve_table import lookup_cves
 from ..graph import SCCMNode, SCCMSiteProperties
 from ..kinds import nodes as nk
 
@@ -87,6 +88,10 @@ class SCCMSite(BaseAsset):
 
         display = self.site_name or self.site_code
 
+        # Known CVEs for this site's SCCM build (None when version unknown so the key
+        # prunes; [] when the version is known but fully patched).
+        version_cves = lookup_cves(self.version) if self.version else None
+
         return SCCMNode(
             id=self.site_code,
             kinds=[nk.SCCM_SITE],
@@ -117,6 +122,7 @@ class SCCMSite(BaseAsset):
                 SQLServerDomainSID=self.sql_server_domain_sid,
                 SQLServiceAccountDomainSID=self.sql_service_account_domain_sid,
                 SQLServicePort=self.sql_service_port,
+                versionCVEs=version_cves,
             ),
         )
 

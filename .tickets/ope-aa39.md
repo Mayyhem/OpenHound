@@ -1,6 +1,6 @@
 ---
 id: ope-aa39
-status: open
+status: closed
 deps: []
 links: [ope-a214]
 created: 2026-07-15T20:28:47Z
@@ -54,3 +54,7 @@ Authored all 11 MSSQL edges from MSSQLHound.ps1 EdgePropertyGenerators (subagent
 **2026-07-17T15:18:07Z**
 
 Reworked the 3 CoerceAndRelayTo* edges to follow MSSQLHound.ps1 CoerceAndRelayToMSSQL format (subagent-extracted): 3-step numbered abuse (ntlmrelayx.py target -> coerce via SpoolSample/PetitPotam/Coercer -> relay outcome), separate Windows/Linux command variants. Kept code-accurate framing (AuthUsers source, per-edge gates, possible-edge caveat). Fixed References from the generic TAKEOVER list to specific techniques: AdminService=TAKEOVER-5, MSSQL=TAKEOVER-1, SMB=TAKEOVER-2/6/7; added Coercer (p0dalirius) + Extended Protection doc (MSSQL). Backslashes escaped (DOMAIN\COMPUTER$). Still 35 authored/0 pending. ruff clean, 11 passed+1 skipped. No commit.
+
+**2026-07-17T17:47:55Z**
+
+Closed: committed + pushed in 4379303. Edge entity-panel help shipped; 35/35 scoped edges authored, PENDING_HELP_KINDS empty. Deferred composition work tracked separately in ope-a214.

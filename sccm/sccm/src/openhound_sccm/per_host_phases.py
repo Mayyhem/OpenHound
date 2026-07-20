@@ -76,6 +76,7 @@ PER_HOST_PHASES: tuple[Phase, ...] = (
             "http_distribution_points",
             "http_smsproviders",
             "http_site_servers",
+            "http_site_versions",
         ), http.collect_http,
     ),
     # SMB runs last: an unauthenticated SMB2-negotiate signing check plus

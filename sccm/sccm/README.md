@@ -209,9 +209,11 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 | **MSSQL** ([collectors/mssql.py](src/openhound_sccm/collectors/mssql.py)) | Connects to the host's SQL Server (TCP/1433) and probes its **Extended Protection for Authentication (EPA)** enforcement using [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py). | ✅ Implemented |
 | **AdminService** ([collectors/privileged.py](src/openhound_sccm/collectors/privileged.py)) | Queries the SCCM AdminService REST API (`https://<provider>/AdminService/wmi/...`) over Negotiate and collects the site hierarchy, site definitions, reserved accounts, devices, users, **security groups** (`SMS_R_UserGroup` — each group's name *and* SID, used to resolve `SecurityGroupName` memberships to Group nodes offline), collections, security roles, admins, and site-system roles into raw `adminservice_*` tables. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **WMI** ([collectors/privileged.py](src/openhound_sccm/collectors/privileged.py)) | **Fallback for AdminService.** Shares the *same* collection helpers as the AdminService phase (one set, parameterized per transport in `privileged.py`); when AdminService is unreachable on a host, it reads the same SMS Provider classes directly in the `root\SMS\site_<code>` WMI namespace (over DCOM via impacket, or pywin32 for the current Windows user) and writes the matching `wmi_*` tables. Runs only on hosts AdminService did **not** already collect — gated by `should_run_phase` reading `TargetEntry.completed_phases`. | ✅ Implemented (collect-only) |
-| **HTTP** ([collectors/http.py](src/openhound_sccm/collectors/http.py)) | **Unauthenticated** probing of the SCCM web endpoints over http then https — `SMS_MP/.sms_aut` (`MPKEYINFORMATION`/`MPLIST`/`SMSTRC`/`MPLIST1`), `SMS_DP_SMSPKG$`, `AdminService/wmi/SMS_Identification`, and the site-signing certificate — to identify **Management Point**, **Distribution Point**, **SMS Provider**, and **Site Server** roles from the 401/403/200 status codes. Enumerates and registers sibling MPs and the site server as new probe targets; writes raw `http_*` role tables. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
+| **HTTP** ([collectors/http.py](src/openhound_sccm/collectors/http.py)) | **Unauthenticated** probing of the SCCM web endpoints over http then https — `SMS_MP/.sms_aut` (`MPKEYINFORMATION`/`MPLIST`/`SMSTRC`/`MPLIST1`), `SMS_DP_SMSPKG$`, `AdminService/wmi/SMS_Identification`, and the site-signing certificate — to identify **Management Point**, **Distribution Point**, **SMS Provider**, and **Site Server** roles from the 401/403/200 status codes. Enumerates and registers sibling MPs and the site server as new probe targets; writes raw `http_*` role tables. On a confirmed Management Point, also fetches `/CCM_Client/ccmsetup.exe` (still unauthenticated) and regexes the embedded version string out of the binary to fingerprint the site's SCCM build (the [SCCMVersionGuesser](https://github.com/synacktiv/SCCMVersionGuesser) technique) — feeds `SCCM_Site.version`/`versionCVEs` when privileged collection found no version. **Bandwidth/OPSEC note:** v1 downloads the entire `ccmsetup.exe` (multiple MB) rather than a bounded/`Range` fetch, which is a bigger and noisier footprint than every other probe in this row (those read a few KB of XML/JSON at most); a bounded fetch is a future optimization. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **SMB** ([collectors/smb.py](src/openhound_sccm/collectors/smb.py)) | An **unauthenticated** SMB2-negotiate **signing-required** check (via [clients/smb.py](src/openhound_sccm/clients/smb.py)), then **authenticated** share enumeration (`NetShareEnum`) that classifies SCCM-specific shares — `SMS_SITE`/`SMS_<code>` (Site Server), `SMS_DP$` (Distribution Point), `REMINST` (PXE), `SCCMContentLib$`/`SMSPKG` (content library) — into site-system roles and a site code. Writes raw `smb_computers` / `smb_sites` tables. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **DHCP** | Accepted as a `--collection-methods` token, but the per-host collector is not yet ported. | 🚧 Not yet ported |
+
+> The site version this HTTP fingerprint (or privileged AdminService/WMI collection) resolves also gates the [`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice) edge: a site **confirmed** to run **SCCM 2509 or later** (build ≥ 9141) suppresses the edge, because that AdminService version rejects NTLM authentication outright. An unknown or unparseable version keeps the edge (fail-open — a possible edge that can't be confirmed mitigated stays in the graph).
 
 ---
 
@@ -272,6 +274,7 @@ The collector relies on these assumptions about the target environment and how i
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
 - **CRED-2 (machine-account) flags are inert.** `--machine-name`, `--machine-pass`, `--client-name`, `--create-machine-account`, `--use-altauth`, and `--registration-sleep` are defined but not yet implemented (their help text says so).
+- **`--socks-proxy` cannot tunnel live current-user SSPI / OS-Kerberos, and carries no UDP.** Windows SSPI Negotiate and OS-Kerberos make their KDC/DCOM connections inside the OS (LSASS/win32com), not this process, so a userland socket hook cannot pull them through the pivot. Use `--ticket` (pass-the-ticket, which tunnels completely) or set up OS-level transparent proxying (tun2socks / Proxifier) on the outside box. Separately, DNS is forced onto TCP to ride the tunnel — SOCKS5 CONNECT is TCP-only, so no other UDP traffic is carried. See [Proxying / pivoting](#proxying--pivoting).
 
 ---
 
@@ -402,7 +405,7 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 
 | Option | Description |
 |---|---|
-| `--socks-proxy` | SOCKS5 proxy `HOST:PORT` *(intended for DHCP/TFTP collection — not yet ported)*. |
+| `--socks-proxy` | Route **all** collection traffic (discovery + every per-host protocol) through a SOCKS5 proxy. Forms: `socks5://[user:pass@]host:port` or bare `host:port`. Requires `--dc` or `--dns`. See [Proxying / pivoting](#proxying--pivoting). |
 | `--dns`, `--dns-resolver` | DNS nameserver IP used for all lookups (DC discovery, SRV probes). Omit to use the system default. |
 
 ### Output & logging
@@ -413,6 +416,35 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 | `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
 | `-v`, `--verbose` | Repeatable. `-v` → INFO (step summaries), `-vv` → VERBOSE (per-resolution / per-node traces). |
 | `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). |
+
+### Proxying / pivoting
+
+Run the collector on an outside box and tunnel **everything** through a SOCKS5
+pivot inside the target network:
+
+```bash
+openhound collect sccm ./out \
+  -d mayyhem.com --dc dc.mayyhem.com \
+  -u lowpriv -p 'Password123!' \
+  --socks-proxy socks5://127.0.0.1:1080
+```
+
+All discovery (LDAP/DNS/DC) and every per-host protocol (RemoteRegistry, MSSQL,
+AdminService, WMI, HTTP, SMB) egress at the proxy. Destination names resolve at
+the proxy (socks5h); our own DNS lookups are forced onto TCP so they ride the
+tunnel too.
+
+**`--dc` or `--dns` is required** with `--socks-proxy`: internal names can't be
+resolved from the outside box, so pin the DC (`--dc`) or point at an internal
+resolver reachable through the pivot (`--dns`).
+
+**Authentication through a pivot.** Explicit credentials, pass-the-hash
+(`--nt-hash`) and pass-the-ticket (`--ticket`) tunnel completely — including the
+Kerberos KDC exchange, which impacket performs in-process. **Live current-user
+single sign-on (SSPI) cannot be tunneled by the tool**: Windows itself contacts
+the KDC, and that traffic never touches our sockets. To use a logged-in identity
+through the pivot, export its Kerberos ticket and pass `--ticket`, or set up
+OS-level transparent proxying (tun2socks / Proxifier) on the outside box.
 
 ---
 
@@ -693,8 +725,9 @@ A Configuration Manager **site**, coalesced from AdminService/WMI site tables, s
 | `SQLServiceAccountName` | string | Domain account running the SQL Server service on this site's database server (from `SMS_SCI_SysResUse`). |
 | `SQLServiceAccountDomainSID` | string | SID of the SQL service account resolved by name. |
 | `SQLServicePort` | string | SQL Server service port from site-definition Props. |
-| `version` | string | Site version string (e.g. `5.00.9106.1000`). |
+| `version` | string | Site version string (e.g. `5.00.9106.1000`). Privileged-preferred (AdminService/WMI); falls back to the unauthenticated HTTP `ccmsetup.exe` fingerprint (see [Collection Overview](#collection-overview)) when privileged collection found none. |
 | `buildNumber` | string | Build number (e.g. `9106`). |
+| `versionCVEs` | list\<string\> | CVE identifiers this site's SCCM build is still exposed to, derived from `version` via the SCCMVersionGuesser build/CVE map (`cve_table.lookup_cves`). Absent when `version` is unknown; an empty list when the version is known but fully patched. |
 | `installDir` | string | Site server install directory. |
 | `SCCMInfra` | bool | Always `true` for a site. |
 | `distinguishedName` | string | AD distinguished name of the `mSSMSSite` object in the System Management container. |
@@ -1307,6 +1340,7 @@ Links the **Authenticated Users** group of a site server's domain to the `SCCM_S
 - **Traversable:** yes
 - **`collectionSource`:** `["Post-processing"]`
 - **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null or uncollected `restrictReceivingNtlmTraffic` on the SMS Provider is treated as vulnerable (matching ConfigManBearPig). With the flag, only a confirmed `Off` value qualifies.
+- **Version gate:** suppressed for a site **confirmed** to be SCCM 2509+ (build ≥ 9141) — that AdminService version rejects NTLM. An unknown/unparseable site `version` keeps the edge (fail-open). See [Collection Overview](#collection-overview) for how the version is fingerprinted.
 - **Note:** Lands in the **AD payload** (`ad_edges-*.json`) because the start node is an AD `Group`.
 
 | Property | Type | Description |

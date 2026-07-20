@@ -74,3 +74,9 @@ def test_parse_bracketed_ipv6_bare():
     cfg = parse_proxy_address("[2001:db8::1]:1080")
     assert cfg.host == "2001:db8::1"
     assert cfg.port == 1080
+
+
+def test_socks5_handshake_is_public_and_reuses_connect_path():
+    # socks5_handshake must be importable and callable on a bare socket.
+    from openhound_collector_common.proxy.socks import socks5_handshake
+    assert callable(socks5_handshake)

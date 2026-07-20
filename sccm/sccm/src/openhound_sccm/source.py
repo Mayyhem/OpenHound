@@ -231,8 +231,6 @@ def source(
     create_machine_account: str | None = dlt.config.value,
     use_altauth: bool | None = dlt.config.value,
     registration_sleep: int | None = dlt.config.value,
-    # Network
-    socks_proxy: str | None = dlt.config.value,
     # DNS
     dns_resolver: str | None = dlt.config.value,
 ):

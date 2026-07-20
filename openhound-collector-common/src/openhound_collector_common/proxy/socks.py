@@ -151,6 +151,22 @@ def _split_host_port(addr: str) -> tuple[str, str]:
     return host, port
 
 
+def socks5_handshake(
+    sock: socket.socket,
+    proxy: ProxyConfig,
+    dest_host: str,
+    dest_port: int,
+) -> None:
+    """Run the SOCKS5 greeting/auth + CONNECT on an already-open socket.
+
+    *sock* must already be connected to the proxy endpoint. On return it is a
+    live tunnel to ``(dest_host, dest_port)``. Raises :class:`SocksError` on any
+    protocol failure (the caller owns closing the socket).
+    """
+    _socks5_negotiate_auth(sock, proxy)
+    _socks5_connect(sock, dest_host, dest_port)
+
+
 def connect_through_socks5(
     proxy: ProxyConfig,
     dest_host: str,
@@ -167,8 +183,7 @@ def connect_through_socks5(
     """
     sock = socket.create_connection((proxy.host, proxy.port), timeout=timeout)
     try:
-        _socks5_negotiate_auth(sock, proxy)
-        _socks5_connect(sock, dest_host, dest_port)
+        socks5_handshake(sock, proxy, dest_host, dest_port)
     except Exception:
         # Never leak the socket if the handshake fails part-way through.
         sock.close()

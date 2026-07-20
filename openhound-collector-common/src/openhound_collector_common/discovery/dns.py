@@ -75,7 +75,16 @@ def make_resolver(
     resolver.timeout = timeout
     resolver.lifetime = lifetime
     if force_tcp:
-        # dnspython honors this attribute on resolve(); keeps proxied DNS on TCP.
+        # SOCKS5 (our dialer) can't carry UDP, so proxied DNS must use TCP.
+        # dnspython takes tcp per-call, so wrap resolve() to default it on.
+        # Mirrors the Go SetProxyDialer rebuild that forces "tcp".
+        _orig_resolve = resolver.resolve
+
+        def _resolve_tcp(qname, *args, **kwargs):
+            kwargs.setdefault("tcp", True)
+            return _orig_resolve(qname, *args, **kwargs)
+
+        resolver.resolve = _resolve_tcp  # per-instance override
         logger.debug("make_resolver: forcing DNS over TCP (proxy mode)")
     return resolver
 
@@ -174,11 +183,16 @@ def _domain_resolves(domain: str, resolver: dns.resolver.Resolver) -> bool:
         # Timeout / config error — fall through to the stdlib attempt.
         logger.debug("_domain_resolves: dnspython A lookup for %s failed: %s", domain, exc)
 
+    if "resolve" in resolver.__dict__:
+        # force_tcp resolver (proxy mode): do NOT fall back to a local
+        # getaddrinfo -- that would resolve on the outside box and leak.
+        logger.debug("_domain_resolves: proxy mode; skipping stdlib fallback for %s", domain)
+        return False
     try:
         socket.getaddrinfo(domain, None)
         return True
     except (socket.gaierror, OSError) as exc:
-        # Host resolver also can't find it — the domain truly doesn't resolve.
+        # Host resolver also can't find it -- the domain truly doesn't resolve.
         logger.debug("_domain_resolves: stdlib getaddrinfo for %s failed: %s", domain, exc)
         return False
 

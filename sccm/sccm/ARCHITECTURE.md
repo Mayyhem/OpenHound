@@ -63,7 +63,9 @@ Every section follows the same spine:
   - [11f. Split output: an untagged AD payload beside the SCCM source](#11f-split-output-an-untagged-ad-payload-beside-the-sccm-source)
   - [11g. Stage 5: MSSQL node merge and topology inference](#11g-stage-5-mssql-node-merge-and-topology-inference)
   - [11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node](#11h-stage-6-coerce-and-relay-possible-edges-and-the-synthetic-authenticated-users-node)
+  - [11i. HTTP version fingerprint from ccmsetup.exe — a new HTTP-phase capability](#11i-http-version-fingerprint-from-ccmsetupexe--a-new-http-phase-capability)
 - [12. One-command end-to-end: a `--run-all` flag, not a new verb](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)
+- [13. Tunneling all collection traffic through a SOCKS5 pivot](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -141,6 +143,7 @@ became the shared one. What moved:
 | Push→pull streaming bridge ([§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline)) | `dlt/source_bridge` (`StreamBridge`, `DONE`, `build_streams`, `broadcast_done`, `extract_workers_for`) | `phased_pipeline/streams.py` re-exports `DONE`/`build_streams`/`broadcast_done`; `source.py` plants a `StreamBridge` and its emit resources delegate their drain to it |
 | DNS resolution ([§5](#5-an-active-directory-cli-surface-and-context-auto-detection)) | `discovery/dns` (`make_resolver`) | `main.py::_resolve_dc_via_dns` calls the shared `make_resolver`, keeps the SCCM-specific SRV query |
 | End-to-end phase chaining ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | `orchestration/run` (`run_end_to_end`, `derive_stage_paths`, `StagePaths`) | `main.py::_run_e2e_after_collect` maps `--progress` and delegates; the `--run-all` flag on `collect_sccm` triggers it |
+| SOCKS5 pivot ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)) | `proxy/patch.py` (process-wide `socket` interception), `proxy/socks.py` (dialer/handshake), `discovery/dns.py` (`force_tcp`) | `main.py` parse/validate (`_parse_proxy_or_exit`, `_require_dc_or_dns_for_proxy`) + the install-around-run wrap (`socks_proxy_installed`); the four proxy-aware DNS sites (`_resolve_dc_via_dns`, two sites in `collectors/dns.py`, `context.resolve_ip`) |
 
 **Governance.** From an extension agent's point of view the shared library is **read-only** — an SCCM
 change may not edit `openhound-collector-common`, exactly as it may not edit `openhound/` core. Promoting
@@ -1097,6 +1100,72 @@ This gives operators a single flag to choose between a speculative-complete view
 
 **Output routing.** All three relay edges touch an AD `Group` start node (Authenticated Users), so they are routed to `graph_edges_ad` (the untagged AD payload) by `_graph_edges_split`. For `CoerceAndRelayToSMB` the end node is also an AD `Computer`, so both endpoints are AD nodes. For `CoerceAndRelayToAdminService` the end is a `SCCM_Site`, and for `CoerceAndRelayToMSSQL` the end is an `MSSQL_Login` — both SCCM-payload nodes — but the AD-start-node rule routes them to the AD payload regardless.
 
+### 11i. HTTP version fingerprint from ccmsetup.exe — a new HTTP-phase capability
+
+*This is a new category of divergence from a stock OpenHound collector.*
+
+#### The framework baseline
+
+Every existing HTTP-phase probe (§2/§3 above) reads at most a small status code or a few KB of XML —
+`MPKEYINFORMATION`, `MPLIST`, the site-signing certificate. A stock REST-API collector (and every
+probe this extension had until now) treats "make an unauthenticated or authenticated request and
+parse the response" as reading a small, structured payload. There is no precedent, here or in a stock
+OpenHound extension, for downloading and parsing a multi-megabyte *binary* file as a source of truth.
+
+#### Why it breaks for SCCM
+
+[SCCMVersionGuesser](https://github.com/synacktiv/SCCMVersionGuesser)'s technique for learning a
+site's exact SCCM build **without any credentials** is to read the version string Microsoft embeds in
+`ccmsetup.exe`, the client-installer binary every Management Point serves unauthenticated. This is the
+only way to fingerprint the site's patch level (and therefore its outstanding CVEs, and whether it's
+new enough that the AdminService rejects NTLM) when the operator has no domain credentials, or when
+privileged collection (AdminService/WMI) reached the site but returned no version. Getting that string
+means fetching and regexing an actual binary — a fundamentally different operation from every other
+probe in this file.
+
+#### The add-on: a best-effort binary fetch inside the confirmed-MP handler
+
+- [`_probe_ccmsetup_version`](src/openhound_sccm/collectors/http.py#L378-L404) runs only after
+  `probe_management_point` confirms the MP role (`self.is_mp = True`) via the existing anonymous
+  `HttpClient`; a failed, missing, or version-less fetch is logged (`logger.debug`) and skipped — it
+  never gates or affects role detection.
+- The version is pulled out of the raw response bytes with a UTF-16LE regex
+  ([`_CCMSETUP_VERSION_RE`](src/openhound_sccm/collectors/http.py#L147-L151)) matching the
+  `5.XX.XXXX.XXXX` pattern SCCMVersionGuesser uses; a hit is emitted as one row to a new raw table,
+  `http_site_versions` (`site_code`, `sccm_version`, `source="HTTP-ccmsetup"`, `mp_host`).
+- `preprocess`'s [`_coalesce_http_site_version`](src/openhound_sccm/transforms.py#L1224-L1241) LEFT
+  JOINs this table onto `node_site` and coalesces **privileged-first**
+  (`coalesce(ns.version, hv.http_version)`) — AdminService/WMI's `version` always wins when both are
+  known; the HTTP fingerprint only fills sites that yielded no privileged version. This must run as
+  part of `_node_site`, before anything downstream reads `node_site.version`.
+- Two things now consume that coalesced version: `convert`'s `SCCMSite.as_node`
+  ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)) calls
+  `cve_table.lookup_cves(version)` to populate the new `SCCM_Site.versionCVEs` property (the
+  SCCMVersionGuesser build/CVE map, `cve_table.BUILD_MAP` / `CVE_MAP`), and
+  [`_edge_coerce_relay_adminservice`](src/openhound_sccm/transforms.py#L2880-L2896) reads the same
+  version to **suppress** the `CoerceAndRelayToAdminService` edge on sites confirmed to be SCCM 2509+
+  (build ≥ `cve_table.ADMINSERVICE_NTLM_MIN_BUILD` = 9141 — the build where the AdminService starts
+  rejecting NTLM). An unknown/unparseable version fails **open**: the edge is kept as a possible edge
+  that can't be confirmed mitigated.
+
+#### Trade-offs
+
+- **Bandwidth/OPSEC.** v1 downloads the entire `ccmsetup.exe` (multiple MB) through the existing
+  `HttpClient.get()`, which has no partial/`Range` request support. On an unauthenticated probe this is
+  a much larger and more noticeable footprint than every other HTTP-phase probe (a few KB of XML/JSON
+  at most). A bounded/`Range` fetch is a known future optimization, gated on adding a `headers=`
+  parameter to `HttpClient.get()`.
+- **Two decoupled version sources feeding one field.** Because `node_site.version` can now come from
+  either privileged collection or this HTTP fingerprint, `_coalesce_http_site_version` must run before
+  every downstream reader of that column (the CVE lookup and the relay-edge gate). A future reordering
+  of `transforms()` that read `node_site.version` before this coalesce runs would silently see only the
+  privileged value.
+- **Fail-open gate has a blind spot.** The 2509+ relay suppression only fires on a *confirmed* version.
+  If privileged collection is unavailable and the HTTP fingerprint also fails (fetch error, no MP
+  confirmed, unrecognized version string), a genuinely-patched 2509+ site still emits the (now
+  inaccurate) `CoerceAndRelayToAdminService` possible edge — correct by design (an unconfirmed
+  mitigation can't be assumed), but a source of false positives operators should be aware of.
+
 ---
 
 ## 12. One-command end-to-end: a `--run-all` flag, not a new verb
@@ -1164,6 +1233,91 @@ sccm`) is exactly the thing the framework can't express without a core edit.
 
 ---
 
+## 13. Tunneling all collection traffic through a SOCKS5 pivot
+
+### The framework baseline
+
+A stock OpenHound collector authenticates a single HTTPS endpoint from wherever
+the process happens to run — a cloud REST API is reachable from anywhere with
+an internet connection. The framework has no notion of routing traffic through
+an intermediary; there is nothing to configure because there is nothing to
+route around.
+
+### Why it breaks for SCCM
+
+This collector's whole reason for existing is on-prem, and on-prem engagements
+are routinely run from **outside** the target network, through a single
+foothold. Unlike a REST collector's one endpoint, SCCM collection is discovery
+(LDAP/DNS/DC) plus **five** per-host wire protocols (RemoteRegistry, MSSQL,
+AdminService, WMI, HTTP, SMB) across four different client libraries
+(`ldap3`, `impacket`, `requests`, plus the collector's own raw-socket probes).
+For a pivoted engagement to be usable at all, every one of those has to egress
+through the same SOCKS5 hop — a single "proxy this one HTTP client" option
+would leave four other protocols leaking traffic straight from the outside box.
+
+### The add-on: a process-wide `socket` interception, installed for the run
+
+- **Implementation** (`openhound_collector_common.proxy`, `proxy/patch.py` +
+  `proxy/socks.py`): three stdlib entry points are swapped for the duration of
+  the run — `socket.socket` (subclassed as `_ProxiedSocket`, whose `connect`
+  performs the SOCKS5 handshake to the destination), `socket.create_connection`
+  (dials the proxy and hands it the destination **hostname**, never resolving
+  locally), and `socket.getaddrinfo` (a pass-through that hands back the
+  hostname unresolved, so callers that pre-resolve before connecting — e.g.
+  `urllib3`/`requests` — still route the real name through `connect` instead of
+  failing on an internal-only name). Loopback targets and the proxy's own
+  endpoint are always bypassed (a recursion / local-traffic guard).
+- **Scoped to the collect run only**, via the `socks_proxy_installed(proxy_cfg)`
+  context manager (`main.py`), wrapping the entire discovery + per-host-phase
+  window; a no-op pass-through when no proxy is configured, so the direct-mode
+  code path is unchanged.
+- **Destination names resolve at the proxy** (`socks5h` behavior) — the
+  collector never needs to resolve an internal-only hostname itself for TCP
+  traffic.
+- **Our own DNS lookups are forced onto TCP** so they ride the same tunnel
+  (SOCKS5 `CONNECT` cannot carry UDP): four proxy-aware call sites check
+  `active_proxy()` and pass `force_tcp=True` into the shared
+  `discovery.dns.make_resolver` — `main.py::_resolve_dc_via_dns`, two sites in
+  [`collectors/dns.py`](src/openhound_sccm/collectors/dns.py)
+  (`dns_management_points`'s SRV lookups and the `_resolve_v4`/`_resolve_v4_via_dns`
+  pair), and `context.py::resolve_ip`.
+- **SCCM's own footprint is thin**: the CLI parse/validate
+  (`_parse_proxy_or_exit`, `_require_dc_or_dns_for_proxy` — the latter exits(2)
+  when `--socks-proxy` is set without `--dc`/`--dns`, since internal names can't
+  be resolved from the outside box), the install-around-run wrap, and the four
+  DNS call sites above. The interception itself carries no SCCM-specific logic,
+  so it was built directly in the shared library (see
+  [Where this code lives](#where-this-code-lives-the-shared-collector-common-library))
+  so the MSSQL collector can adopt it without re-deriving it.
+
+### Trade-offs
+
+- **Native OS authentication cannot be tunneled — a hard, documented limit, not
+  a bug.** Live current-user SSPI Negotiate and OS-Kerberos make their
+  KDC/DCOM calls inside the OS itself (LSASS for Kerberos; `win32com` for the
+  WMI SSPI rung — see [§6](#6-windows-authentication-across-five-protocols)) —
+  traffic this process never touches, so no userland socket hook can carry it.
+  To use a logged-in identity through the pivot, export its Kerberos ticket and
+  pass `--ticket` (pass-the-ticket runs in-process through impacket, so it
+  tunnels completely), or set up OS-level transparent proxying (tun2socks /
+  Proxifier) on the outside box. Everything else in-process — explicit
+  credentials, pass-the-hash, pass-the-ticket, and impacket-minted Kerberos +
+  NTLM including the KDC exchange — tunnels fully.
+- **No UDP.** SOCKS5 `CONNECT` is TCP-only; DNS is the only UDP-shaped traffic
+  this collector produces, and it is forced onto TCP for exactly this reason.
+- **Install-once-per-process, not reentrant.** `install()` raises if a proxy is
+  already active — consistent with the existing assumption that `collect` runs
+  once per process, but it means the interception cannot be nested or shared
+  across concurrent runs in the same interpreter.
+- **The `getaddrinfo` pass-through is aggressive** — it returns an unresolved
+  hostname for anything that isn't loopback/bypassed rather than attempting
+  resolution and falling back. Validated offline against `ldap3`, `requests`,
+  and `impacket` (see [`spike_socks_proxy.md`](spike_socks_proxy.md) — all three
+  funnel through the patched stdlib entry points with no bypass found); a
+  live-lab run against a real SOCKS5 pivot is the remaining confirmation.
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -1184,6 +1338,7 @@ sccm`) is exactly the thing the framework can't express without a core edit.
 | MSSQL node merge + topology inference | `_mssql_sql_servers` temp table + three-source `UNION`/`GROUP BY` coalesce in `_node_mssql_server`; Login/DatabaseUser inferred from SCCM sysadmin-computer topology in `_node_mssql_login` / `_node_mssql_database_user`; MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split` | No new framework extension point — extends the existing Convert2-Read-DB pipeline and output-split (§11f) |
 | Coerce-and-relay possible edges + synthetic Authenticated Users node | Three relay edge builders in `_edge_coerce_relay_*`; `_node_authenticated_users` inserts lazily after relay builders; `SCCMRelayEdgeProperties` subclass for relay-only props; surgical `--disable-possible-edges` gate; `graph_edges` gains two `VARCHAR[]` coercion columns | No new framework extension point — extends §11b (persist-at-collect/gate-in-preproc), §11c (graph_edges + GraphEdge), and §11f (output-split routing) |
 | One-command end-to-end ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | A flag on the hand-registered `collect` Typer command + in-process calls to the app's registered `preproc`/`convert` hooks | A new top-level `run` verb in core (extensions load inside the root app's constructor and never get a reference to it, so they cannot mount a new verb) |
+| SOCKS5 pivot ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)) | Runtime mutation of the stdlib `socket` module (`socket.socket`/`create_connection`/`getaddrinfo`), installed only for the `collect` run | No extension point — there is no framework notion of tunneling traffic through a pivot at all, since a stock collector talks to one already-reachable REST endpoint |
 
 ---
 
@@ -1208,6 +1363,8 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-17 | **Added §13: `--socks-proxy` tunnels ALL collection traffic through a SOCKS5 pivot** (discovery + every per-host protocol — RemoteRegistry, MSSQL, AdminService, WMI, HTTP, SMB). New divergence category: a process-wide interception of the stdlib `socket` module (`socket.socket`/`create_connection`/`getaddrinfo`), promoted straight into `openhound-collector-common` (`proxy/patch.py` + `proxy/socks.py`) so MSSQL can adopt it. Requires `--dc` or `--dns` (enforced by `_require_dc_or_dns_for_proxy`, exits 2 otherwise); destination names resolve at the proxy (socks5h); the collector's own DNS lookups are forced onto TCP across four proxy-aware call sites (`_resolve_dc_via_dns`, two sites in `collectors/dns.py`, `context.resolve_ip`). Documented boundary: live current-user SSPI and OS-Kerberos make their KDC/DCOM calls in the OS (LSASS/`win32com`), not this process, so they cannot be tunneled — use `--ticket` (tunnels completely) or OS-level transparent proxying instead. All in-process auth (explicit creds, pass-the-hash, pass-the-ticket, impacket Kerberos+NTLM including the KDC exchange) tunnels fully. Offline-validated against `ldap3`/`requests`/`impacket` (`spike_socks_proxy.md`); a live-lab run is the remaining confirmation. Added rows to the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) table and the quick-reference table, plus a TOC entry. Fixed the README `--socks-proxy` row and Limitations, which had gone stale claiming the flag was "intended for DHCP/TFTP collection — not yet ported." |
+| 2026-07-17 | **Added §11i (new divergence category) — HTTP version fingerprint from `ccmsetup.exe`** (ope-b916). The unauthenticated HTTP phase now fetches `/CCM_Client/ccmsetup.exe` from a confirmed Management Point and regexes the embedded PE version string (the SCCMVersionGuesser technique) into a new raw table `http_site_versions` — the first HTTP-phase probe that reads binary content rather than a status code, with a bandwidth/OPSEC trade-off (full multi-MB download in v1; a bounded/`Range` fetch is a future optimization). `preprocess`'s new `_coalesce_http_site_version` fills `node_site.version` from this fingerprint, privileged-preferred (AdminService/WMI wins when both are known). `convert` uses the resolved version to populate a new `SCCM_Site.versionCVEs` property (via `cve_table.lookup_cves`, previously dead code) and `_edge_coerce_relay_adminservice` now suppresses `CoerceAndRelayToAdminService` on sites confirmed to be SCCM 2509+ (build ≥ 9141, `cve_table.ADMINSERVICE_NTLM_MIN_BUILD`) since that AdminService version rejects NTLM; unknown/unparseable versions fail open (edge kept). Updated README's Node Reference (`SCCM_Site.versionCVEs`, `version` fallback note) and Collection Overview (HTTP row + edge version-gate cross-reference). |
 | 2026-07-16 | **Added §12: a `--run-all` flag on `collect sccm`** that chains preprocess + convert in-process via the new framework-agnostic `openhound_collector_common.orchestration.run_end_to_end`. New kind of divergence (end-to-end orchestration without a new top-level verb). Added a row to the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) table and the quick-reference table, plus a TOC entry. |
 | 2026-07-14 | **Shared-library reconciliation (new divergence category).** Added the [Where this code lives](#where-this-code-lives-the-shared-collector-common-library) section: the Windows auth stacks, the per-target logging layer, the push→pull streaming bridge, and the DNS resolver were **promoted up** out of this extension into `openhound-collector-common`, a shared library both SCCM and MSSQL now consume (SCCM's own files reduced to thin adapters). Seven promote-up reconciliations landed on branch `integration` (`choose_auth`+`is_ip`; WMI impacket/pywin32 backends; `mssql_epa`→`detect_epa`; DNS `make_resolver`; HTTP negotiators over `KerberosToken`/`SspiClient`; `log_context` superset; `StreamBridge`+unified `DONE`). Updated §1 (streams re-export + `StreamBridge` + `extract_workers_for`; `set_bridge` handshake), §5 (shared `make_resolver`), §6 + §7 (relocation notes), the ground-rule box, and the quick-reference table. Relaxed the engine's zero-dependency test to permit exactly `openhound_collector_common`. Validated: 552 SCCM unit / 5 skipped, 172 MSSQL unit, ruff clean, and a full lab collection streaming 5 per-host sources (1005 rows through one bounded queue) with no lost rows or deadlock. |
 | 2026-07-01 | Stage 7 (docs + validation) — final stage of the preproc/convert port. Whole-document reconciliation of README + ARCHITECTURE.md + in-code docstrings against code-truth (14 node kinds, 37 edge kinds). Fixed the stale Graph Model prose (README claimed 8 emitted). Added three Mermaid diagrams (pipeline data-flow, clustered AD/SCCM/MSSQL overview, complete edge reference). Non-behavioral docstring/`Attributes` completeness pass. Ran ruff/mypy/pytest in an isolated uv env + the validate-extension structural checklist. Verified + closed ope-7f61 (edge-count banner miscount, already corrected to 11 for Stages 1–2). No behavioral code changes; known limitations (e.g. ope-3dbc null-property BloodHound rejection) documented, not fixed. |

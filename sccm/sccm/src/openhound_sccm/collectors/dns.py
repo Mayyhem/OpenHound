@@ -59,15 +59,19 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
         return
 
     if has_dnspython:
+        # Built via the shared make_resolver so a proxy run gets force_tcp for
+        # free (SOCKS5 can't carry UDP); timeout=5/lifetime=10 match what this
+        # collector always used, now owned by the shared helper.
+        from openhound_collector_common.discovery.dns import make_resolver
+        from openhound_collector_common.proxy import active_proxy
+
+        proxied = active_proxy() is not None
         if ctx.dns_resolver:
-            resolver = dns.resolver.Resolver(configure=False)
-            resolver.nameservers = [ctx.dns_resolver]
+            resolver = make_resolver(ctx.dns_resolver, force_tcp=proxied)
         else:
-            resolver = dns.resolver.Resolver()
+            resolver = make_resolver(force_tcp=proxied)
             if ctx.ad.creds.domain_controller:
                 resolver.nameservers = [_resolve_v4(ctx.ad.creds.domain_controller) or ctx.ad.creds.domain_controller]
-        resolver.timeout = 5
-        resolver.lifetime = 10
 
         for site_code in sorted(site_codes):
             srv_name = f"_mssms_mp_{site_code.lower()}._tcp.{ctx.domain}"
@@ -204,14 +208,35 @@ def _parse_dns_rpc_record_srv(data: bytes) -> Optional[str]:
     return ".".join(labels) if labels else None
 
 
+def _resolve_v4_via_dns(host: str) -> Optional[str]:
+    """Resolve *host* to an IPv4 via dnspython (honors proxy force-TCP)."""
+    from openhound_collector_common.discovery.dns import make_resolver
+    from openhound_collector_common.proxy import active_proxy
+    try:
+        resolver = make_resolver(force_tcp=active_proxy() is not None)
+        answer = resolver.resolve(host, "A")
+        return answer[0].to_text()
+    except Exception as ex:
+        logger.debug("_resolve_v4_via_dns: %s did not resolve: %s", host, ex)
+        return None
+
+
 def _resolve_v4(host: str) -> Optional[str]:
-    """Resolve a hostname to its first IPv4 address, or None."""
+    """Resolve a hostname to its first IPv4 address, or None.
+
+    Under a proxy we must not touch the local stdlib resolver (leak + can't see
+    internal names), so route through dnspython/TCP; otherwise keep the fast
+    stdlib path.
+    """
+    from openhound_collector_common.proxy import active_proxy
+    if active_proxy() is not None:
+        return _resolve_v4_via_dns(host)
     try:
         infos = socket.getaddrinfo(host, None, socket.AF_INET)
         if infos:
             return infos[0][4][0]
-    except (socket.gaierror, OSError):
-        pass
+    except (socket.gaierror, OSError) as ex:
+        logger.debug("_resolve_v4: stdlib getaddrinfo for %s failed: %s", host, ex)
     return None
 
 

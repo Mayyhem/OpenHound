@@ -296,3 +296,129 @@ bug — user confirmed they don't see it; no ticket). Summary rendered against r
   delay=True, absent on clean runs) -> comment corrected + README reworded ("whichever logs were produced");
   (3) README overstatement -> reworded. +test for absent-logs/missing-graph branches. 32 feature tests pass.
   Re-review (sonnet): RESOLVED - reviewer re-ran ruff (All checks passed) + mypy (no name-defined) + pytest itself; delta APPROVED, no remaining findings.
+
+## SOCKS5 proxy for ALL SCCM collection traffic — gtk ope-fbb0 — subagent-driven, started 2026-07-17
+Plan: sccm/sccm/docs/superpowers/plans/2026-07-17-socks5-proxy-all-collection-traffic.md
+Baseline: HEAD 4379303 "End to end --run-all collect phase option, edge help text" (working tree CLEAN except
+  .tickets/*.md + 3 untracked). All target files (shared socks.py/__init__.py/dns.py; sccm main.py/context.py/
+  collectors/dns.py) CLEAN vs HEAD at start.
+NO-COMMIT regime (CLAUDE.md): implementers stop at green tests, never commit. Per-task diff = git diff HEAD --
+  <task files> for single-task files; main.py touched by Tasks 4,5,6 -> snapshot main.py pre-T5 (.sdd/snapshots/
+  main_pre_t5.py) and pre-T6 (main_pre_t6.py), diff --no-index to isolate. Briefs/reports/diffs/snapshots in
+  sccm/sccm/.sdd/ (gitignored, line 236). Cross-package: shared lib tests via `uv run pytest` (own env); SCCM
+  tests via .venv/Scripts/python -m pytest.
+Locked decisions (from grill, [[openhound-cli-extension-seam]] + this plan): (1) scope=everything incl discovery;
+  (2) global socket interception in shared lib (not per-lib, not PySocks); (3) keep all auth rungs, DOCUMENT the
+  native-SSPI/OS-Kerberos OS-proxy boundary + PTT bridge (not code-enforced); (4) require --dc or --dns under
+  proxy, force DNS over TCP, no local getaddrinfo/gethostbyname leak. Native OS auth (SSPI/gssapi KDC/DCOM)
+  physically un-tunnelable from our process — documented limit.
+Tasks: 1 socks5_handshake; 2 patch.py interception; 3 force-TCP dns+exports; 4 parse/validate/help; 5 install-
+  around-run; 6 proxy-aware DNS x4 sites; 7 live spike (OFFLINE smoke here, real lab deferred to user); 8 docs;
+  9 MSSQL follow-up ticket; FINAL review.
+Pre-flight adaptations (stated, not gated per auto-mode): commit steps stripped (no-commit regime); Task 5's
+  plan test is vacuous (tests a local fake) -> STRENGTHEN to assert real install-around-run wiring; Task 7 real
+  lab run deferred to user (no lab/proxy in session).
+
+- [x] Task 1: complete (no commit; spec ✅, quality Approved, 0 findings). Extracted public `socks5_handshake(sock, proxy, dest_host, dest_port)`; `connect_through_socks5` delegates (behavior-identical: same connect, order, close-on-fail+reraise, success log verified line-by-line). socks.py has NO `__all__` -> export added to proxy/__init__.py (pre-existing convention; also required by Task 2). test_socks.py extended (+1), 11/11 file + 55 suite green.
+- [x] Task 2: complete (no commit; spec ✅, quality Approved by OPUS reviewer, 0 Critical/Important). proxy/patch.py
+  (process-wide socket interception: _ProxiedSocket subclass + create_connection + getaddrinfo trio, loopback+proxy
+  bypass, install-once guard, context-mgr restore). All 5 focus risks verified sound (restore captured at IMPORT not
+  install; super().connect = _ORIG_SOCKET so proxy dial not re-proxied; socks5h no-local-leak end-to-end confirmed vs
+  socks.py _socks5_connect DOMAINNAME; timeout sentinel faithful). proxy/__init__.py got the 4 exports HERE (moved from
+  Task 3). test_socks_patch.py 4/4 + test_socks.py 11/11 green. NOTE for Task 3: exports already done -> Task 3 = dns.py
+  force_tcp fix + test ONLY.
+  Minors (DEFER to final triage): [T2a] test_socks_patch.py _serve stub: blocked accept() raises OSError on teardown ->
+  1 PytestUnhandledThreadExceptionWarning (non-pristine; recurs where fixture reused). Controller fix-edit DENIED by
+  user 2026-07-17 -> left as-is per user. [T2b] create_connection omits 3.11+ `all_errors` kwarg (negligible; no in-scope
+  lib passes it; brief froze signature).
+- [x] Task 3: complete (no commit; spec ✅, quality Approved after 1 fix cycle). make_resolver force_tcp now REAL
+  (per-instance resolve wrapper defaulting tcp=True via setdefault); _domain_resolves stdlib-getaddrinfo fallback
+  guarded to fire ONLY for force_tcp resolvers ("resolve" in __dict__ marker; reviewer confirmed dnspython never
+  self-assigns instance resolve, so no false trip). CRITICAL caught in review + fixed: original wrapper injected
+  rdtype=None on bare `.resolve(name)` (dnspython default is A) -> TypeError; would've silently broken Task 6's
+  resolve_ip. Fixed to pure-forward `def _resolve_tcp(qname, *args, **kwargs)` + added bare-resolve regression test
+  (18/18 green). Also a brief-test bug fixed (bound-method capture ordering; patch class BEFORE make_resolver).
+  Plan doc corrected to match. proxy/__init__.py NOT touched here (done T2). Minor DEFER: [T3] restored comment uses
+  `--` not em-dash `—` (cosmetic glyph inconsistency).
+- [x] Task 4: complete (no commit; spec ✅, quality Approved, 0 findings). main.py: `_parse_proxy_or_exit` (None/parse/
+  SocksError->log+Exit(2)) + `_require_dc_or_dns_for_proxy` (no-op if no proxy; else need dc|dns else log+Exit(2));
+  wired after `_require_domain_or_explain`, sets `proxy_cfg = flag_kwargs.get("socks_proxy") or os.environ.get(
+  "SOURCES__SCCM__SOCKS_PROXY")` BEFORE any network import; help text fixed (no more DHCP/TFTP). source.py: dead
+  `socks_proxy` param REMOVED from source() (reviewer confirmed zero refs + sccm_source() called with no args so dlt
+  injection can't TypeError). _FLAG_TO_ENV kept. TYPE_CHECKING import folded into existing block. 8/8 tests + import
+  smoke ok. proxy_cfg intentionally unused until T5. Snapshot main_pre_t5.py taken for T5 diff isolation.
+- [x] Task 5: complete (no commit; spec ✅, quality Approved, 0 findings). Wrapped collect_sccm's source-build +
+  Stage-1 discovery + Stage-2 per-host block (main.py ~1065-1099) in `with socks_proxy_installed(proxy_cfg):` + local
+  import. Reviewer verified PURE re-indent (net +4 lines = 2 comments + import + with; every statement byte-identical,
+  reordered none), boundary correct (summary/cache-clear/finally stay outside), early `return None` still uninstalls via
+  the shared @contextmanager's finally (verified patch.py:149-164), post-block names stay bound. AST wiring test (asserts
+  both stages inside the with + proxy_cfg arg) non-vacuous. 9/9 + import smoke ok. Snapshot main_pre_t6.py taken for T6.
+- [x] Task 6: complete (no commit; spec ✅, quality Approved, 0 Critical/Important). 4 DNS sites made proxy-aware, all
+  gated on active_proxy(): site1 _resolve_dc_via_dns force_tcp kwarg; site2 collectors/dns.py SRV via make_resolver
+  force_tcp (reviewer confirmed shared defaults 5/10 == old manual lines, direct-mode byte-identical); site3
+  _resolve_v4 -> _resolve_v4_via_dns under proxy, stdlib fast-path when direct; site4 context.resolve_ip module-global
+  make_resolver + force_tcp under proxy. Reviewer verified NO stdlib getaddrinfo/gethostbyname reachable under proxy at
+  any site; only callers are collectors/local.py:312 (resolve_ip, FQDNs) + collectors/dns.py:74 (_resolve_v4). 3 new
+  tests + `-k dns` 18/18 + import smoke green. Also fixed a dead-code lambda in the brief's own test (setdefault-returns-
+  host trap). Minor DEFER: [T6] site4 direct-mode + --dns-resolver now 5s/10s configure=False vs old 2s/5s + search list
+  (plan-mandated; negligible for FQDN inputs; optional follow-up ticket to byte-match old dnspython defaults).
+- [x] Task 7: complete (no commit; controller-verified, not full-review — validation artifacts only, no prod code).
+  OFFLINE SPIKE HEADLINE: all 3 real libraries funnel through the trio — ldap3 (dc.internal.invalid:389), requests
+  (mp.internal.invalid:80), impacket SMBConnection (smb.internal.invalid:445) ALL recorded at a local recording SOCKS5
+  stub with the hostname (socks5h proven; NO gethostbyname bypass). 3 passed, stable. tests/proxy_integration_test.py
+  (genuine `in stub.targets` asserts, no xfail/skip) + spike_socks_proxy.md runbook (offline results + deferred live
+  lab steps). Disclosed scope-not-exercised offline (share the same socket primitive, flagged for live run): HTTPS (only
+  plain HTTP), impacket DCOM/WMI-fallback + TDS (only SMBConnection), LDAPS/StartTLS (only plain LDAP). REAL LAB RUN
+  DEFERRED TO USER (no lab/proxy in session).
+- [x] Task 8: complete (no commit; spec ✅, quality Approved by code-truth reviewer, verified vs main.py help + patch.py
+  + socks.py + collectors/dns.py + context.py). README: stale `--socks-proxy` DHCP/TFTP row fixed; "Proxying / pivoting"
+  subsection (all-traffic scope, --dc/--dns required, socks5h + force-TCP DNS, in-process auth tunnels, SSPI/OS-Kerberos
+  boundary + --ticket/OS-proxy bridge); Limitations bullet. ARCHITECTURE §13 (full spine) + Quick-ref row + Where-this-
+  code-lives row + Changelog 2026-07-17 + ToC. No overclaiming (SSPI NOT said to tunnel); offline-vs-live status honest.
+  ** IMPORTANT COMMIT-HYGIENE (reviewer caught): README.md + ARCHITECTURE.md were NOT clean vs HEAD at T8 start — they
+  carry pre-existing uncommitted ope-b916 changes (§11i HTTP-version/versionCVEs fingerprinting). So those TWO doc files
+  are ENTANGLED (SOCKS5 additions on top of ope-b916). CODE files are clean SOCKS5-only (main.py/context.py/collectors/
+  dns.py verified clean vs HEAD before their tasks; shared lib clean). Flag at handoff: user must separate ope-b916 doc
+  changes when committing. ** Minors DEFER: [T8a] docs say "four DNS sites / two in collectors/dns.py" but collectors/
+  dns.py has 3 active_proxy() checks (bundled _resolve_v4_via_dns+_resolve_v4 as one); behavioral claim accurate.
+- [x] Task 9: MSSQL follow-up ticket ope-7da1 created (wire --socks-proxy in MSSQL via shared interception).
+- [x] FINAL whole-branch review (OPUS): found 1 IMPORTANT cross-task composition bug the per-task reviews missed —
+  _apply_connection_context (DC SRV discovery) ran BEFORE the socks_proxy_installed window, so `--socks-proxy --dns`
+  (no --dc) escaped the tunnel + failed. 6 invariants otherwise PASS (interception soundness, socks5h no-leak,
+  force_tcp real, dead-param removal safe, naming consistent, offline spike genuine). 2 new Minors (create_connection
+  socket-leak-on-fail; resolve_ip aux degradation under --dc-no-dns). All 5 deferred Minors triaged DEFER.
+- [x] FINAL FIX WAVE (option B): reordered collect_sccm — proxy parse+validate now BEFORE _apply_connection_context
+  (validates USER --dc/--dns pre-autodetect, closing a latent gate hole too), and the `with socks_proxy_installed`
+  window EXPANDED to enclose _apply_connection_context->Stage2, so DC discovery runs inside the tunnel (force_tcp
+  active). + create_connection closes socket on connect failure. AST test extended to assert _apply_connection_context
+  inside the with. RE-REVIEW (sonnet): READY YES, 6/6 checks PASS vs live source, 0 issues.
+- [x] CONTROLLER FINAL VERIFICATION: shared-lib 18 passed (2 warns = known-DEFER T2a stub-teardown WinError10038, non-
+  fatal); SCCM proxy suite 15 passed (proxy_wiring 9 + proxy_dns 3 + proxy_integration 3). Both first-hand green.
+  ** FEATURE COMPLETE (no commits). CODE files SOCKS5-only clean vs HEAD; README.md + ARCHITECTURE.md ENTANGLED with
+  ope-b916 (user must split at commit). Live-lab run pending (spike_socks_proxy.md). Tickets: ope-fbb0 (this), ope-7da1
+  (MSSQL). **
+
+
+## SCCM version->CVE fingerprint — gtk ope-b916 — subagent-driven, started 2026-07-17
+Plan: sccm/sccm/docs/superpowers/plans/2026-07-17-sccm-version-cve-fingerprint.md
+Spec: sccm/sccm/docs/superpowers/specs/2026-07-17-sccm-version-cve-fingerprint-design.md
+Baseline: HEAD d0857d4 (working tree has edge_help.py feature + this feature's spec/plan, all uncommitted).
+NO-COMMIT regime (CLAUDE.md): implementers stop at green tests, never commit. Per-task diff via .sdd/mkdiff.sh.
+Decisions: conservative base-build CVEs (major-version); privileged-preferred version; suppress
+CoerceAndRelayToAdminService at build>=9141 (SCCM 2509) fail-open; separate http_site_versions table;
+full ccmsetup.exe download v1 (Range deferred). Tasks: 1 cve_table logic+const; 2 versionCVEs prop+wiring;
+3 http ccmsetup probe+register; 4 preproc node_site version coalesce; 5 coerce-relay 2509 gate;
+6 README+ARCHITECTURE; 7 live lab validation (ps1-mp/ps1-sms); FINAL review.
+
+- [x] Task 1: complete (no commit; spec ✅, quality Approved; cve_table conservative base-build fix + _build_number + _locate_build by build# + ADMINSERVICE_NTLM_MIN_BUILD=9141 + docstring; 6/6 tests; ruff+mypy clean; 2 brief-mandated cosmetic Minors, no action)
+- [x] Task 2: complete (no commit; spec ✅, Approved; SCCMSiteProperties.versionCVEs (list[str]|None) + sccm_site.py lookup_cves wiring w/ version guard; 2/2 new + 20/20 regression; ruff clean)
+- [x] Task 3: complete (no commit; spec ✅, Approved; http.py _extract_ccmsetup_version + _probe_ccmsetup_version (once per confirmed MP, best-effort, yields http_site_versions{site_code,sccm_version,source,mp_host}); registered in per_host_phases HTTP Phase + main._preproc_table_map; 2/2 new + 30/30 regression; ruff clean)
+- [x] Task 4: complete (no commit; spec ✅, Approved; transforms._coalesce_http_site_version: CREATE IF NOT EXISTS guard + node_site rebuild SELECT * REPLACE coalesce(ns.version, http_version) privileged-first, called at end of _node_site; 2/2 new + 7/7 regression; ruff clean; 21 insertions). Snapshotted post-T4 transforms.py -> .sdd/prev_transforms.py as T5 diff baseline.
+- [x] Task 5: complete (no commit; spec ✅, Approved; _edge_coerce_relay_adminservice gate: import ADMINSERVICE_NTLM_MIN_BUILD, LEFT JOIN node_site in nonsec CTE, fail-open coalesce(try_cast(split_part(version,.,3)),0) < 9141; ordering _node_site@3236 before coerce@3299 confirmed; gate test 2/2 + coerce regression 15/15; ruff clean; NOTE: implementer found gate pre-present, re-verified via revert/restore; no dup defs, full CVE suite 14/14 green)
+- [x] Task 6: complete (no commit; spec ✅, Approved; README SCCM_Site versionCVEs row + version HTTP-fallback note + Collection Overview HTTP ccmsetup fingerprint + 2509 edge-suppression note + edge version-gate bullet; ARCHITECTURE §11i new divergence + TOC + 2026-07-17 changelog ope-b916; all code-truth verified; 1 cosmetic Minor line-range, no fix)
+- [~] Task 7 (HTTP half): VALIDATED against ps1-mp. Anonymous HTTPS 403 (PKI-required) but HTTP(80) /CCM_Client/ccmsetup.exe = 200 (6.7MB); protocol order is http-first so probe reaches it. BUG FOUND+FIXED: real ccmsetup.exe embeds 5 version strings (0000 placeholder first, 7550, 8690, 9106x2); _extract_ccmsetup_version used re.search (first match) -> returned 5.00.0000.0000 (build 0) -> empty versionCVEs + misfired gate. Fixed to findall + max-by-build -> now returns 5.00.9106.1000 (SCCM 2303). Chain validated: version 9106 -> 5 CVEs, gate keeps edge (9106<9141). Added multi-match unit test (3/3 pass), ruff clean. NOTE: extractor fix modifies Task 3 code post-review -> final review covers it.
+- [x] Task 7 (AdminService half): VALIDATED live vs ps1-sms. Privileged AdminService -> PS1 version 5.00.9106.1000 (build 9106) -> versionCVEs = SAME 5 CVEs as HTTP path (both paths feed lookup_cves identically). CoerceAndRelayToAdminService for PS1: absent, but traced to TOPOLOGY (SMS Provider + Site Server co-located on one host in this lab; edge requires distinct hosts) NOT the version gate -- PS1 passes build<9141 gate (re-ran gate SQL, eligible). Gate correctness covered by unit test. INCIDENTAL PRE-EXISTING BUG (not CVE feature): --sms/--sms-provider CLI flag is accepted + forwarded to source() but never read there -> does nothing for scoping; -c/--computers is what actually scopes. Worth a separate ticket.
+- [x] FINAL review (opus): Ready-to-merge WITH FIXES. Core logic all verified correct. 2 Important robustness fixes applied: #1 _probe_ccmsetup_version now uses client.get() directly (was self._request -> a ccmsetup download timeout set connection_failed and aborted DP/SMS role detection); #2 _coalesce_http_site_version now _ensure_columns-guards the dlt-dropped all-NULL site_code column (was unguarded -> BinderException crashed preprocess) + regression test; #3 Minor extractor tie-break now full-version-tuple. 55/55 CVE+regression green; ruff clean; mypy only pre-existing openhound stub note.
+- [x] FEATURE COMPLETE (no commit; awaiting user commit+test). Live-validated both paths vs lab: ps1-mp HTTP + ps1-sms AdminService both -> SCCM 2303 (9106) -> same 5 CVEs; gate correct.
+- [x] BUGFIX (user-reported: http_site_versions absent from live resource summary despite MPs found). Systematic-debug ROOT CAUSE: HttpClient default header Accept: application/json -> IIS returns 406 Not Acceptable for the BINARY ccmsetup.exe (curl uses */* -> 200). Probe got 406 -> no version -> no row. NOT timeout(0.07s)/proxy/registration. Confirmed live vs ps1-mp: Accept */* -> 200/6.7MB -> 5.00.9106.1000. FIX: (a) clients/http.py get() gains optional headers param (SCCM ext client; also unblocks future Range); (b) probe sends Accept: */*; (c) defense-in-depth try/except around probe get() so ANY exception cannot abort DP/SMS role detection (a fake-double TypeError revealed exceptions still aborted the protocol despite final-review fix #1); (d) updated _FakeHttp double to mirror new get() sig. Verified: real probe vs ps1-mp yields http_site_versions{PS1, 5.00.9106.1000}; 48 CVE+HTTP tests pass (2 new: probe-sends-*/* + get-forwards-headers); ruff clean; mypy only pre-existing verbose noise.
+- [x] BUGFIX #2 (user-reported: --run-all preprocess crash "Adding columns with constraints not yet supported"). ROOT CAUSE: _coalesce_http_site_version did CREATE TABLE IF NOT EXISTS http_site_versions (a dlt-managed resource); when no MP was fingerprinted (old 406 bug) it left a bare 2-col table; the NEXT run dlt tried to load real data into it -> ALTER ADD _dlt_id (constrained) -> DuckDB rejects. Confirmed via lookup.duckdb (bare 2-col http_site_versions, no _dlt_id). FIX: helper no longer creates the table; it existence-checks and skips when absent (dlt owns creation). Added regression test. E2E: fresh preprocess of real raw succeeds -> http_site_versions dlt-owned (2 rows PS1/SEC=9106), node_site.version=9106 all sites. USER ACTION: delete stale output/lookup.duckdb (already poisoned with the bare table) before re-running --run-all.

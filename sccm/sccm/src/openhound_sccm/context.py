@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 from ldap3 import BASE
 
+from openhound_collector_common.discovery.dns import make_resolver
+
 from .clients.ad import ADClient
 from .models.target_entry import TargetEntry
 
@@ -136,19 +138,23 @@ class SourceContext:
         return domains
 
     def resolve_ip(self, ip: str) -> Optional[str]:
-        """Resolve a host name to an IP address using the configured DNS resolver."""
-        import socket
+        """Resolve a name/IP using the configured DNS resolver (proxy-aware).
+
+        Under a proxy we must route through dnspython/TCP even when no explicit
+        ``--dns-resolver`` was given — the stdlib resolver runs on the outside
+        box and can't see internal-only names (and would leak the query).
+        """
+        from openhound_collector_common.proxy import active_proxy
+        proxied = active_proxy() is not None
         try:
-            if self.dns_resolver:
-                # Use a custom DNS resolver if specified
-                import dns.resolver
-                resolver = dns.resolver.Resolver()
-                resolver.nameservers = [self.dns_resolver]
+            if self.dns_resolver or proxied:
+                # Custom resolver and/or proxy-forced TCP.
+                resolver = make_resolver(self.dns_resolver, force_tcp=proxied)
                 answer = resolver.resolve(ip)
                 return answer[0].to_text()
-            else:
-                # Use the system's default DNS resolver
-                return socket.gethostbyname(ip)
+            # Direct mode, no explicit resolver: stdlib is fine.
+            import socket
+            return socket.gethostbyname(ip)
         except Exception as ex:
             logger.warning(f"DNS resolution failed for {ip}: {ex}")
             return None

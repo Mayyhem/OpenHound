@@ -53,6 +53,9 @@ if TYPE_CHECKING:
     # The runtime import stays deferred inside the functions so importing this
     # module never pulls the shared library in at import time.
     from openhound_collector_common.orchestration import StagePaths
+    # Type-only import: ProxyConfig annotates the --socks-proxy helpers below.
+    # The runtime import stays deferred inside _parse_proxy_or_exit for the same reason.
+    from openhound_collector_common.proxy import ProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -525,8 +528,9 @@ def _resolve_dc_via_dns(domain: str, dns_resolver: Optional[str] = None) -> Opti
     """
     try:
         from openhound_collector_common.discovery.dns import make_resolver
+        from openhound_collector_common.proxy import active_proxy
 
-        resolver = make_resolver(dns_resolver, lifetime=5)
+        resolver = make_resolver(dns_resolver, lifetime=5, force_tcp=active_proxy() is not None)
         answers = resolver.resolve(f"_ldap._tcp.dc._msdcs.{domain}", "SRV")
         srvs = sorted(answers, key=lambda r: (r.priority, -r.weight))
         if srvs:
@@ -600,6 +604,34 @@ def _require_domain_or_explain(flag_kwargs: dict) -> None:
             "any phase that needs AD/SCCM auth."
         )
     raise typer.BadParameter(msg, param_hint="--domain")
+
+
+def _parse_proxy_or_exit(socks_proxy: Optional[str]) -> Optional["ProxyConfig"]:
+    """Parse --socks-proxy into a ProxyConfig, or exit(2) with a clear error."""
+    from openhound_collector_common.proxy import ProxyConfig, SocksError, parse_proxy_address
+    if not socks_proxy:
+        return None
+    try:
+        cfg = parse_proxy_address(socks_proxy)
+        logger.info("SOCKS5 proxy configured: %s:%s", cfg.host, cfg.port)
+        return cfg
+    except SocksError as ex:
+        logger.error("Invalid --socks-proxy value %r: %s", socks_proxy, ex)
+        raise typer.Exit(2)
+
+
+def _require_dc_or_dns_for_proxy(flag_kwargs: dict, proxy: Optional["ProxyConfig"]) -> None:
+    """Under a proxy, we can't resolve internal names locally, so demand a pin."""
+    if proxy is None:
+        return  # direct mode: nothing to enforce
+    if flag_kwargs.get("domain_controller") or flag_kwargs.get("dns_resolver"):
+        logger.debug("_require_dc_or_dns_for_proxy: DC/DNS pin present; ok")
+        return
+    logger.error(
+        "--socks-proxy requires --dc <ip/host> or --dns <internal-resolver-ip>: "
+        "target names can't be resolved from the outside box under a pivot."
+    )
+    raise typer.Exit(2)
 
 
 class _DiagnosticFileHandler(logging.FileHandler):
@@ -953,7 +985,12 @@ def collect_sccm(
     use_altauth: bool = typer.Option(False, "--use-altauth", help="Use ccm_system_altauth endpoint. Not yet implemented."),
     registration_sleep: int = typer.Option(10, "--registration-sleep", help="Seconds to wait post-registration before policy request. Not yet implemented."),
     # ---- Network ----
-    socks_proxy: Optional[str] = typer.Option(None, "--socks-proxy", help="SOCKS5 proxy HOST:PORT for DHCP/TFTP collection."),
+    socks_proxy: Optional[str] = typer.Option(
+        None, "--socks-proxy",
+        help="Route ALL collection traffic through a SOCKS5 proxy. Forms: "
+             "socks5://[user:pass@]host:port or bare host:port. Requires --dc "
+             "or --dns (internal names can't be resolved locally under a pivot).",
+    ),
     dns_resolver: Optional[str] = typer.Option(None, "--dns", "--dns-resolver", help="DNS nameserver IP for all lookups (DC discovery, SRV probes). Omit to use system default."),
     # ---- General ----
     verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
@@ -997,59 +1034,71 @@ def collect_sccm(
         flag_kwargs["kerberos_ticket"] = flag_kwargs.pop("ticket", None)
         _apply_env_overrides(flag_kwargs)
         _drop_empty_dlt_env_values()
-        _apply_connection_context(flag_kwargs)
-        _require_domain_or_explain(flag_kwargs)
-
-        from .per_host_phases import PER_HOST_PHASES
-        from .phased_pipeline import WorkQueue
-        from .source import (
-            DISCOVERY_RESOURCE_NAMES,
-            get_last_ctx,
-            set_shared_ad_cache,
-            set_shared_discovered_domains,
-            set_shared_queue,
+        # Parse + validate the proxy BEFORE connection-context auto-detect, so
+        # the --dc/--dns check sees the user's flags (not an auto-filled DC) and
+        # so DC discovery itself runs inside the tunnel.
+        proxy_cfg = _parse_proxy_or_exit(
+            flag_kwargs.get("socks_proxy") or os.environ.get("SOURCES__SCCM__SOCKS_PROXY")
         )
-        from .source import source as sccm_source
+        _require_dc_or_dns_for_proxy(flag_kwargs, proxy_cfg)
 
-        work_queue = WorkQueue()
-        set_shared_queue(work_queue)
-        set_shared_ad_cache({})
-        set_shared_discovered_domains(set())
+        # Route ALL collection traffic through the SOCKS5 proxy for the whole
+        # window — including DC discovery (SRV over TCP) — no-op when proxy_cfg is None.
+        from openhound_collector_common.proxy import socks_proxy_installed
+        with socks_proxy_installed(proxy_cfg):
+            _apply_connection_context(flag_kwargs)
+            _require_domain_or_explain(flag_kwargs)
 
-        collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=_resolve_progress(progress))
-        ctx = CollectContext(pipeline=collector)
+            from .per_host_phases import PER_HOST_PHASES
+            from .phased_pipeline import WorkQueue
+            from .source import (
+                DISCOVERY_RESOURCE_NAMES,
+                get_last_ctx,
+                set_shared_ad_cache,
+                set_shared_discovered_domains,
+                set_shared_queue,
+            )
+            from .source import source as sccm_source
 
-        src = sccm_source()
-        if not src:
-            set_shared_queue(None)
-            set_shared_ad_cache(None)
-            set_shared_discovered_domains(None)
-            return None
+            work_queue = WorkQueue()
+            set_shared_queue(work_queue)
+            set_shared_ad_cache({})
+            set_shared_discovered_domains(set())
 
-        # Reuse the exact context discovery built, so the per-host stage shares
-        # its target accumulator, allow-list, caches, and work queue.
-        per_host_ctx = get_last_ctx()
+            collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=_resolve_progress(progress))
+            ctx = CollectContext(pipeline=collector)
 
-        # Stage 1 — discovery (once-phases): run only the discovery resources.
-        # They seed the work queue via register_target (allow-list applied).
-        load_info = collector.run(src.with_resources(*DISCOVERY_RESOURCE_NAMES))
-        # Capture discovery row counts from the pipeline that just ran (held via
-        # LoadInfo.pipeline) before the per-host pass replaces the trace.
-        discovery_counts = _normalize_row_counts(load_info.pipeline) if load_info else {}
+            src = sccm_source()
+            if not src:
+                set_shared_queue(None)
+                set_shared_ad_cache(None)
+                set_shared_discovered_domains(None)
+                return None
 
-        # Seed CLI-specified targets through the same register_target path, so
-        # the allow-list / resolution / dedup is identical for them.
-        if per_host_ctx is not None:
-            for host in _cli_seed_targets(computers, computer_file):
-                per_host_ctx.register_target(host, source="CLI")
+            # Reuse the exact context discovery built, so the per-host stage shares
+            # its target accumulator, allow-list, caches, and work queue.
+            per_host_ctx = get_last_ctx()
 
-        # Stage 2 — per-host collection: a worker pool runs each target's phases
-        # in order while emit resources stream the tables to disk, looping
-        # recursively until the work queue drains.
-        per_host_counts: dict[str, int] = {}
-        per_host_expected = bool(per_host_ctx is not None and PER_HOST_PHASES)
-        if per_host_expected:
-            per_host_counts = _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
+            # Stage 1 — discovery (once-phases): run only the discovery resources.
+            # They seed the work queue via register_target (allow-list applied).
+            load_info = collector.run(src.with_resources(*DISCOVERY_RESOURCE_NAMES))
+            # Capture discovery row counts from the pipeline that just ran (held via
+            # LoadInfo.pipeline) before the per-host pass replaces the trace.
+            discovery_counts = _normalize_row_counts(load_info.pipeline) if load_info else {}
+
+            # Seed CLI-specified targets through the same register_target path, so
+            # the allow-list / resolution / dedup is identical for them.
+            if per_host_ctx is not None:
+                for host in _cli_seed_targets(computers, computer_file):
+                    per_host_ctx.register_target(host, source="CLI")
+
+            # Stage 2 — per-host collection: a worker pool runs each target's phases
+            # in order while emit resources stream the tables to disk, looping
+            # recursively until the work queue drains.
+            per_host_counts: dict[str, int] = {}
+            per_host_expected = bool(per_host_ctx is not None and PER_HOST_PHASES)
+            if per_host_expected:
+                per_host_counts = _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
 
         set_shared_queue(None)
         set_shared_ad_cache(None)
@@ -1433,6 +1482,7 @@ def _preproc_table_map() -> dict[str, str]:
         "http_distribution_points",
         "http_smsproviders",
         "http_site_servers",
+        "http_site_versions",
         # SMB per-host phase (smb.py yield "table", row)
         "smb_computers",
         "smb_sites",

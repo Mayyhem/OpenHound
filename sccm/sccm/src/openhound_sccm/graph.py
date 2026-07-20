@@ -278,6 +278,9 @@ class SCCMSiteProperties(NodeProperties):
         SQLServiceAccountDomainSID: The full Active Directory SID of the account the SQL
             Server service runs as (same "DomainSID" naming note as above).
         SQLServicePort: The TCP port the SQL Server instance listens on.
+        versionCVEs: The CVE identifiers this site's SCCM build is still exposed to,
+            derived from ``version`` via cve_table.lookup_cves. None when the version is
+            unknown; an empty list when the version is known but fully patched.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     siteCode: str | None = field(default=None, kw_only=True)
@@ -306,6 +309,7 @@ class SCCMSiteProperties(NodeProperties):
     SQLServerDomainSID: str | None = field(default=None, kw_only=True)
     SQLServiceAccountDomainSID: str | None = field(default=None, kw_only=True)
     SQLServicePort: str | None = field(default=None, kw_only=True)
+    versionCVEs: list[str] | None = field(default=None, kw_only=True)
 
 
 @dataclass

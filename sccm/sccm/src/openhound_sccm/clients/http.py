@@ -152,13 +152,19 @@ class HttpClient:
             return path_or_url
         return f"{self._base_url}/{path_or_url.lstrip('/')}"
 
-    def get(self, path_or_url: str) -> HttpResult:
-        """GET a path (or absolute URL). Runs the Negotiate dance in NEGOTIATE mode."""
+    def get(self, path_or_url: str, headers: Optional[dict[str, str]] = None) -> HttpResult:
+        """GET a path (or absolute URL). Runs the Negotiate dance in NEGOTIATE mode.
+
+        ``headers`` overrides the session defaults for this request (anonymous GETs).
+        The session default is ``Accept: application/json`` for the AdminService/XML
+        endpoints; a binary fetch (e.g. ccmsetup.exe) must pass ``{"Accept": "*/*"}`` or
+        IIS returns ``406 Not Acceptable`` for the octet-stream.
+        """
         url = self._full_url(path_or_url)
         try:
             if self._auth is AuthMode.NEGOTIATE:
                 return self._get_negotiate(url)
-            resp = self._session.get(url, timeout=self._timeout)
+            resp = self._session.get(url, timeout=self._timeout, headers=headers)
             logger.debug("HTTP GET %s -> %s (anonymous)", url, resp.status_code)
             logger.debug("HTTP GET %s content: %s", url, resp.content)
             return HttpResult(resp.status_code, resp.content, ErrorClass.RESPONSE)

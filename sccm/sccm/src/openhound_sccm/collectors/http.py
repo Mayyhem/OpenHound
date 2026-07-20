@@ -35,6 +35,7 @@ Runs only when neither AdminService nor WMI already collected the host
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable, Iterator, Optional
 
@@ -141,6 +142,31 @@ def _cert_issuer_and_dns(hex_der: str) -> tuple[Optional[str], Optional[str]]:
     except x509.ExtensionNotFound:
         logger.verbose("sitesigncert certificate has no Subject Alternative Name")
     return issuer_cn, dns_name
+
+
+# UTF-16LE-encoded SCCM version string (e.g. "5.00.9141.1015") embedded in ccmsetup.exe.
+# Matches SCCMVersionGuesser's regex. Bytes: 5 . XX . XXXX . XXXX, each char UTF-16LE.
+_CCMSETUP_VERSION_RE = re.compile(
+    rb"5\x00\.\x00\d\x00\d\x00\.\x00\d\x00\d\x00\d\x00\d\x00\.\x00\d\x00\d\x00\d\x00\d\x00"
+)
+
+
+def _extract_ccmsetup_version(body: bytes) -> Optional[str]:
+    """Return the SCCM version string embedded in a ccmsetup.exe body, or None.
+
+    A real ccmsetup.exe embeds several version strings -- a ``5.00.0000.0000`` template,
+    older baseline versions, and the actual installed build (observed on a live 2303 MP:
+    ``5.00.0000.0000``, ``5.00.7550.0000``, ``5.00.8690.1000``, ``5.00.9106.1000``). Return
+    the highest version (compared field-by-field, so a tie on build falls through to the
+    revision field) -- the installed build is the newest -- rather than the first match,
+    which is typically the ``0000`` placeholder.
+    """
+    matches = _CCMSETUP_VERSION_RE.findall(body or b"")
+    if not matches:
+        return None
+    versions = [m.decode("utf-16-le") for m in matches]
+    # The regex guarantees 4 numeric dotted fields, so the int() conversion can't raise.
+    return max(versions, key=lambda v: tuple(int(x) for x in v.split(".")))
 
 
 def _role_row(table: str, ad_object: Optional[dict], name_fallback: str, source: str,
@@ -313,6 +339,8 @@ class _HttpProbe:
 
         if not self.is_mp:
             return
+        # Confirmed MP: fingerprint the SCCM version from ccmsetup.exe (best effort).
+        yield from self._probe_ccmsetup_version(protocol)
         # The host we connected to is itself an MP. Attribute its row to the FQDN
         # the MP reported for itself (MPKEYINFORMATION), or -- when that gave
         # nothing (e.g. a cert-required MP that 403s) -- to the probe target we
@@ -356,6 +384,45 @@ class _HttpProbe:
         except ET.ParseError as ex:
             logger.warning("Failed to parse MPLIST XML on %s: %s", self.target, ex)
             return []
+
+    def _probe_ccmsetup_version(self, protocol: str) -> Iterator[tuple[str, dict]]:
+        """Fingerprint the SCCM version from the MP's ccmsetup.exe (SCCMVersionGuesser).
+
+        Best effort: a failed/missing/version-less fetch is logged and skipped; it never
+        affects the MP role row -- unlike ``_request``, this bypasses ``connection_failed``
+        entirely, so a timeout downloading the multi-MB ccmsetup.exe never aborts DP/SMS
+        Provider probing for this target. Emits one http_site_versions row when a version
+        is found.
+        NOTE: v1 downloads the full ccmsetup.exe (multiple MB) via the existing anonymous
+        HttpClient; a bounded/Range fetch is a future optimization (see ARCHITECTURE.md).
+        """
+        url = f"{protocol}://{self.target}/CCM_Client/ccmsetup.exe"
+        logger.verbose("Fingerprinting SCCM version via %s", url)
+        # ccmsetup.exe is a binary; the client's default Accept: application/json makes IIS
+        # return 406 Not Acceptable for it, so request */* to receive the octet-stream.
+        # Wrapped best-effort: a raised exception here must never abort the host's other
+        # role probes (DP / SMS Provider), matching the "never affects role detection" contract.
+        try:
+            result = self.client.get(url, headers={"Accept": "*/*"})
+        except Exception as ex:  # noqa: BLE001 - best-effort version fetch, never fatal
+            logger.debug("ccmsetup.exe version probe on %s errored: %s", self.target, ex)
+            return
+        if _is_connection_failure(result) or result.status_code != 200 or not result.content:
+            logger.debug("No ccmsetup.exe version fingerprint from %s (status=%s)",
+                         self.target, result.status_code)
+            return
+        version = _extract_ccmsetup_version(result.content)
+        if not version:
+            logger.debug("ccmsetup.exe on %s had no parseable version string", self.target)
+            return
+        logger.info("Fingerprinted SCCM version %s on %s (site %s)",
+                    version, self.target, self.site_code)
+        yield ("http_site_versions", {
+            "site_code": self.site_code,
+            "sccm_version": version,
+            "source": "HTTP-ccmsetup",
+            "mp_host": self.mp_self_fqdn or self.target,
+        })
 
     # --- distribution points ----------------------------------------------
     def distribution_points(self, protocol: str) -> Iterator[tuple[str, dict]]:
