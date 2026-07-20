@@ -49,6 +49,14 @@ class SourceContext:
     # collected from LDAP, local WMI
     site_codes: Optional[set[str]] = None
 
+    # Site codes classified as Primary sites (site_type == "Primary Site") from
+    # management-point capabilities during ldap_management_points_raw. A CAS publishes an
+    # mSSMSSite object like any other site (so it appears in ``site_codes``) but has no
+    # management point and cannot own clients. This narrower set lets the CmRcService
+    # discovery stamp inferred ("possible") client devices with a Primary site code rather
+    # than the CAS. Populated lazily, like ``site_codes``.
+    primary_site_codes: Optional[set[str]] = None
+
     # Per-run local-collection state, discovered by one local resource and reused
     # by its siblings (they run in order, ``parallelized=False``). Previously held
     # in module-level globals in collectors/local.py; living on the context makes

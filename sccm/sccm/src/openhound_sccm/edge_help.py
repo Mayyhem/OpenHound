@@ -329,37 +329,23 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "Note: A session does not guarantee credential material is present, only possible."
         ),
         windowsAbuse=(
-            "When a user has a session on the computer, you may be able to obtain credentials "
-            "for the user via credential dumping or token impersonation. You must be able to "
-            "move laterally to the computer, have administrative access on the computer, and "
-            "the user must have a non-network logon session on the computer.\n"
-            "Once you have established a Cobalt Strike Beacon, Empire agent, or other implant "
-            "on the target, you can use mimikatz to dump credentials of the user that has a "
-            "session on the computer. While running in a high integrity process with "
-            "SeDebugPrivilege, execute one or more of mimikatz's credential gathering "
-            "techniques (e.g.: sekurlsa::wdigest, sekurlsa::logonpasswords, etc.), then parse "
-            "or investigate the output to find clear-text credentials for other users logged "
-            "onto the system.\n"
-            "You may also gather credentials when a user types them or copies them to their "
-            "clipboard! Several keylogging capabilities exist, several agents and toolsets "
-            "have them built-in. For instance, you may use meterpreter's \"keyscan_start\" "
-            "command to start keylogging a user, then \"keyscan_dump\" to return the captured "
-            "keystrokes. Or, you may use PowerSploit's Invoke-ClipboardMonitor to "
-            "periodically gather the contents of the user's clipboard.\n"
-            "You may run into a situation where a user is logged onto the system, but you "
-            "can't gather that user's credential. This may be caused by a host-based security "
-            "product, lsass protection, etc. In those circumstances, you may abuse Windows' "
-            "token model in several ways. First, you may inject your agent into that user's "
-            "process, which will give you a process token as that user, which you can then use "
-            "to authenticate to other systems on the network. Or, you may steal a process "
-            "token from a remote process and start a thread in your agent's process with that "
-            "user's token. For more information about token abuses, see the References tab.\n"
-            "User sessions can be short lived and only represent the sessions that were "
-            "present at the time of collection. A user may have ended their session by the "
-            "time you move to the computer to target them. However, users tend to use the "
-            "same machines, such as the workstations or servers they are assigned to use for "
-            "their job duties, so it can be valuable to check multiple times if a user session "
-            "has started."
+            "If the target user has a logon session on the source computer, you may be able "
+            "to recover that user's credential material or impersonate their session from the "
+            "computer. This requires that you can reach the computer, that you have "
+            "administrative (or SYSTEM) rights on it, and that the user has an interactive "
+            "(non-network) logon session there.\n"
+            "Given that access, a logged-on user's credentials can typically be obtained by "
+            "dumping them from the memory of the Local Security Authority process (LSASS), by "
+            "stealing or impersonating the user's access token to act as them against other "
+            "systems, or by capturing what the user types or copies (for example, keylogging "
+            "or clipboard capture). Whether any of these succeeds depends on the user's logon "
+            "type, how recently they authenticated, and the host's protections (such as LSASS "
+            "protection, Credential Guard, or an EDR product). See the References tab for "
+            "current techniques and tooling.\n"
+            "This data reflects only what was true at the time of collection, so the user may "
+            "have logged off by the time you reach the computer. Because people tend to reuse "
+            "the same machines for their day-to-day work, it is often worth checking more than "
+            "once for the session to return."
         ),
         opsec=(
             "An EDR product may detect your attempt to inject into lsass and alert a SOC "
@@ -368,13 +354,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
         ),
         references=[
             "https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/link-users-and-devices-with-user-device-affinity",
-            "http://blog.gentilkiwi.com/mimikatz",
-            "https://github.com/gentilkiwi/mimikatz",
-            "https://adsecurity.org/?page_id=1821",
-            "https://attack.mitre.org/wiki/Credential_Access",
-            "https://labs.mwrinfosecurity.com/assets/BlogFiles/mwri-security-implications-of-windows-access-tokens-2008-04-14.pdf",
-            "https://github.com/PowerShellMafia/PowerSploit/blob/master/Exfiltration/Invoke-TokenManipulation.ps1",
-            "https://attack.mitre.org/wiki/Technique/T1134",
+            "https://attack.mitre.org/tactics/TA0006/",
+            "https://attack.mitre.org/techniques/T1003/",
+            "https://attack.mitre.org/techniques/T1134/",
+            "https://attack.mitre.org/techniques/T1056/001/",
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),
@@ -390,37 +373,23 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "Note: A session does not guarantee credential material is present, only possible."
         ),
         windowsAbuse=(
-            "When a user has a session on the computer, you may be able to obtain credentials "
-            "for the user via credential dumping or token impersonation. You must be able to "
-            "move laterally to the computer, have administrative access on the computer, and "
-            "the user must have a non-network logon session on the computer.\n"
-            "Once you have established a Cobalt Strike Beacon, Empire agent, or other implant "
-            "on the target, you can use mimikatz to dump credentials of the user that has a "
-            "session on the computer. While running in a high integrity process with "
-            "SeDebugPrivilege, execute one or more of mimikatz's credential gathering "
-            "techniques (e.g.: sekurlsa::wdigest, sekurlsa::logonpasswords, etc.), then parse "
-            "or investigate the output to find clear-text credentials for other users logged "
-            "onto the system.\n"
-            "You may also gather credentials when a user types them or copies them to their "
-            "clipboard! Several keylogging capabilities exist, several agents and toolsets "
-            "have them built-in. For instance, you may use meterpreter's \"keyscan_start\" "
-            "command to start keylogging a user, then \"keyscan_dump\" to return the captured "
-            "keystrokes. Or, you may use PowerSploit's Invoke-ClipboardMonitor to "
-            "periodically gather the contents of the user's clipboard.\n"
-            "You may run into a situation where a user is logged onto the system, but you "
-            "can't gather that user's credential. This may be caused by a host-based security "
-            "product, lsass protection, etc. In those circumstances, you may abuse Windows' "
-            "token model in several ways. First, you may inject your agent into that user's "
-            "process, which will give you a process token as that user, which you can then use "
-            "to authenticate to other systems on the network. Or, you may steal a process "
-            "token from a remote process and start a thread in your agent's process with that "
-            "user's token. For more information about token abuses, see the References tab.\n"
-            "User sessions can be short lived and only represent the sessions that were "
-            "present at the time of collection. A user may have ended their session by the "
-            "time you move to the computer to target them. However, users tend to use the "
-            "same machines, such as the workstations or servers they are assigned to use for "
-            "their job duties, so it can be valuable to check multiple times if a user session "
-            "has started."
+            "If the target user has a logon session on the source computer, you may be able "
+            "to recover that user's credential material or impersonate their session from the "
+            "computer. This requires that you can reach the computer, that you have "
+            "administrative (or SYSTEM) rights on it, and that the user has an interactive "
+            "(non-network) logon session there.\n"
+            "Given that access, a logged-on user's credentials can typically be obtained by "
+            "dumping them from the memory of the Local Security Authority process (LSASS), by "
+            "stealing or impersonating the user's access token to act as them against other "
+            "systems, or by capturing what the user types or copies (for example, keylogging "
+            "or clipboard capture). Whether any of these succeeds depends on the user's logon "
+            "type, how recently they authenticated, and the host's protections (such as LSASS "
+            "protection, Credential Guard, or an EDR product). See the References tab for "
+            "current techniques and tooling.\n"
+            "This data reflects only what was true at the time of collection, so the user may "
+            "have logged off by the time you reach the computer. Because people tend to reuse "
+            "the same machines for their day-to-day work, it is often worth checking more than "
+            "once for the session to return."
         ),
         opsec=(
             "An EDR product may detect your attempt to inject into lsass and alert a SOC "
@@ -429,13 +398,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
         ),
         references=[
             "https://techcommunity.microsoft.com/blog/configurationmanagerarchive/fast-channel-for-system-management---client-notification-in-system-center-2012-c/273157",
-            "http://blog.gentilkiwi.com/mimikatz",
-            "https://github.com/gentilkiwi/mimikatz",
-            "https://adsecurity.org/?page_id=1821",
-            "https://attack.mitre.org/wiki/Credential_Access",
-            "https://labs.mwrinfosecurity.com/assets/BlogFiles/mwri-security-implications-of-windows-access-tokens-2008-04-14.pdf",
-            "https://github.com/PowerShellMafia/PowerSploit/blob/master/Exfiltration/Invoke-TokenManipulation.ps1",
-            "https://attack.mitre.org/wiki/Technique/T1134",
+            "https://attack.mitre.org/tactics/TA0006/",
+            "https://attack.mitre.org/techniques/T1003/",
+            "https://attack.mitre.org/techniques/T1134/",
+            "https://attack.mitre.org/techniques/T1056/001/",
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),
@@ -451,37 +417,23 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "Note: A session does not guarantee credential material is present, only possible."
         ),
         windowsAbuse=(
-            "When a user has a session on the computer, you may be able to obtain credentials "
-            "for the user via credential dumping or token impersonation. You must be able to "
-            "move laterally to the computer, have administrative access on the computer, and "
-            "the user must have a non-network logon session on the computer.\n"
-            "Once you have established a Cobalt Strike Beacon, Empire agent, or other implant "
-            "on the target, you can use mimikatz to dump credentials of the user that has a "
-            "session on the computer. While running in a high integrity process with "
-            "SeDebugPrivilege, execute one or more of mimikatz's credential gathering "
-            "techniques (e.g.: sekurlsa::wdigest, sekurlsa::logonpasswords, etc.), then parse "
-            "or investigate the output to find clear-text credentials for other users logged "
-            "onto the system.\n"
-            "You may also gather credentials when a user types them or copies them to their "
-            "clipboard! Several keylogging capabilities exist, several agents and toolsets "
-            "have them built-in. For instance, you may use meterpreter's \"keyscan_start\" "
-            "command to start keylogging a user, then \"keyscan_dump\" to return the captured "
-            "keystrokes. Or, you may use PowerSploit's Invoke-ClipboardMonitor to "
-            "periodically gather the contents of the user's clipboard.\n"
-            "You may run into a situation where a user is logged onto the system, but you "
-            "can't gather that user's credential. This may be caused by a host-based security "
-            "product, lsass protection, etc. In those circumstances, you may abuse Windows' "
-            "token model in several ways. First, you may inject your agent into that user's "
-            "process, which will give you a process token as that user, which you can then use "
-            "to authenticate to other systems on the network. Or, you may steal a process "
-            "token from a remote process and start a thread in your agent's process with that "
-            "user's token. For more information about token abuses, see the References tab.\n"
-            "User sessions can be short lived and only represent the sessions that were "
-            "present at the time of collection. A user may have ended their session by the "
-            "time you move to the computer to target them. However, users tend to use the "
-            "same machines, such as the workstations or servers they are assigned to use for "
-            "their job duties, so it can be valuable to check multiple times if a user session "
-            "has started."
+            "If the target user has a logon session on the source computer, you may be able "
+            "to recover that user's credential material or impersonate their session from the "
+            "computer. This requires that you can reach the computer, that you have "
+            "administrative (or SYSTEM) rights on it, and that the user has an interactive "
+            "(non-network) logon session there.\n"
+            "Given that access, a logged-on user's credentials can typically be obtained by "
+            "dumping them from the memory of the Local Security Authority process (LSASS), by "
+            "stealing or impersonating the user's access token to act as them against other "
+            "systems, or by capturing what the user types or copies (for example, keylogging "
+            "or clipboard capture). Whether any of these succeeds depends on the user's logon "
+            "type, how recently they authenticated, and the host's protections (such as LSASS "
+            "protection, Credential Guard, or an EDR product). See the References tab for "
+            "current techniques and tooling.\n"
+            "This data reflects only what was true at the time of collection, so the user may "
+            "have logged off by the time you reach the computer. Because people tend to reuse "
+            "the same machines for their day-to-day work, it is often worth checking more than "
+            "once for the session to return."
         ),
         opsec=(
             "An EDR product may detect your attempt to inject into lsass and alert a SOC "
@@ -490,13 +442,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
         ),
         references=[
             "https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/configure/about-discovery-methods#bkmk_aboutSystem",
-            "http://blog.gentilkiwi.com/mimikatz",
-            "https://github.com/gentilkiwi/mimikatz",
-            "https://adsecurity.org/?page_id=1821",
-            "https://attack.mitre.org/wiki/Credential_Access",
-            "https://labs.mwrinfosecurity.com/assets/BlogFiles/mwri-security-implications-of-windows-access-tokens-2008-04-14.pdf",
-            "https://github.com/PowerShellMafia/PowerSploit/blob/master/Exfiltration/Invoke-TokenManipulation.ps1",
-            "https://attack.mitre.org/wiki/Technique/T1134",
+            "https://attack.mitre.org/tactics/TA0006/",
+            "https://attack.mitre.org/techniques/T1003/",
+            "https://attack.mitre.org/techniques/T1134/",
+            "https://attack.mitre.org/techniques/T1056/001/",
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),

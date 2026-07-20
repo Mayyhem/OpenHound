@@ -1,6 +1,6 @@
 ---
 id: ope-b916
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-07-17T16:25:15Z
@@ -30,3 +30,7 @@ POST-COMPLETION BUGFIX (user caught http_site_versions missing from a live colle
 **2026-07-20T17:16:19Z**
 
 BUGFIX #2 (user hit --run-all preprocess crash 'Adding columns with constraints not yet supported'). Root cause: _coalesce_http_site_version's CREATE TABLE IF NOT EXISTS created http_site_versions, which is a DLT-MANAGED resource; when the old 406 bug meant no MP was fingerprinted, it left a bare 2-col table (no _dlt_id); the next run's dlt load tried to ALTER ADD the constrained _dlt_id -> DuckDB rejects. Fix: helper now existence-checks http_site_versions and skips when absent (never creates the dlt-owned table); _ensure_columns retained for the dlt-dropped-column case (plain cols, safe). Regression test added. E2E: fresh preprocess of live raw succeeds, http_site_versions dlt-owned (PS1/SEC=5.00.9106.1000), node_site.version=9106 all sites. 24-test sweep green. USER ACTION: delete the already-poisoned output/lookup.duckdb before re-running --run-all.
+
+**2026-07-20T17:30:15Z**
+
+Committed by user 2026-07-20. Feature complete: version->CVE fingerprinting (HTTP ccmsetup + AdminService), versionCVEs on SCCM_Site, 2509 CoerceAndRelayToAdminService gate. All 7 tasks + final review + 2 live bugfixes (406 Accept header; dlt-owned-table CREATE crash). Live-validated vs ps1-mp + ps1-sms (SCCM 2303/9106). Closing.

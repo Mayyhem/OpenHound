@@ -1271,6 +1271,26 @@ def _root_code(con: duckdb.DuckDBPyConnection, schema: str) -> str | None:
         return None
 
 
+def _first_primary_code(con: duckdb.DuckDBPyConnection, schema: str) -> str | None:
+    """Return the lexicographically-first Primary site code (site_type == 2), or None.
+
+    ConfigManBearPig attaches inferred (CmRcService-only) client devices to "the first
+    primary site code published to AD" (ps1:3253-3254) -- deliberately never the CAS,
+    which cannot own clients. site_hierarchy.site_type comes from privileged site
+    definitions (2 = Primary, 4 = CAS). A deterministic MIN replaces CMBP's
+    order-dependent 'Select -First 1' so repeated runs agree.
+    """
+    try:
+        row = con.execute(
+            f"SELECT min(site_code) FROM {schema}.site_hierarchy WHERE site_type = 2"
+        ).fetchone()
+        return row[0] if row else None
+    except duckdb.CatalogException:
+        # site_hierarchy not built (no privileged site definitions collected).
+        logger.warning("_first_primary_code: site_hierarchy missing; cannot pick a Primary site")
+        return None
+
+
 def _read_disable_possible(con: duckdb.DuckDBPyConnection, schema: str) -> bool:
     """Return the effective disable_possible_edges setting for this preproc run.
 
@@ -1869,8 +1889,10 @@ def _node_client_device_possible(
     """Append inferred possible-client SCCM_ClientDevice rows from ldap_cmrc_devices
     (CMBP ps1:3272, fixed to a deterministic id). id = upper(object_sid)@root — its own
     namespace, so it never merges with the Computer node (raw SID) and Stage 4 SameHostAs
-    can later dedup it against a real client via ad_domain_sid. Gated by
-    --disable-possible-edges and on a present root_site_code."""
+    can later dedup it against a real client via ad_domain_sid. site_code (which the
+    HasClient edge starts from) is the first Primary site, not the root — a CAS root
+    cannot own clients (CMBP ps1:3253-3254). Gated by --disable-possible-edges and on a
+    present root_site_code."""
     if disable_possible:
         # --disable-possible-edges was set at collection time; skip all possible-client rows.
         logger.info("possible-client nodes disabled (--disable-possible-edges); skipping")
@@ -1881,11 +1903,22 @@ def _node_client_device_possible(
         # with the Computer node; a possible-client only makes sense inside a hierarchy.
         logger.warning("no root_site_code resolved; skipping possible-client nodes")
         return
+    # A CAS cannot own clients, so the HasClient edge must originate from a Primary site
+    # (CMBP ps1:3253-3254). The id keeps the '@root' suffix for stable namespacing; only
+    # site_code -- the site the edge starts from -- moves to the Primary.
+    primary = _first_primary_code(con, schema)
+    if primary:
+        logger.debug("possible-client site_code resolved to Primary %r", primary)
+    else:
+        # Degenerate hierarchy (a CAS with no Primary, or a standalone Primary that is
+        # itself the root): fall back to the root so the HasClient edge is preserved.
+        primary = root
+        logger.debug("no Primary site resolved; possible-client site_code falls back to root %r", root)
     _ensure_columns(con, schema, "ldap_cmrc_devices", {"object_sid": "VARCHAR", "name": "VARCHAR"})
-    # root is a 3-character alphanumeric site code so inlining it as a literal is safe.
+    # root/primary are 3-character alphanumeric site codes so inlining them as literals is safe.
     _safe(con, "node_client_device_possible<-ldap_cmrc_devices",
           f"INSERT INTO {schema}.node_client_device BY NAME "
-          f"SELECT upper(object_sid) || '@{root}' AS smsid, name, '{root}' AS site_code, "
+          f"SELECT upper(object_sid) || '@{root}' AS smsid, name, '{primary}' AS site_code, "
           f"false AS is_confirmed_active_client, upper(object_sid) AS ad_domain_sid, '{root}' AS root_site_code "
           f"FROM {schema}.ldap_cmrc_devices WHERE object_sid IS NOT NULL")
     logger.info("node_client_device_possible built in schema %r", schema)
@@ -3147,9 +3180,9 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 def _edge_has_client(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Append SCCM_HasClient edges: Site -> ClientDevice (CMBP ps1:7257/7394).
     start = device.site_code (the site that owns the client), end = smsid.
-    Inferred-client rows (added in _node_client_device_possible) carry site_code='root' so
-    they also get a HasClient edge automatically. _safe() skips+logs if
-    node_client_device is missing."""
+    Inferred-client rows (added in _node_client_device_possible) carry site_code set to
+    the first Primary site (never the CAS), so they also get a HasClient edge
+    automatically. _safe() skips+logs if node_client_device is missing."""
     from .kinds.edges import SCCM_HAS_CLIENT
     _safe(
         con, "edge_has_client",

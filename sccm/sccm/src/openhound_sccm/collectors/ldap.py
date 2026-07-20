@@ -114,6 +114,26 @@ def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
     return result
 
 
+def _pick_client_device_site_code(
+    primary_site_codes: set[str] | None, site_codes: set[str] | None
+) -> str | None:
+    """Choose the site code to stamp on a CmRcService-only ("possible") client device.
+
+    A CAS publishes an mSSMSSite object like any other site, so ``site_codes`` alone can
+    lead us to attach an inferred client to the CAS -- which cannot own clients. Prefer a
+    Primary site (identified from management-point capabilities during
+    ``ldap_management_points_raw``); fall back to any known site code, then None. Sorting
+    keeps repeated runs deterministic. Mirrors CMBP's "first primary site published to
+    AD" (ps1:3253-3254). The preproc transform is the authoritative corrector; this only
+    sets the raw collected value.
+    """
+    if primary_site_codes:
+        return sorted(primary_site_codes)[0]
+    if site_codes:
+        return sorted(site_codes)[0]
+    return None
+
+
 _SITE_ATTRS = [
     "mSSMSSiteCode",
     "mSSMSHealthState",
@@ -246,6 +266,16 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             # FSP hostnames from the capabilities XML
             parsed = _parse_mp_capabilities(entry.get("mSSMSCapabilities") or "", mp_site_code)
 
+            # A Primary site's MP advertises its own site code; record Primary sites so the
+            # CmRcService discovery can attach inferred clients to a Primary rather than the
+            # CAS (a CAS has no MP and cannot own clients). This resource runs before
+            # ldap_cmrc_devices, so the set is populated by the time that resource reads it.
+            if parsed["site_type"] == "Primary Site" and mp_code_upper:
+                if ctx.primary_site_codes is None:
+                    ctx.primary_site_codes = set()
+                ctx.primary_site_codes.add(mp_code_upper)
+                logger.verbose("Recorded Primary site %s from management-point capabilities", mp_code_upper)
+
             # Register the fallback status point as a collection target;
             # the FSP hostname comes from the FSPServer node inside the capabilities XML
             fsp_hostname = parsed["fsp_hostname"]
@@ -307,11 +337,13 @@ def ldap_cmrc_devices(ctx: SourceContext) -> Iterable[dict[str, Any]]:
 
     logger.info("Found %d computers with CmRcService SPN in %s", len(results), ctx.domain)
     
-    # Give this client device the first primary site code published to AD. This could 
-    # very well be wrong in multi-site environments, but it should be in the same hierarchy, 
-    # so it's better than nothing for offensive use case and will be replaced if privileged
-    # collection is conducted later
-    site_code = sorted(ctx.site_codes)[0] if ctx.site_codes else None
+    # Give this client device a Primary site code -- a CAS is published to AD as an
+    # mSSMSSite too but cannot own clients, so prefer a site the MP-capabilities parse
+    # classified as Primary (ldap_management_points_raw ran first). This could still be
+    # wrong in multi-Primary environments, but it stays in the same hierarchy, so it's
+    # better than nothing for the offensive use case and is replaced by the authoritative
+    # Primary from privileged site definitions during preprocess.
+    site_code = _pick_client_device_site_code(ctx.primary_site_codes, ctx.site_codes)
 
     for entry in results:
 
