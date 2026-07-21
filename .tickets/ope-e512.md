@@ -1,6 +1,6 @@
 ---
 id: ope-e512
-status: open
+status: in_progress
 deps: []
 links: []
 created: 2026-06-02T21:25:46Z

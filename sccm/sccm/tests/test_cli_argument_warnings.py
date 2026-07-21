@@ -1,3 +1,4 @@
+import inspect
 import logging
 
 from openhound_sccm import main as sccm_main
@@ -45,3 +46,10 @@ def test_warns_for_split_short_value_without_logging_password():
     assert "Did you mean to quote the --password value" in warnings[0]
     assert "My" not in warnings[0]
     assert "Secret" not in warnings[0]
+
+
+def test_sms_option_removed():
+    from openhound_sccm import source as sccm_source
+
+    assert "sms_provider" not in inspect.signature(sccm_main.collect_sccm).parameters
+    assert "sms_provider" not in inspect.signature(sccm_source.source).parameters

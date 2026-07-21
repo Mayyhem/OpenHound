@@ -1,6 +1,6 @@
 ---
 id: Ope-l6fu
-status: open
+status: closed
 deps: []
 links: [ope-c8cc]
 created: 2026-05-28T13:28:17Z

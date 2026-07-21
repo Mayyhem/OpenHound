@@ -1,6 +1,6 @@
 ---
 id: ope-3d28
-status: open
+status: closed
 deps: [ope-0112]
 links: []
 created: 2026-06-03T19:29:22Z

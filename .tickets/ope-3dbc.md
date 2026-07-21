@@ -1,6 +1,6 @@
 ---
 id: ope-3dbc
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-29T16:25:42Z

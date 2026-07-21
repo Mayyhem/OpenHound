@@ -1,6 +1,6 @@
 ---
 id: ope-6aa7
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-29T19:59:31Z

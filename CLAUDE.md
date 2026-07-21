@@ -20,6 +20,7 @@ ALWAYS use the following plugins/skills for tasks, unless they conflict (listed 
 - grill-me (sccm\sccm\.agents\skills\openhound\SKILL.md)
 - superpowers
 - openhound (sccm\sccm\.agents\skills\openhound\SKILL.md)
+- i-have-adhd
 - explanatory-output-style
 - code-simplifier
 - feature-dev
@@ -33,7 +34,7 @@ Write logs of appropriate level (error, warning, info, verbose, debug) for every
 
 If you encounter bugs as you go, raise the issue and ask what to do.
 
-This project uses a CLI ticket system for task management. Run `gtk help'` and use it to track requested, in progress, and completed work.
+This project uses a CLI ticket system for task management. Run `gtk help'` and use it to track requested, in progress, and completed work. Update TICKETS-BY-STATUS.md after updating the status of any ticket.
 
 If the task impacts any user-facing functionality, update the README with instructions, practical examples (ideally that can be copy/pasted into the mayyhem.com domain environment), diagrams, tables, etc. as needed.
 

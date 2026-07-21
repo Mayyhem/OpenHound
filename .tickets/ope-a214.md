@@ -2,7 +2,7 @@
 id: ope-a214
 status: open
 deps: []
-links: [ope-aa39]
+links: [ope-aa39, Ope-rhzx]
 created: 2026-07-16T18:51:17Z
 type: task
 priority: 3
@@ -18,3 +18,7 @@ Deferred from ope-aa39. (1) Add a 'composition' string property + Cypher to edge
 **2026-07-17T14:39:32Z**
 
 Also relevant: MSSQL edge help now authored in SCCM extension (SCCM-local per low-reuse). If MSSQL extension mirrors these, note upstream MSSQLHound.ps1 MSSQL_GetTGS setspn bug (references login instead of SQL server).
+
+**2026-07-20T19:56:58Z**
+
+Scope pairing (2026-07-20): work jointly with Ope-rhzx (same underlying decision). Ope-rhzx ('Individual Permissions') is the still-unimplemented granular per-operation permission enumeration (SCCM_AssignSpecificPermissions). This ticket's item (2) — whether the admin-user path emits admin-user to SCCM_AssignAllPermissions or carries the composition on SCCM_AllPermissions — is the governing decision for both. Resolve once, then implement the edge composition property + the specific-permissions edges together.

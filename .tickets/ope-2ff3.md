@@ -1,6 +1,6 @@
 ---
 id: ope-2ff3
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-23T21:14:07Z

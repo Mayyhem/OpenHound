@@ -145,7 +145,6 @@ _FLAG_TO_ENV: dict[str, str] = {
     "collection_methods": "SOURCES__SCCM__COLLECTION_METHODS",
     "computers": "SOURCES__SCCM__COMPUTERS",
     "computer_file": "SOURCES__SCCM__COMPUTER_FILE",
-    "sms_provider": "SOURCES__SCCM__SMS_PROVIDER",
     "site_codes": "SOURCES__SCCM__SITE_CODES",
     # Behavior
     "disable_possible_edges": "SOURCES__SCCM__DISABLE_POSSIBLE_EDGES",
@@ -212,8 +211,6 @@ _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--computers",
     "--cf",
     "--computer-file",
-    "--sms",
-    "--sms-provider",
     "--sc",
     "--site-codes",
     "--threads",
@@ -608,7 +605,7 @@ def _require_domain_or_explain(flag_kwargs: dict) -> None:
 
 def _parse_proxy_or_exit(socks_proxy: Optional[str]) -> Optional["ProxyConfig"]:
     """Parse --socks-proxy into a ProxyConfig, or exit(2) with a clear error."""
-    from openhound_collector_common.proxy import ProxyConfig, SocksError, parse_proxy_address
+    from openhound_collector_common.proxy import SocksError, parse_proxy_address
     if not socks_proxy:
         return None
     try:
@@ -964,7 +961,6 @@ def collect_sccm(
     ),
     computers: Optional[str] = typer.Option(None, "-c", "--computers", help="Comma-separated computer targets."),
     computer_file: Optional[pathlib.Path] = typer.Option(None, "--cf", "--computer-file", help="File with computer targets (one per line)."),
-    sms_provider: Optional[str] = typer.Option(None, "--sms", "--sms-provider", help="Specific SMS Provider host."),
     site_codes: Optional[str] = typer.Option(None, "--sc", "--site-codes", help="Site codes for DNS collection (CSV or file path)."),
     # ---- Behavior ----
     disable_possible_edges: bool = typer.Option(False, "--disable-possible-edges", help="Disable uncertain/possible edges."),

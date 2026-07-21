@@ -1,6 +1,6 @@
 ---
 id: ope-e739
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-07-20T18:32:32Z

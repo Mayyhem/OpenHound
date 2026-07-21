@@ -1,6 +1,6 @@
 ---
 id: ope-a88e
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-06-23T17:30:16Z

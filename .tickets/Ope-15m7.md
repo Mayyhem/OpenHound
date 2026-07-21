@@ -1,6 +1,6 @@
 ---
 id: Ope-15m7
-status: open
+status: in_progress
 deps: []
 links: []
 created: 2026-05-28T13:31:54Z
@@ -9,6 +9,7 @@ priority: 1
 assignee: Mayyhem
 tags: [sccm, graph, audit]
 ---
+
 # Seed Nodes / Edges Audit
 
 Audit whether all attack-path seed nodes (Authenticated Users, Everyone, Domain Computers) and their baseline edges are properly seeded in the graph, or if they rely on BloodHound pre-existing AD collection data. SCCM attack paths often originate from Authenticated Users -> coerce site server -> relay to MP. For these paths to be traversable in BloodHound, the Authenticated Users node must exist with its standard membership edges.

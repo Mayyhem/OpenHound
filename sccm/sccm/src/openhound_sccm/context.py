@@ -1,7 +1,7 @@
 """Shared source-run context for SCCM collectors.
 
 ``SourceContext`` wraps the LDAP/AD client and all CMBP-equivalent CLI knobs
-(``--collection-methods``, ``--computers``, ``--sms-provider``, etc.) and
+(``--collection-methods``, ``--computers``, ``--site-codes``, etc.) and
 provides the lazy-loaded caches that every ``@app.resource`` in
 ``collectors/*`` shares:
 """

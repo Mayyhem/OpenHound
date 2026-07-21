@@ -217,7 +217,6 @@ def source(
     collection_methods: str | None = dlt.config.value,
     computers: str | None = dlt.config.value,
     computer_file: str | None = dlt.config.value,
-    sms_provider: str | None = dlt.config.value,
     site_codes: str | None = dlt.config.value,
     # Behavior
     disable_possible_edges: bool | None = dlt.config.value,

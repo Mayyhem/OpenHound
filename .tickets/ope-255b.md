@@ -1,6 +1,6 @@
 ---
 id: ope-255b
-status: open
+status: closed
 deps: []
 links: [ope-7f61]
 created: 2026-07-01T16:18:45Z

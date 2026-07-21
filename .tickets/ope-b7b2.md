@@ -1,6 +1,6 @@
 ---
 id: ope-b7b2
-status: open
+status: in_progress
 deps: []
 links: [ope-272e]
 created: 2026-06-09T20:50:25Z

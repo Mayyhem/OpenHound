@@ -11,6 +11,8 @@ import struct
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable
 
+from ldap3 import BASE
+
 from ..clients.ad import bytes_to_sid
 from ..context import SourceContext
 from ..log_context import with_log_context
@@ -602,12 +604,61 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 obj_type = "user"
             elif "group" in [c.lower() for c in obj_class]:
                 obj_type = "group"
+                # Members effectively inherit Full Control on the container (ope-e191) —
+                # recurse so member computers get registered as scan targets too.
+                _expand_group_targets(ctx, ad_obj, set())
             logger.info(f"Found {obj_type} with GenericAll on System Management container: {sam} ({sid_str})")
 
             yield ad_obj
 
         except Exception as ex:
             logger.error(f"Failed to process GenericAll principal {sid_str}: {ex}")
+
+
+def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited: set[str]) -> None:
+    """Recursively register computer members of a group that holds GenericAll on the
+    System Management container (ope-e191). Users are logged (modeled elsewhere via the
+    caller's yield), nested groups recurse; visited guards circular nesting."""
+    group_dn = group_obj.get("distinguished_name")
+    if not group_dn or group_dn in visited:
+        logger.debug("SMC group expansion: skipping visited/empty group %s", group_dn)
+        return
+    visited.add(group_dn)
+    grp = next(ctx.ad.paged_search("(objectClass=*)", ["member"], base=group_dn, scope=BASE), None) or {}
+    members = grp.get("member") or []
+    if isinstance(members, str):
+        members = [members]
+    # ldap3's auto_range (on by default in the shared client) transparently pages large
+    # member lists and merges them under the plain "member" key. A residual "member;range="
+    # key therefore means auto_range did NOT complete for this group — warn so the operator
+    # knows membership may be incomplete rather than silently under-collecting.
+    if any(str(k).lower().startswith("member;range=") for k in grp):
+        logger.warning(
+            "SMC group expansion: group %s returned a range-limited member attribute "
+            "(ldap3 auto_range did not complete); membership may be incomplete — some "
+            "controlling principals could be undiscovered. Review manually.",
+            group_dn)
+    if not members:
+        logger.debug("SMC group expansion: group %s has no members", group_dn)
+        return
+    for member_dn in members:
+        member = ctx.resolve_principal(member_dn)
+        if not member:
+            logger.warning("SMC group expansion: could not resolve member %s", member_dn)
+            continue
+        oc = member.get("object_class", [])
+        oc = [oc] if isinstance(oc, str) else oc
+        ocl = [c.lower() for c in oc]
+        if "computer" in ocl:
+            ctx.register_target(identifier=member.get("dns_host_name"),
+                                source="LDAP-GenericAllSystemManagement", ad_object=member)
+        elif "group" in ocl:
+            _expand_group_targets(ctx, member, visited)
+        elif "user" in ocl:
+            logger.info("SMC group expansion: user member %s controls the container (modeled, not a scan target)",
+                        member.get("sam_account_name"))
+        else:
+            logger.warning("SMC group expansion: member %s has unhandled objectClass %s", member_dn, ocl)
 
 
 def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
@@ -628,18 +679,19 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
       optional InheritedObjectType(16) before the SID
     """
     if len(sd_bytes) < 20:
+        logger.warning("SMC ACL: security descriptor too short (%d bytes); cannot parse ACEs", len(sd_bytes))
         return []
 
     # Parse SECURITY_DESCRIPTOR header
-    revision = sd_bytes[0]
-    control = struct.unpack_from("<H", sd_bytes, 2)[0]
     offset_dacl = struct.unpack_from("<I", sd_bytes, 16)[0]
 
     if offset_dacl == 0 or offset_dacl >= len(sd_bytes):
+        logger.warning(
+            "SMC ACL: DACL offset %d out of range (SD is %d bytes); cannot parse ACEs",
+            offset_dacl, len(sd_bytes))
         return []
 
     # Parse ACL header at offset_dacl
-    acl_size = struct.unpack_from("<H", sd_bytes, offset_dacl + 2)[0]
     ace_count = struct.unpack_from("<H", sd_bytes, offset_dacl + 4)[0]
 
     results = []
@@ -654,16 +706,20 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
 
     for _ in range(ace_count):
         if pos + 4 > len(sd_bytes):
+            logger.debug("SMC ACL: truncated ACE header at offset %d; stopping ACE scan", pos)
             break
 
         ace_type = sd_bytes[pos]
-        ace_flags = sd_bytes[pos + 1]
         ace_size = struct.unpack_from("<H", sd_bytes, pos + 2)[0]
 
         if ace_size < 4 or pos + ace_size > len(sd_bytes):
+            logger.debug(
+                "SMC ACL: invalid/overrunning ACE size %d at offset %d; stopping ACE scan",
+                ace_size, pos)
             break
 
         if pos + 8 > len(sd_bytes):
+            logger.debug("SMC ACL: ACE at offset %d too short for an access mask; skipping", pos)
             pos += ace_size
             continue
 

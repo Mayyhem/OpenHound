@@ -1,6 +1,6 @@
 ---
 id: Ope-liu7
-status: open
+status: in_progress
 deps: []
 links: []
 created: 2026-05-28T13:30:45Z
@@ -9,6 +9,7 @@ priority: 1
 assignee: Mayyhem
 tags: [sccm, ldap, acl, takeover]
 ---
+
 # System Management Container Abuse
 
 Collect AD ACL permissions on the System Management container and model the privilege escalation path to SCCM site admin. Any principal with GenericWrite, CreateChild, or WriteDACL on CN=System Management,CN=System,<domain> can create/modify SCCM site objects to gain SCCM admin. The ldap_system_management_acl preproc table is planned but has no collector. Reference: Misconfiguration Manager TAKEOVER-5.

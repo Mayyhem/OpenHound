@@ -316,15 +316,15 @@ The **SMB-based phases** — RemoteRegistry ([collectors/registry.py](src/openho
 
 ```bash
 # Passwordless, as the current domain user (domain-joined collector):
-uv run openhound collect sccm ./out -d mayyhem.com --sms ps1-sms.mayyhem.com
+uv run openhound collect sccm ./out -d mayyhem.com -c ps1-sms.mayyhem.com
 
 # Pass-the-hash against a specific SMS provider:
 uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
-    --nt-hash 8846f7eaee8fb117ad06bdd830b7586c --sms ps1-sms.mayyhem.com
+    --nt-hash 8846f7eaee8fb117ad06bdd830b7586c -c ps1-sms.mayyhem.com
 
 # Pass-the-ticket (base64 .kirbi):
 uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
-    --ticket "$(base64 -w0 ticket.kirbi)" --sms ps1-sms.mayyhem.com
+    --ticket "$(base64 -w0 ticket.kirbi)" -c ps1-sms.mayyhem.com
 ```
 
 > **Status:** the auth client is implemented and unit- and live-validated against the lab AdminService. The **AdminService**, **WMI**, and **HTTP** per-host phases are implemented (collect-only); see [`--collection-methods`](#collection). HTTP uses the client's **anonymous** mode — it reads the unauthenticated 401/403/200 that reveal site-system roles.
@@ -336,8 +336,9 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 | `-m`, `--collection-methods` | Comma-separated methods (see the table below). Default `All`. |
 | `-c`, `--computers` | Comma-separated computer targets. |
 | `--cf`, `--computer-file` | Path to a file of computer targets, one per line. |
-| `--sms`, `--sms-provider` | A specific SMS Provider host *(consumed by the AdminService / WMI phases)*. |
 | `--sc`, `--site-codes` | Site codes for DNS collection (CSV or file path). |
+
+Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Provider).
 
 **`--collection-methods` tokens** (case-insensitive; matched in [context.py](src/openhound_sccm/context.py)):
 

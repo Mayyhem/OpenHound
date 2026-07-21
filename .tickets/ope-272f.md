@@ -1,6 +1,6 @@
 ---
 id: ope-272f
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-25T19:45:07Z
