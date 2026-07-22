@@ -20,7 +20,6 @@ ALWAYS use the following plugins/skills for tasks, unless they conflict (listed 
 - grill-me (sccm\sccm\.agents\skills\openhound\SKILL.md)
 - superpowers
 - openhound (sccm\sccm\.agents\skills\openhound\SKILL.md)
-- i-have-adhd
 - explanatory-output-style
 - code-simplifier
 - feature-dev

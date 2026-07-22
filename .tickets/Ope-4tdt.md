@@ -34,3 +34,7 @@ Add --dc-only CLI flag to main.py. When set, force --collection-methods LDAP,DNS
 - VERIFY the ticket's 'preproc already handles missing Phase 3 tables gracefully' claim: coalesce SELECTs over absent/all-NULL columns can still throw BinderException (see memory sccm-dlt-coalesce-gotchas). Prove --run-all end-to-end against a real dc-only lookup.duckdb; harden transforms.py (except CatalogException -> empty) only where needed.
 - DOCS: fix stale README line ~194 ('discovery resources are not gated by --collection-methods') — code DOES gate them (ldap.py/dns.py/local.py method_enabled) and --dc-only depends on that. Add ARCHITECTURE.md scoping subsection (method-gate + Stage-2 skip) + changelog entry.
 - Superseded duplicate ope-3257 (deleted) — this ticket (Ope-4tdt) is canonical.
+
+**2026-07-22T16:16:10Z**
+
+Implementation plan written (writing-plans skill): docs/superpowers/plans/2026-07-22-dc-only-flag.md — 4 tasks (flag+helpers / --run-all tolerance verify+lock / docs / validation), TDD, no-commit green checkpoints.

@@ -273,7 +273,6 @@ The collector relies on these assumptions about the target environment and how i
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
-- **CRED-2 (machine-account) flags are inert.** `--machine-name`, `--machine-pass`, `--client-name`, `--create-machine-account`, `--use-altauth`, and `--registration-sleep` are defined but not yet implemented (their help text says so).
 - **`--proxy` cannot tunnel live current-user SSPI / OS-Kerberos, and carries no UDP.** Windows SSPI Negotiate and OS-Kerberos make their KDC/DCOM connections inside the OS (LSASS/win32com), not this process, so a userland socket hook cannot pull them through the pivot. Use `--ticket` (pass-the-ticket, which tunnels completely) or set up OS-level transparent proxying (tun2socks / Proxifier) on the outside box. Separately, DNS is forced onto TCP to ride the tunnel — SOCKS5 CONNECT is TCP-only, so no other UDP traffic is carried. See [Proxying / pivoting](#proxying--pivoting).
 
 ---
@@ -288,7 +287,9 @@ uv run openhound collect sccm <output_path> [resources...] [options]
 
 `<output_path>` (positional, required) is the directory raw JSONL is written to. `resources...` (optional) limits collection to a subset of resource names.
 
-### Connection
+The flag groups below mirror the panels shown in `--help`: **Authentication**, **Collection**, **Performance**, **Output**, and **Logging**.
+
+### Authentication
 
 | Option | Description |
 |---|---|
@@ -347,8 +348,11 @@ uv run openhound collect sccm ./out -d mayyhem.com --dc dc.mayyhem.com \
 | `-c`, `--computers` | Comma-separated computer targets. |
 | `--cf`, `--computer-file` | Path to a file of computer targets, one per line. |
 | `--sc`, `--site-codes` | Site codes for DNS collection (CSV or file path). |
+| `-x`, `--proxy` | Route **all** collection traffic (discovery + every per-host protocol) through a SOCKS5 proxy. Forms: `socks5://[user:pass@]host:port` or bare `host:port`. Requires `--dc` or `--dns`. See [Proxying / pivoting](#proxying--pivoting). |
+| `--dns`, `--dns-resolver` | DNS nameserver IP used for all lookups (DC discovery, SRV probes). Omit to use the system default. |
+| `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 
-Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Provider).
+Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Provider). `-x`/`--proxy` and `--dns` steer how that collection traffic is routed and resolved, which is why they sit with the other Collection controls.
 
 **`--collection-methods` tokens** (case-insensitive; matched in [context.py](src/openhound_sccm/context.py)):
 
@@ -361,15 +365,21 @@ Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Prov
 | `SMB` | ✅ Per-host phase (Stage 2). SMB-signing check + SCCM share-role enumeration; runs on a host only when AdminService/WMI did not already collect it. Collect-only. |
 | `DHCP` | 🚧 Accepted but not yet ported |
 
-### Behavior
+### Performance
 
 | Option | Description |
 |---|---|
-| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and tighten the Stage 6 coerce-and-relay edges (see below). The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
-| `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 | `-t`, `--threads` | Per-host worker-pool size. Default `10`. |
-| `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
+
+### Output
+
+| Option | Description |
+|---|---|
 | `--run-all` | After collecting, automatically run **preprocess** and **convert** in-process, producing the OpenGraph files in a single command. All paths are derived from `OUTPUT_PATH`: `lookup.duckdb`, the `sccm/` dataset dir, and `graph/`. On completion it logs a consolidated list of the run's output files — raw JSONL, the lookup DB, each OpenGraph JSON, and the collect logs (`collect_full_*`, and `collect_issues_*` when a warning/error occurred) — so you don't have to scroll back through the run. Omit it to run the three stages manually (the default; a "next steps" hint is printed). |
+| `--progress` | Progress backend. `off` (default) silences dlt's per-resource progress counters so only the collector's own `[target][phase]` logs print; pass `tqdm`, `log`, or `alive_progress` to re-enable a live tracker. |
+| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and tighten the Stage 6 coerce-and-relay edges (see below). The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
+| `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
+| `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
 
 #### `--disable-possible-edges` and the coerce-and-relay edges
 
@@ -401,30 +411,10 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 > ```
 > This override is **tightening-only** — a truthy value forces possible edges off, but it can never re-enable possible edges that were already disabled at collect time. It has no effect (behavior is unchanged) when unset.
 
-### Machine account / CRED-2 — 🚧 not yet implemented
+### Logging
 
 | Option | Description |
 |---|---|
-| `--machine-name` | `DOMAIN\MACHINE$` for SCCM client registration. |
-| `--machine-pass` | Machine-account password. |
-| `--client-name` | Client FQDN to register. |
-| `--create-machine-account` | Create a machine account (`auto` or a name). |
-| `--use-altauth` | Use the `ccm_system_altauth` endpoint. |
-| `--registration-sleep` | Seconds to wait post-registration before the policy request. Default `10`. |
-
-### Network
-
-| Option | Description |
-|---|---|
-| `-x`, `--proxy` | Route **all** collection traffic (discovery + every per-host protocol) through a SOCKS5 proxy. Forms: `socks5://[user:pass@]host:port` or bare `host:port`. Requires `--dc` or `--dns`. See [Proxying / pivoting](#proxying--pivoting). |
-| `--dns`, `--dns-resolver` | DNS nameserver IP used for all lookups (DC discovery, SRV probes). Omit to use the system default. |
-
-### Output & logging
-
-| Option | Description |
-|---|---|
-| `--progress` | Progress backend. `off` (default) silences dlt's per-resource progress counters so only the collector's own `[target][phase]` logs print; pass `tqdm`, `log`, or `alive_progress` to re-enable a live tracker. |
-| `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
 | `-v`, `--verbose` | Raise the console to VERBOSE (per-resolution / per-node / per-edge traces; PS1 `[Verbose]` parity). Without it the console is INFO (step summaries). |
 | `--silent` | Silence **all** console output. The two on-disk logs (`collect_full_*` = complete DEBUG trace, `collect_issues_*` = warnings/errors with tracebacks) are still written. Also forces `--progress off`. |
 | `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). Outranks `-v`. |

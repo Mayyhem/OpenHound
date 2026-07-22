@@ -223,13 +223,6 @@ def source(
     enable_bad_opsec: bool | None = dlt.config.value,
     threads: int | None = dlt.config.value,
     show_cleartext_passwords: bool | None = dlt.config.value,
-    # CRED-2
-    machine_name: str | None = dlt.config.value,
-    machine_pass: str | None = dlt.secrets.value,
-    client_name: str | None = dlt.config.value,
-    create_machine_account: str | None = dlt.config.value,
-    use_altauth: bool | None = dlt.config.value,
-    registration_sleep: int | None = dlt.config.value,
     # DNS
     dns_resolver: str | None = dlt.config.value,
 ):
@@ -239,8 +232,6 @@ def source(
     enable_bad_opsec = bool(enable_bad_opsec)
     threads = threads if threads is not None else 1
     show_cleartext_passwords = bool(show_cleartext_passwords)
-    use_altauth = bool(use_altauth)
-    registration_sleep = registration_sleep if registration_sleep is not None else 10
 
     # Parse allowed targets from --computers and --computer-file. Both feed the
     # same expansion (lowercased FQDN + short-name forms) so Test-AllowedTarget

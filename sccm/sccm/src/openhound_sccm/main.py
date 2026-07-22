@@ -151,13 +151,6 @@ _FLAG_TO_ENV: dict[str, str] = {
     "enable_bad_opsec": "SOURCES__SCCM__ENABLE_BAD_OPSEC",
     "threads": "SOURCES__SCCM__THREADS",
     "show_cleartext_passwords": "SOURCES__SCCM__SHOW_CLEARTEXT_PASSWORDS",
-    # CRED-2
-    "machine_name": "SOURCES__SCCM__MACHINE_NAME",
-    "machine_pass": "SOURCES__SCCM__MACHINE_PASS",
-    "client_name": "SOURCES__SCCM__CLIENT_NAME",
-    "create_machine_account": "SOURCES__SCCM__CREATE_MACHINE_ACCOUNT",
-    "use_altauth": "SOURCES__SCCM__USE_ALTAUTH",
-    "registration_sleep": "SOURCES__SCCM__REGISTRATION_SLEEP",
     # Network
     "socks_proxy": "SOURCES__SCCM__SOCKS_PROXY",
     # DNS
@@ -167,11 +160,9 @@ _FLAG_TO_ENV: dict[str, str] = {
 _TYPED_DLT_ENV = {
     "SOURCES__SCCM__LDAP_PORT",
     "SOURCES__SCCM__THREADS",
-    "SOURCES__SCCM__REGISTRATION_SLEEP",
     "SOURCES__SCCM__DISABLE_POSSIBLE_EDGES",
     "SOURCES__SCCM__ENABLE_BAD_OPSEC",
     "SOURCES__SCCM__SHOW_CLEARTEXT_PASSWORDS",
-    "SOURCES__SCCM__USE_ALTAUTH",
 }
 
 
@@ -215,11 +206,6 @@ _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--sc",
     "--site-codes",
     "--threads",
-    "--machine-name",
-    "--machine-pass",
-    "--client-name",
-    "--create-machine-account",
-    "--registration-sleep",
     "--proxy",
     "--dns",
     "--dns-resolver",
@@ -990,59 +976,63 @@ def collect_sccm(
     # ---- standard framework arguments ----
     output_path: OutputPath,
     resources: Optional[List[str]] = typer.Argument(None, help="Optional subset of resource names; default = all."),
-    progress: ProgressOption = typer.Option(
-        ProgressOption.off,
-        help="Progress backend. 'off' (default) silences dlt's progress counters so only the "
-        "collector's own logs print; 'tqdm' / 'log' / 'alive_progress' re-enable a live tracker.",
-    ),
-    tables: Contract = typer.Option(Contract.evolve, help="Contract for newly-seen resources/tables."),
-    columns: Contract = typer.Option(Contract.evolve, help="Contract for unknown fields."),
-    data_type: Contract = typer.Option(Contract.freeze, help="Contract for type mismatches."),
-    # ---- Connection ----
-    domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN; on Linux/macOS this flag is required."),
-    domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
-    username: Optional[str] = typer.Option(None, "-u", "--username", help="DOMAIN\\\\user for explicit auth."),
-    password: Optional[str] = typer.Option(None, "-p", "--password", help="Password for explicit auth."),
-    nt_hash: Optional[str] = typer.Option(None, "--nt-hash", help="NT hash for pass-the-hash auth (bare 32-hex NT hash; LM half assumed empty). Used by LDAP, AdminService (Kerberos RC4 key and NTLM), the SMB-based phases (RemoteRegistry, SMB), and the MSSQL EPA probe."),
-    ticket: Optional[str] = typer.Option(None, "--ticket", help="Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for pass-the-ticket. Kerberos only, no NTLM fallback. Honored by LDAP, AdminService/WMI, and the SMB-based phases (RemoteRegistry, SMB). Not used for the MSSQL EPA probe (it cannot probe channel binding — use -p/--password or --nt-hash there)."),
-    ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389+sign/seal). 636/3269 → LDAPS; any other port → LDAP."),
+    # ---- Authentication ----
+    # Panel order in --help follows the order each panel's first option appears
+    # here, so keep the panels grouped and in the intended display sequence:
+    # Authentication -> Collection -> Performance -> Output -> Logging.
+    domain: Optional[str] = typer.Option(None, "-d", "--domain", rich_help_panel="Authentication", help="Domain (e.g. mayyhem.com). On Windows, auto-detected from $env:USERDNSDOMAIN; on Linux/macOS this flag is required."),
+    domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", rich_help_panel="Authentication", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
+    username: Optional[str] = typer.Option(None, "-u", "--username", rich_help_panel="Authentication", help="DOMAIN\\\\user for explicit auth."),
+    password: Optional[str] = typer.Option(None, "-p", "--password", rich_help_panel="Authentication", help="Password for explicit auth."),
+    nt_hash: Optional[str] = typer.Option(None, "--nt-hash", rich_help_panel="Authentication", help="NT hash for pass-the-hash auth (bare 32-hex NT hash; LM half assumed empty). Used by LDAP, AdminService (Kerberos RC4 key and NTLM), the SMB-based phases (RemoteRegistry, SMB), and the MSSQL EPA probe."),
+    ticket: Optional[str] = typer.Option(None, "--ticket", rich_help_panel="Authentication", help="Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for pass-the-ticket. Kerberos only, no NTLM fallback. Honored by LDAP, AdminService/WMI, and the SMB-based phases (RemoteRegistry, SMB). Not used for the MSSQL EPA probe (it cannot probe channel binding — use -p/--password or --nt-hash there)."),
+    # Help text stays ASCII-only: rich renders it to the active console encoding,
+    # and a redirected `--help` on Windows uses cp1252, which can't encode "->"
+    # arrows (U+2192) and would crash. Use ASCII "->" instead. See the cp1252
+    # guard in tests/test_cli_option_panels.py.
+    ldap_port: Optional[int] = typer.Option(None, "--ldap-port", rich_help_panel="Authentication", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 -> StartTLS:389 -> LDAP:389+sign/seal). 636/3269 -> LDAPS; any other port -> LDAP."),
     # ---- Collection ----
     collection_methods: Optional[str] = typer.Option(
-        None, "-m", "--collection-methods",
+        None, "-m", "--collection-methods", rich_help_panel="Collection",
         help="Comma-separated methods: All, LDAP, Local, DNS, DHCP, RemoteRegistry, MSSQL, AdminService, WMI, HTTP, SMB.",
     ),
-    computers: Optional[str] = typer.Option(None, "-c", "--computers", help="Comma-separated computer targets."),
-    computer_file: Optional[pathlib.Path] = typer.Option(None, "--cf", "--computer-file", help="File with computer targets (one per line)."),
-    site_codes: Optional[str] = typer.Option(None, "--sc", "--site-codes", help="Site codes for DNS collection (CSV or file path)."),
-    # ---- Behavior ----
-    disable_possible_edges: bool = typer.Option(False, "--disable-possible-edges", help="Disable uncertain/possible edges."),
-    enable_bad_opsec: bool = typer.Option(False, "--enable-bad-opsec", help="Enable bad-opsec operations (NAA decryption, etc.)."),
-    threads: int = typer.Option(10, "-t", "--threads", help="Number of machines collected concurrently (per-host worker pool size; default 10)."),
-    show_cleartext_passwords: bool = typer.Option(False, "--show-cleartext-passwords", help="Display cleartext passwords when discovered."),
+    computers: Optional[str] = typer.Option(None, "-c", "--computers", rich_help_panel="Collection", help="Comma-separated computer targets."),
+    computer_file: Optional[pathlib.Path] = typer.Option(None, "--cf", "--computer-file", rich_help_panel="Collection", help="File with computer targets (one per line)."),
+    site_codes: Optional[str] = typer.Option(None, "--sc", "--site-codes", rich_help_panel="Collection", help="Site codes for DNS collection (CSV or file path)."),
+    # --proxy and --dns steer how collection reaches its targets, so they live
+    # with the other Collection controls rather than in a separate network group.
+    socks_proxy: Optional[str] = typer.Option(
+        None, "-x", "--proxy", rich_help_panel="Collection",
+        help="SOCKS5 proxy address (host:port or "
+             "socks5://[user:pass@]host:port). Requires --dc or --dns.",
+    ),
+    dns_resolver: Optional[str] = typer.Option(None, "--dns", "--dns-resolver", rich_help_panel="Collection", help="DNS nameserver IP for all lookups (DC discovery, SRV probes). Omit to use system default."),
+    enable_bad_opsec: bool = typer.Option(False, "--enable-bad-opsec", rich_help_panel="Collection", help="Enable bad-opsec operations (NAA decryption, etc.)."),
+    # ---- Performance ----
+    threads: int = typer.Option(10, "-t", "--threads", rich_help_panel="Performance", help="Number of machines collected concurrently (per-host worker pool size; default 10)."),
+    # ---- Output ----
     run_all: bool = typer.Option(
-        False, "--run-all",
+        False, "--run-all", rich_help_panel="Output",
         help="After collecting, automatically run preprocess and convert in-process so a "
         "single command produces the OpenGraph files. All paths are derived from OUTPUT_PATH "
         "(lookup.duckdb, the sccm/ dataset dir, and graph/).",
     ),
-    # ---- Machine Account / CRED-2 ----
-    machine_name: Optional[str] = typer.Option(None, "--machine-name", help="DOMAIN\\\\MACHINE$ for SCCM client registration. CRED-2 chain not yet implemented."),
-    machine_pass: Optional[str] = typer.Option(None, "--machine-pass", help="Machine account password. CRED-2 chain not yet implemented."),
-    client_name: Optional[str] = typer.Option(None, "--client-name", help="Client FQDN to register. CRED-2 chain not yet implemented."),
-    create_machine_account: Optional[str] = typer.Option(None, "--create-machine-account", help="Create a machine account for CRED-2. Pass 'auto' or a name. Not yet implemented."),
-    use_altauth: bool = typer.Option(False, "--use-altauth", help="Use ccm_system_altauth endpoint. Not yet implemented."),
-    registration_sleep: int = typer.Option(10, "--registration-sleep", help="Seconds to wait post-registration before policy request. Not yet implemented."),
-    # ---- Network ----
-    socks_proxy: Optional[str] = typer.Option(
-        None, "-x", "--proxy",
-        help="SOCKS5 proxy address (host:port or "
-             "socks5://[user:pass@]host:port). Requires --dc or --dns.",
+    progress: ProgressOption = typer.Option(
+        ProgressOption.off, rich_help_panel="Output",
+        help="Progress backend. 'off' (default) silences dlt's progress counters so only the "
+        "collector's own logs print; 'tqdm' / 'log' / 'alive_progress' re-enable a live tracker.",
     ),
-    dns_resolver: Optional[str] = typer.Option(None, "--dns", "--dns-resolver", help="DNS nameserver IP for all lookups (DC discovery, SRV probes). Omit to use system default."),
-    # ---- General ----
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose console output (VERBOSE level: PS1 [Verbose] parity — per-resolution / per-node-add / per-edge dedupe traces). Default is INFO (step summaries)."),
-    silent: bool = typer.Option(False, "--silent", help="Silence all console output. The on-disk logs are still written: collect_full_* (always the complete DEBUG trace of the collector) and collect_issues_* (warnings/errors with tracebacks)."),
-    debug: bool = typer.Option(False, "--debug", help="Debug console output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
+    # --disable-possible-edges and --show-cleartext-passwords change what the
+    # graph/console shows, so they sit under Output alongside the dlt contracts.
+    disable_possible_edges: bool = typer.Option(False, "--disable-possible-edges", rich_help_panel="Output", help="Disable uncertain/possible edges."),
+    show_cleartext_passwords: bool = typer.Option(False, "--show-cleartext-passwords", rich_help_panel="Output", help="Display cleartext passwords when discovered."),
+    tables: Contract = typer.Option(Contract.evolve, rich_help_panel="Output", help="Contract for newly-seen resources/tables."),
+    columns: Contract = typer.Option(Contract.evolve, rich_help_panel="Output", help="Contract for unknown fields."),
+    data_type: Contract = typer.Option(Contract.freeze, rich_help_panel="Output", help="Contract for type mismatches."),
+    # ---- Logging ----
+    verbose: bool = typer.Option(False, "-v", "--verbose", rich_help_panel="Logging", help="Verbose console output (VERBOSE level: PS1 [Verbose] parity — per-resolution / per-node-add / per-edge dedupe traces). Default is INFO (step summaries)."),
+    silent: bool = typer.Option(False, "--silent", rich_help_panel="Logging", help="Silence all console output. The on-disk logs are still written: collect_full_* (always the complete DEBUG trace of the collector) and collect_issues_* (warnings/errors with tracebacks)."),
+    debug: bool = typer.Option(False, "--debug", rich_help_panel="Logging", help="Debug console output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug, silent)
 

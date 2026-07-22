@@ -1,6 +1,6 @@
 # Tickets by Status
 
-> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created+closed ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename (user-verified); closed ope-76f1 (user-verified); created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open; created+closed ope-2f15 — renamed SCCM edge kinds to match schema.json, live-verified) · **Source of truth:** `.tickets/*.md`
+> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created+closed ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename (user-verified); closed ope-76f1 (user-verified); created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open; created+closed ope-2f15 — renamed SCCM edge kinds to match schema.json, live-verified; reorganized collect-sccm `--help` into rich panels (Authentication/Collection/Performance/Output/Logging) and removed the 6 inert CRED-2 flags — removal noted on Ope-t7kv, reserved BloodHound Upload panel noted on Ope-8wi2, created ope-7313 — Testing panel capture, open) · **Source of truth:** `.tickets/*.md`
 >
 > This index groups all 92 tickets by their **verified** status — meaning each ticket was read
 > in full (`gtk show`) and cross-checked against the actual code and git history on the
@@ -21,8 +21,8 @@
 |---|---:|---:|---:|
 | Closed | 51 | **71** | 69 |
 | In&nbsp;Progress | 6 | **5** | 7 |
-| Open | 34 | **22** | 22 |
-| **Total** | **91** | **98** | **98** |
+| Open | 34 | **23** | 23 |
+| **Total** | **91** | **99** | **99** |
 
 > **2026-07-22 additions (not part of the 2026-07-21 audit):** [ope-76f1](.tickets/ope-76f1.md)
 > (`-v`=VERBOSE + `--silent`) and [ope-54be](.tickets/ope-54be.md) (ordered-log per-host grouping fix +
@@ -200,10 +200,11 @@ in `gtk`.
 
 ---
 
-## Open (22 code-verified)
+## Open (23 code-verified)
 
 Tickets with no meaningful implementation found — genuinely not started. All recorded `open`.
 
+- [ope-7313](.tickets/ope-7313.md) — Testing panel: reserve `rich_help_panel`; define its flags (dry-run / auth pre-flight) later *(created 2026-07-22)*
 - [ope-00df](.tickets/ope-00df.md) — Per-file log suppression `--no-diagnostics-log` / `--no-collect-log` (follow-up to ope-76f1) *(created 2026-07-22)*
 - [ope-e10b](.tickets/ope-e10b.md) — Emit `SCCM_HasNetworkAccessAccount` from Local collection (NAA from client WMI); schema.json placeholder with no emitter yet *(created 2026-07-22)*
 - [Ope-0t3h](.tickets/Ope-0t3h.md) — Client Push Installation Issues (CRED-1 / ELEVATE-1)
