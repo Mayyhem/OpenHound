@@ -1,6 +1,6 @@
 # Tickets by Status
 
-> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename, in_progress; created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open) · **Source of truth:** `.tickets/*.md`
+> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created+closed ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename (user-verified); closed ope-76f1 (user-verified); created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open; created+closed ope-2f15 — renamed SCCM edge kinds to match schema.json, live-verified) · **Source of truth:** `.tickets/*.md`
 >
 > This index groups all 92 tickets by their **verified** status — meaning each ticket was read
 > in full (`gtk show`) and cross-checked against the actual code and git history on the
@@ -19,20 +19,23 @@
 
 | Status | Before audit | `gtk` now | Code-true state |
 |---|---:|---:|---:|
-| Closed | 51 | **68** | 66 |
-| In&nbsp;Progress | 6 | **7** | 9 |
+| Closed | 51 | **71** | 69 |
+| In&nbsp;Progress | 6 | **5** | 7 |
 | Open | 34 | **22** | 22 |
-| **Total** | **91** | **97** | **97** |
+| **Total** | **91** | **98** | **98** |
 
 > **2026-07-22 additions (not part of the 2026-07-21 audit):** [ope-76f1](.tickets/ope-76f1.md)
 > (`-v`=VERBOSE + `--silent`) and [ope-54be](.tickets/ope-54be.md) (ordered-log per-host grouping fix +
-> always-DEBUG full log + rename `collect_full_*`/`collect_issues_*` + HTTP content-log truncation) created
-> and set `in_progress` — code + offline tests done, live-run + commit pending. Follow-up
-> [ope-00df](.tickets/ope-00df.md) (per-file `--no-diagnostics-log` / `--no-collect-log`) created `open`. Separately, [ope-cc0f](.tickets/ope-cc0f.md) (rename the
+> always-DEBUG full log + rename `collect_full_*`/`collect_issues_*` + VERBOSE label fix + HTTP content-log
+> truncation) were created and, after the user live-tested and verified them, **closed** — listed under
+> [Closed](#closed-67-code-verified). Follow-up
+> [ope-00df](.tickets/ope-00df.md) (per-file `--no-diagnostics-log` / `--no-collect-log`) remains `open`. Separately, [ope-cc0f](.tickets/ope-cc0f.md) (rename the
 > SOCKS5 pivot flag `--socks-proxy` → `-x` / `--proxy`) was created and **closed** the same day —
-> code + offline tests done, listed under [Closed](#closed-64-code-verified). Also [ope-e10b](.tickets/ope-e10b.md)
+> code + offline tests done, listed under [Closed](#closed-67-code-verified). Also [ope-e10b](.tickets/ope-e10b.md)
 > (emit `SCCM_HasNetworkAccessAccount` from Local collection, reading the NAA from client WMI) created `open` —
-> deferred out of the same-day edge-name schema-alignment change, which only renamed existing edges.
+> deferred out of the same-day edge-name schema-alignment change. That change itself, [ope-2f15](.tickets/ope-2f15.md)
+> (rename SCCM edge kinds to match `schema.json` — `SCCM_`/`MSSQL_` namespacing), was created and, after the user
+> live-tested and verified it, **closed** — listed under [Closed](#closed-67-code-verified).
 
 The 2-ticket gap between "`gtk` now" and "code-true state" is **Ope-f3di** and **Ope-scp1** —
 kept `closed` as *superseded* even though their work isn't actually done. Their scope lives in
@@ -98,10 +101,16 @@ Two tickets were implemented (subagent-driven; plan `docs/superpowers/plans/2026
 
 ---
 
-## Closed (64 code-verified)
+## Closed (67 code-verified)
 
 Tickets whose requested change is actually present in the code. All are now recorded `closed`
 in `gtk`.
+
+**Implemented + closed 2026-07-22** (live-tested and verified by the user this session):
+
+- [ope-76f1](.tickets/ope-76f1.md) — `-v`=VERBOSE (was a no-op INFO) + `--silent` console mute (files still written)
+- [ope-54be](.tickets/ope-54be.md) — Ordered-log per-host grouping fix + always-DEBUG full log + rename (`collect_full_*` / `collect_issues_*`) + VERBOSE label fix + ccmsetup HTTP content-log truncation
+- [ope-2f15](.tickets/ope-2f15.md) — Renamed SCCM edge kinds to match `schema.json` (`SCCM_` prefix on SameHostAs/LocalAdminRequired/CoerceAndRelayToAdminService/CoerceAndRelayToSMB; `MSSQL_CoerceAndRelayToMSSQL` into the MSSQL schema; schema.json `SameAdminsAs`→`AdminsReplicatedTo`). Spun out `SCCM_HasNetworkAccessAccount` to ope-e10b (still open)
 
 - [Ope-6cei](.tickets/Ope-6cei.md) — Concurrency / Parallelism: wire `--threads` into Phase 3 per-host collection
 - [Ope-bmyk](.tickets/Ope-bmyk.md) — Abuse Info on Edges: per-edge abuse-path info + technique IDs in graph output
@@ -179,10 +188,8 @@ in `gtk`.
 
 ---
 
-## In Progress (9 code-verified)
+## In Progress (7 code-verified)
 
-- [ope-76f1](.tickets/ope-76f1.md) — `-v`=VERBOSE (was no-op) + `--silent` console mute *(created 2026-07-22; code + 13 offline tests done, live-run + commit pending)*
-- [ope-54be](.tickets/ope-54be.md) — Ordered-log per-host grouping fix + always-DEBUG full log + rename (`collect_full_*` / `collect_issues_*`) + HTTP content-log truncation *(created 2026-07-22; code + tests done, live-run + commit pending)*
 - [Ope-rhzx](.tickets/Ope-rhzx.md) — Individual Permissions port (role RBAC done, granular per-op not) *(reconciled → in_progress)*
 - [Ope-15m7](.tickets/Ope-15m7.md) — Seed Nodes / Edges audit (AuthUsers seed done, group memberships not) *(reconciled → in_progress)*
 - [Ope-liu7](.tickets/Ope-liu7.md) — System Management Container abuse (GenericAll only, no takeover edges) *(reconciled → in_progress)*

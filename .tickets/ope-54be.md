@@ -1,6 +1,6 @@
 ---
 id: ope-54be
-status: in_progress
+status: closed
 deps: []
 links: []
 created: 2026-07-22T15:20:22Z
@@ -21,3 +21,7 @@ Code + tests complete (not committed; not live-run-verified). Fixed in: collecto
 **2026-07-22T15:56:05Z**
 
 Follow-up (same session): always-DEBUG full log surfaced a latent label bug — VERBOSE (15) was absent from _ORDERED_LEVEL_LABEL so full-log VERBOSE lines rendered 'L15'. Fixed _OrderedLogFileHandler._write_section fallback to use logging.getLevelName(rec.levelno) padded (renders 'VERBOSE'; robust for any named level). Regression test tests/test_per_host_log_blocks.py::test_verbose_records_render_with_level_name_not_l15.
+
+**2026-07-22T16:04:31Z**
+
+Live-tested and verified by user 2026-07-22 (full log groups per-host, always-DEBUG, renamed files, VERBOSE label, HTTP content truncated). Closing.

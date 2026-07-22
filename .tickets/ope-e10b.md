@@ -2,7 +2,7 @@
 id: ope-e10b
 status: open
 deps: []
-links: []
+links: [ope-2f15]
 created: 2026-07-22T15:30:44Z
 type: task
 priority: 3
