@@ -31,11 +31,13 @@ SCCM_ALL_PERMISSIONS = "SCCM_AllPermissions"
 SCCM_ASSIGN_ALL_PERMISSIONS = "SCCM_AssignAllPermissions"
 
 # Stage 4 edge kinds (host correlation + local-admin mesh)
-SAME_HOST_AS = "SameHostAs"
-LOCAL_ADMIN_REQUIRED = "LocalAdminRequired"
+SCCM_SAME_HOST_AS = "SCCM_SameHostAs"
+SCCM_LOCAL_ADMIN_REQUIRED = "SCCM_LocalAdminRequired"
 
-# Stage 5 edge kinds (MSSQL). The string values are already in TRAVERSABLE_EDGE_KINDS,
-# except MSSQL_ServiceAccountFor which CMBP comments out (ps1:2233 — not traversable).
+# Stage 5 edge kinds (MSSQL). These belong to the separately maintained MSSQL OpenGraph
+# schema (not this extension's schema.json), even though the SCCM collector emits them.
+# The string values are already in TRAVERSABLE_EDGE_KINDS, except MSSQL_ServiceAccountFor
+# which CMBP comments out (ps1:2233 — not traversable).
 MSSQL_CONTAINS = "MSSQL_Contains"
 MSSQL_CONTROL_SERVER = "MSSQL_ControlServer"
 MSSQL_CONTROL_DB = "MSSQL_ControlDB"
@@ -48,25 +50,28 @@ MSSQL_SERVICE_ACCOUNT_FOR = "MSSQL_ServiceAccountFor"
 MSSQL_GET_ADMIN_TGS = "MSSQL_GetAdminTGS"
 MSSQL_GET_TGS = "MSSQL_GetTGS"
 
-# Stage 6 edge kinds (coerce-and-relay possible edges).
-COERCE_AND_RELAY_TO_ADMIN_SERVICE = "CoerceAndRelayToAdminService"
-COERCE_AND_RELAY_TO_MSSQL = "CoerceAndRelayToMSSQL"
-COERCE_AND_RELAY_TO_SMB = "CoerceAndRelayToSMB"
+# Stage 6 edge kinds (coerce-and-relay possible edges). The AdminService and SMB relays are
+# SCCM-namespaced (this extension's schema.json); the MSSQL relay is MSSQL-namespaced (the
+# separately maintained MSSQL schema) because its end node is an MSSQL_Login, even though the
+# SCCM collector is what emits it.
+SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE = "SCCM_CoerceAndRelayToAdminService"
+MSSQL_COERCE_AND_RELAY_TO_MSSQL = "MSSQL_CoerceAndRelayToMSSQL"
+SCCM_COERCE_AND_RELAY_TO_SMB = "SCCM_CoerceAndRelayToSMB"
 
 # CMBP traversable allow-list (ConfigManBearPig.ps1:2216-2249, uncommented entries only).
 # Edges whose kind is in this set get properties.traversable = True. Includes future
 # (Stage 3-6) kinds so later stages reuse this one source of truth.
 TRAVERSABLE_EDGE_KINDS = frozenset({
-    "AdminTo", "LocalAdminRequired",
+    "AdminTo", "SCCM_LocalAdminRequired",
     # CMBP's allow-list (ps1:2221) named "CoerceAndRelayNTLMtoSMB", but the function
-    # (ps1:6775) emits "CoerceAndRelayToSMB" — the mismatch left the SMB relay
-    # non-traversable. The port emits CoerceAndRelayToSMB and marks it traversable.
-    "CoerceAndRelayToAdminService", "CoerceAndRelayToMSSQL", "CoerceAndRelayToSMB",
+    # (ps1:6775) emits an SMB relay edge — the mismatch left the SMB relay
+    # non-traversable. The port emits SCCM_CoerceAndRelayToSMB and marks it traversable.
+    "SCCM_CoerceAndRelayToAdminService", "MSSQL_CoerceAndRelayToMSSQL", "SCCM_CoerceAndRelayToSMB",
     "HasSession",
     "MSSQL_Contains", "MSSQL_ControlDB", "MSSQL_ControlServer", "MSSQL_ExecuteOnHost",
     "MSSQL_GetAdminTGS", "MSSQL_GetTGS", "MSSQL_HasLogin", "MSSQL_HostFor",
     "MSSQL_IsMappedTo", "MSSQL_MemberOf",
-    "SameHostAs",
+    "SCCM_SameHostAs",
     "SCCM_AdminsReplicatedTo", "SCCM_AllPermissions", "SCCM_ApplicationAdministrator",
     "SCCM_AssignAllPermissions", "SCCM_Contains", "SCCM_FullAdministrator",
     "SCCM_HasADLastLogonUser", "SCCM_HasClient", "SCCM_HasCurrentUser",

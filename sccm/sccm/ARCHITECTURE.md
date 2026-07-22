@@ -605,19 +605,48 @@ filters/handlers and mutating live handler instances at runtime:
   even pushes/pops the context **per `next()` call** of a DLT resource generator, because DLT interleaves
   generators and a once-around-the-generator context would leak across hosts.
 - **A `VERBOSE` tier between INFO and DEBUG** ([log_context.py:48-59](src/openhound_sccm/log_context.py#L48-L59)),
-  surfaced by `-vv`, gives CMBP's `[Verbose]` per-resolution/per-node traces without DLT/ldap3 internal
-  noise (that's `--debug`).
-- **A per-run diagnostics file** ([`_DiagnosticFileHandler`](src/openhound_sccm/main.py#L535-L585)) captures
+  surfaced by `-v`, gives CMBP's `[Verbose]` per-resolution/per-node traces without DLT/ldap3 internal
+  noise (that's `--debug`). The console ladder is `(none)`=INFO → `-v`=VERBOSE → `--debug`=DEBUG,
+  applied in [`_apply_log_level`](src/openhound_sccm/main.py) by lowering the console handlers.
+- **A console-only mute, `--silent`.** The console handlers and the file handlers are two independent
+  audiences (see the Rich handler vs. the rotating/`_Diagnostic`/`_Ordered` file handlers), so `--silent`
+  gags the terminal *without* darkening the on-disk logs: [`_silence_console_handlers`](src/openhound_sccm/main.py)
+  raises only the console handlers above `CRITICAL` (identified by [`_is_console_handler`](src/openhound_sccm/main.py):
+  not a `FileHandler`, and either a `StreamHandler` or a duck-typed Rich handler with a `.console`), while
+  the **root logger stays at the requested detail level**. That separation is what lets `--silent` *compose*
+  with the verbosity flags — `--silent --debug` is a quiet terminal with DEBUG-level file logs. It's the
+  mirror image of the normal path: same "mutate live handler instances" technique, raising instead of
+  lowering. `--silent` also forces `--progress off`, since the progress tracker renders straight to the
+  console and bypasses logging.
+- **A per-run issues file** (`collect_issues_<ts>.log`, [`_DiagnosticFileHandler`](src/openhound_sccm/main.py)) captures
   every WARNING+ **with full traceback** — even when the warning was logged without one, by injecting
   `sys.exc_info()` if a live exception is in flight, then restoring the record so the console isn't
-  affected. The companion [`_DebugExcInfoFilter`](src/openhound_sccm/log_context.py#L226-L247) does the
-  same on the console in `--debug`.
-- **A human-ordered log** ([`_OrderedLogFileHandler`](src/openhound_sccm/main.py#L612-L715)) solves the
-  interleaving problem: it **buffers** records keyed by the active resource (or host), and flushes each
-  group as one labelled block the moment that resource/host *completes* — driven by completion callbacks
-  fired from the DLT generator wrapper ([log_context.py:359-369](src/openhound_sccm/log_context.py#L359-L369))
-  and from the engine's `on_target_complete` ([log_context.py:136-149](src/openhound_sccm/log_context.py#L136-L149)).
-  The result is a log you can read host-by-host even though collection ran 10-wide.
+  affected. The companion [`_DebugExcInfoFilter`](src/openhound_sccm/log_context.py) does the
+  same on the console in `--debug`. (A clean run writes no issues file — the handler opens lazily.)
+- **A complete, human-ordered full log** (`collect_full_<ts>.log`, [`_OrderedLogFileHandler`](src/openhound_sccm/main.py))
+  is **always written at DEBUG**, independent of the console level: for the duration of a run the collector's
+  own namespaces (`openhound_sccm` + `openhound_collector_common`) are pinned to DEBUG and this handler's level
+  is DEBUG, so a finished collection always has the full trace on disk without a re-run (`--debug` additionally
+  folds `dlt`/`ldap3` internals in, via the root logger). It solves the interleaving problem by **buffering**
+  records keyed by the active resource *or* host, flushing each group as one labelled block the moment that
+  resource/host *completes* — driven by completion callbacks fired from the DLT generator wrapper and the
+  engine's `on_target_complete`. The result is a log you can read host-by-host even though collection ran 10-wide.
+
+  **The two grouping keys — and why the per-host collectors are *not* `@with_log_context`-decorated.** The
+  handler buckets by *resource* when a resource context is set, else by *host*. That split maps onto the two
+  schedulers ([§1](#1-pull-based-dlt-resources--a-push-based-per-host-phased-pipeline)): Stage-1 discovery
+  resources (`ldap_*`, `dns_*`, `local_*`) are DLT generators driven **interleaved**, so they carry
+  `@with_log_context(...)`, which pushes a *resource* context per `next()` and fires the resource-complete
+  callback on exhaustion — one clean per-resource block. The Stage-2 per-host collectors (`collect_registry`,
+  `collect_mssql`, `collect_adminservice`, `collect_wmi`, `collect_http`, `collect_smb`) are the opposite:
+  the engine runs each to exhaustion **inside a `phase_scope(target, phase)` block on one worker thread**
+  ([§2](#2-sequential-phases-per-target-concurrent-across-targets--and-a-sequential-debug-harness)), so
+  `phase_scope` already supplies `[target][phase]`. Decorating them too was an active bug: `with_log_context`
+  set a *resource* context (`func.__name__`, e.g. `"collect_registry"`) that hijacked the bucket key and fired
+  resource-complete **once per (host, phase)** — so the full log filled with repeated `# collect_registry`
+  blocks, each an interleaved fragment, while the intended per-host `flush_host` was a no-op. The fix is to
+  **not** decorate the per-host collectors: with no resource context their records bucket by host and flush
+  once, when the host finishes all its phases. Guarded by [`tests/test_per_host_log_blocks.py`](tests/test_per_host_log_blocks.py).
 - **Runtime tidy-ups of the framework's Rich handler** ([`install_filter`](src/openhound_sccm/log_context.py#L253-L292)
   and [`_strip_version_suffix_from_handlers`](src/openhound_sccm/main.py#L317-L335)): turn off Rich markup
   parsing (so `[mayyhem.com]` isn't eaten as a malformed tag), drop the `file.py:line` column, and swap
@@ -919,7 +948,7 @@ Two small additions land in the `collect` phase to carry information forward to 
 
 CMBP emits "possible" client nodes for devices that have a `CmRcService` SPN in AD (indicating the Remote Control client) but no confirmed SCCM enrollment (`SMS_R_System is_client = True`). The flag that gates this behaviour (`--disable-possible-edges`) is a CLI argument on `openhound collect sccm`, but the separate `openhound preprocess sccm` run has no access to the CLI that produced the raw data.
 
-The solution is the `collection_settings` table described above. `_read_disable_possible` in [transforms.py](src/openhound_sccm/transforms.py) reads `bool_or(disable_possible_edges)` from that table and passes the result to `_node_client_device_possible`, which appends inferred client rows (`is_confirmed_active_client = False`) to `node_client_device` only when the flag is `False`. The inferred-client node id is `upper(object_sid)@root_site_code` — a deterministic, namespaced id that avoids merging with the `Computer` node (raw SID) yet allows the Stage 4 `SameHostAs` edge to link it back to the AD computer object.
+The solution is the `collection_settings` table described above. `_read_disable_possible` in [transforms.py](src/openhound_sccm/transforms.py) reads `bool_or(disable_possible_edges)` from that table and passes the result to `_node_client_device_possible`, which appends inferred client rows (`is_confirmed_active_client = False`) to `node_client_device` only when the flag is `False`. The inferred-client node id is `upper(object_sid)@root_site_code` — a deterministic, namespaced id that avoids merging with the `Computer` node (raw SID) yet allows the Stage 4 `SCCM_SameHostAs` edge to link it back to the AD computer object.
 
 CMBP used a random GUID as the id for possible-client nodes; we use `object_sid@root_site_code` instead so id assignment is stable across repeated collections.
 
@@ -953,7 +982,7 @@ The three `CoerceAndRelay*` edge kinds carry additional context via the `SCCMRel
 
 A final dedup pass (`_graph_edges_dedup`) in the `graph_edges` preproc query groups by `(start_id, end_id, kind)` and array-unions both `collection_source` and the two coercion columns via `list_distinct(flatten(list(...)))` — matching CMBP's `Upsert-Edge` array-merge behaviour (`ps1:2155-2158`).
 
-**`node_computer.smb_signing_source` — SMB-signing probe provenance.** `node_computer` carries a `smb_signing_source VARCHAR[]` column that records which probe(s) observed the host's SMB-signing state: `["SMB-Negotiate"]` (from the unauthenticated SMB2-negotiate check in `smb_computers`), `["RemoteRegistry-SMBSigningCheck"]` (from the registry-based check in `remoteregistry_computers`), or both. This array is array-unioned across sources during the `GROUP BY sid` collapse and is consumed directly by `_edge_coerce_relay_smb` as the `collection_source` for the `CoerceAndRelayToSMB` edge (filtered to the two SMB-signing probe tags). It is not emitted as a node property.
+**`node_computer.smb_signing_source` — SMB-signing probe provenance.** `node_computer` carries a `smb_signing_source VARCHAR[]` column that records which probe(s) observed the host's SMB-signing state: `["SMB-Negotiate"]` (from the unauthenticated SMB2-negotiate check in `smb_computers`), `["RemoteRegistry-SMBSigningCheck"]` (from the registry-based check in `remoteregistry_computers`), or both. This array is array-unioned across sources during the `GROUP BY sid` collapse and is consumed directly by `_edge_coerce_relay_smb` as the `collection_source` for the `SCCM_CoerceAndRelayToSMB` edge (filtered to the two SMB-signing probe tags). It is not emitted as a node property.
 
 ### 11d. Stage 4: client-device dedup and host-correlation edges
 
@@ -961,7 +990,7 @@ Stage 4 adds two new edge kinds and a pre-edge dedup pass, all of which interact
 
 **`_dedup_client_device` — merge real+inferred twins before edges are built.** After `_enrich_client_device` resolves `ad_domain_sid` on real clients (from `SMS_R_System`) and inferred clients carry it from the CmRcService SPN's `object_sid`, the table can contain two rows for the same physical host: a real client (`is_confirmed_active_client = True`, id = SMSID) and its inferred twin (`is_confirmed_active_client = False`, id = `<SID>@root`). `_dedup_client_device` ([transforms.py:1531](src/openhound_sccm/transforms.py#L1531)) groups by `ad_domain_sid` (with a NULL-isolation guard so unresolved real clients are never grouped together), ranks the real client first, and keeps only the top-ranked row. Array columns (`collection_ids`, `collection_names`) are unioned across the group before the inferred row is discarded, so no data is lost. Critically, this runs **before** `_graph_edges_init` and all edge builders — so every edge is built from the deduped table and references only survivors, with no `graph_edges` rewrite needed afterward. This is a deliberate divergence from CMBP's order, where the merge happens after edges are built (`ps1:2269-2311`).
 
-**`_edge_same_host` — bidirectional Computer ↔ SCCM_ClientDevice.** After dedup, each surviving `SCCM_ClientDevice` row whose `ad_domain_sid` matches a `Computer` node's `sid` gets two `SameHostAs` edges (one in each direction). This gives BloodHound paths in both directions (CMBP `ps1:2314-2320`). Because dedup runs first, the edge builder always sees the canonical survivor, never the discarded inferred twin.
+**`_edge_same_host` — bidirectional Computer ↔ SCCM_ClientDevice.** After dedup, each surviving `SCCM_ClientDevice` row whose `ad_domain_sid` matches a `Computer` node's `sid` gets two `SCCM_SameHostAs` edges (one in each direction). This gives BloodHound paths in both directions (CMBP `ps1:2314-2320`). Because dedup runs first, the edge builder always sees the canonical survivor, never the discarded inferred twin.
 
 **`_edge_local_admin_required` — site server → peer site systems.** A computer hosting `SMS Site Server@<site>` is granted local-administrator rights on every other site system in that site. The edge is built set-based from `site_system_roles`, with self-edges and secondary sites excluded (CMBP `ps1:1882-1909`). Both edge kinds carry `collection_source = ['SCCM_Invoke-PostProcessing']` for entity-panel provenance.
 
@@ -1106,7 +1135,7 @@ No change to `_graph_edges_split` is needed — MSSQL node ids are deliberately 
 
 ### 11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node
 
-Stage 6 adds three new edge kinds (`CoerceAndRelayToAdminService`, `CoerceAndRelayToMSSQL`, `CoerceAndRelayToSMB`) and one new synthetic node type. No new framework divergence categories are introduced; Stage 6 extends the existing preproc-only pattern from §11c and the output-split routing from §11f.
+Stage 6 adds three new edge kinds (`SCCM_CoerceAndRelayToAdminService`, `MSSQL_CoerceAndRelayToMSSQL`, `SCCM_CoerceAndRelayToSMB`) and one new synthetic node type. No new framework divergence categories are introduced; Stage 6 extends the existing preproc-only pattern from §11c and the output-split routing from §11f.
 
 **Surgical `--disable-possible-edges` semantics.** The `disable_possible_edges` flag (persisted in `collection_settings`, read by `_read_disable_possible`) already gated Stage 3–4 possible-client nodes. Stage 6 extends it to the three relay builders with a *surgical* two-level gate:
 
@@ -1119,9 +1148,9 @@ This gives operators a single flag to choose between a speculative-complete view
 
 **Lazy Authenticated Users node.** Rather than creating a fixed set of Authenticated Users nodes up front, `_node_authenticated_users` runs *after* all three relay edge builders have inserted into `graph_edges`. It reads the distinct `start_id` values from relay-kind rows and inserts one `Group` row into `node_group` per domain that actually produced at least one relay edge. The node id follows SharpHound's well-known-SID form (`UPPER(FQDN)-S-1-5-11`) so it merges with SharpHound data by id; the `environmentid` is resolved from a co-occurring domain computer's AD domain SID via a join on `_domain_to_sid`. This lazy approach matches CMBP's per-iteration `Upsert-Node` pattern and avoids creating orphan Authenticated Users nodes for domains with no exploitable relay path. The node must be inserted into `node_group` *before* `_node_backfill` and `_graph_edges_split` so it is included in the AD id set and routed to the AD payload correctly.
 
-**`CoerceAndRelayToSMB` traversable bug fix.** ConfigManBearPig's traversable allow-list at `ps1:2221` named the SMB relay kind `CoerceAndRelayNTLMtoSMB`, while the function that emits the edge at `ps1:6775` used `CoerceAndRelayToSMB` — the string mismatch meant the SMB relay edge was stored but never marked traversable. This port emits `CoerceAndRelayToSMB` and includes that exact string in `TRAVERSABLE_EDGE_KINDS`, so all three relay kinds are traversable.
+**`SCCM_CoerceAndRelayToSMB` traversable bug fix.** ConfigManBearPig's traversable allow-list at `ps1:2221` named the SMB relay kind `CoerceAndRelayNTLMtoSMB`, while the function that emits the edge at `ps1:6775` used `CoerceAndRelayToSMB` — the string mismatch meant the SMB relay edge was stored but never marked traversable. This port emits `SCCM_CoerceAndRelayToSMB` and includes that exact string in `TRAVERSABLE_EDGE_KINDS`, so all three relay kinds are traversable.
 
-**Output routing.** All three relay edges touch an AD `Group` start node (Authenticated Users), so they are routed to `graph_edges_ad` (the untagged AD payload) by `_graph_edges_split`. For `CoerceAndRelayToSMB` the end node is also an AD `Computer`, so both endpoints are AD nodes. For `CoerceAndRelayToAdminService` the end is a `SCCM_Site`, and for `CoerceAndRelayToMSSQL` the end is an `MSSQL_Login` — both SCCM-payload nodes — but the AD-start-node rule routes them to the AD payload regardless.
+**Output routing.** All three relay edges touch an AD `Group` start node (Authenticated Users), so they are routed to `graph_edges_ad` (the untagged AD payload) by `_graph_edges_split`. For `SCCM_CoerceAndRelayToSMB` the end node is also an AD `Computer`, so both endpoints are AD nodes. For `SCCM_CoerceAndRelayToAdminService` the end is a `SCCM_Site`, and for `MSSQL_CoerceAndRelayToMSSQL` the end is an `MSSQL_Login` — both SCCM-payload nodes — but the AD-start-node rule routes them to the AD payload regardless.
 
 ### 11i. HTTP version fingerprint from ccmsetup.exe — a new HTTP-phase capability
 
@@ -1166,7 +1195,7 @@ probe in this file.
   `cve_table.lookup_cves(version)` to populate the new `SCCM_Site.versionCVEs` property (the
   SCCMVersionGuesser build/CVE map, `cve_table.BUILD_MAP` / `CVE_MAP`), and
   [`_edge_coerce_relay_adminservice`](src/openhound_sccm/transforms.py#L2880-L2896) reads the same
-  version to **suppress** the `CoerceAndRelayToAdminService` edge on sites confirmed to be SCCM 2509+
+  version to **suppress** the `SCCM_CoerceAndRelayToAdminService` edge on sites confirmed to be SCCM 2509+
   (build ≥ `cve_table.ADMINSERVICE_NTLM_MIN_BUILD` = 9141 — the build where the AdminService starts
   rejecting NTLM). An unknown/unparseable version fails **open**: the edge is kept as a possible edge
   that can't be confirmed mitigated.
@@ -1186,7 +1215,7 @@ probe in this file.
 - **Fail-open gate has a blind spot.** The 2509+ relay suppression only fires on a *confirmed* version.
   If privileged collection is unavailable and the HTTP fingerprint also fails (fetch error, no MP
   confirmed, unrecognized version string), a genuinely-patched 2509+ site still emits the (now
-  inaccurate) `CoerceAndRelayToAdminService` possible edge — correct by design (an unconfirmed
+  inaccurate) `SCCM_CoerceAndRelayToAdminService` possible edge — correct by design (an unconfirmed
   mitigation can't be assumed), but a source of false positives operators should be aware of.
 
 ---
@@ -1306,7 +1335,7 @@ would leave four other protocols leaking traffic straight from the outside box.
   pair), and `context.py::resolve_ip`.
 - **SCCM's own footprint is thin**: the CLI parse/validate
   (`_parse_proxy_or_exit`, `_require_dc_or_dns_for_proxy` — the latter exits(2)
-  when `--socks-proxy` is set without `--dc`/`--dns`, since internal names can't
+  when `--proxy` is set without `--dc`/`--dns`, since internal names can't
   be resolved from the outside box), the install-around-run wrap, and the four
   DNS call sites above. The interception itself carries no SCCM-specific logic,
   so it was built directly in the shared library (see
@@ -1386,6 +1415,10 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-22 | **Renamed five graph edge kinds to match the hand-maintained OpenGraph schema (`schema.json`).** Added the `SCCM_` namespace prefix to `SameHostAs`→`SCCM_SameHostAs`, `LocalAdminRequired`→`SCCM_LocalAdminRequired`, `CoerceAndRelayToAdminService`→`SCCM_CoerceAndRelayToAdminService`, and `CoerceAndRelayToSMB`→`SCCM_CoerceAndRelayToSMB`; moved the SQL relay into the separately maintained MSSQL schema as `CoerceAndRelayToMSSQL`→`MSSQL_CoerceAndRelayToMSSQL` (its end node is an `MSSQL_Login`, so it belongs to the MSSQL schema the operator uploads alongside this one). Reconciled the other direction too: `schema.json` had listed the site-replication edge as `SCCM_SameAdminsAs`, corrected to the code-true `SCCM_AdminsReplicatedTo`. Emission and entity-panel help key off the `kinds/edges.py` constants, so the change centers on the constant *values* + the `TRAVERSABLE_EDGE_KINDS` allow-list, then propagates to the saved cypher queries, README (Edge Reference / TOC / Mermaid), and the offline edge tests. CMBP-history references (the `CoerceAndRelayNTLMtoSMB` allow-list vs `CoerceAndRelayToSMB` emitter mismatch) are left verbatim as historical record. The schema also lists `SCCM_HasNetworkAccessAccount`, which no collector code emits yet — left as a placeholder and tracked in ope-e10b (emit from Local collection, reading the NAA from client WMI). No graph-shape change: same edges, new kind strings. |
+| 2026-07-22 | **Ordered-log per-host grouping fix + always-DEBUG full log + log rename** (ope-54be, §7). Three coupled logging-layer changes. (1) **Grouping bug:** the six Stage-2 per-host collectors were `@with_log_context`-decorated, which set a *resource* context (`func.__name__`) and fired resource-complete once per (host, phase) — so the ordered log filled with repeated `# collect_registry` fragments and the intended per-host `flush_host` was a no-op. Removed the decorator from `collect_registry` / `collect_mssql` / `collect_adminservice` / `collect_wmi` / `collect_http` / `collect_smb` (the engine's `phase_scope(target, phase)` already tags `[target][phase]`); with no resource context their records now bucket by host and flush once per host. Stage-1 discovery resources keep the decorator (DLT drives them interleaved). Regression guard: `tests/test_per_host_log_blocks.py::test_per_host_collectors_do_not_fire_resource_complete`. (2) **Always-DEBUG full log:** the ordered handler is now created at DEBUG and both collector namespaces (`openhound_sccm` + `openhound_collector_common`) are pinned to DEBUG for the run, so the full log always holds the complete collector trace regardless of console level; `dlt`/`ldap3` internals still require `--debug`. (3) **Rename:** `collect_log_* → collect_full_*`, `collect_diagnostics_* → collect_issues_*`; summary labels + README/§7 updated. Separately, truncated the ccmsetup.exe HTTP body-preview debug line in `clients/http.py` to 1024 chars (it dumped multi-MB binary, now always in the full log). The always-DEBUG change also surfaced a latent label bug: VERBOSE (level 15) was missing from `_ORDERED_LEVEL_LABEL`, so those newly-captured lines rendered as `L15` — the handler's fallback now uses `logging.getLevelName` so any named level (VERBOSE included) prints its name (guard: `test_verbose_records_render_with_level_name_not_l15`). |
+| 2026-07-22 | **`-v` now enables VERBOSE (was a no-op) + new `--silent` console mute** (ope-76f1, §7). The `-v`/`--verbose` option changed from a repeatable count (`-v`→INFO no-op, `-vv`→VERBOSE) to a plain boolean that raises the console straight to VERBOSE; the ladder is now `(none)`=INFO → `-v`=VERBOSE → `--debug`=DEBUG, and `-vv` is no longer valid (no-backward-compat rule). Added `--silent`, a **console-only** mute: `_silence_console_handlers` raises just the console handlers above `CRITICAL` (identified by the new `_is_console_handler` helper — not a `FileHandler`, and either a `StreamHandler` or a duck-typed Rich handler with `.console`), leaving the root logger and the two on-disk logs at their detail level. Because the mute is at the *handler* level, `--silent` composes with the verbosity flags — `--silent --debug` = quiet terminal, DEBUG-level file logs — and it also forces `--progress off` (the tracker bypasses logging). `_apply_log_level` gained a `silent` parameter. Offline tests: `tests/test_verbose_silent_flags.py` (13). Follow-up ope-00df tracks per-file `--no-diagnostics-log` / `--no-collect-log` switches. Updated §7 (VERBOSE bullet + new `--silent` bullet), the README verbosity tip + CLI options table. |
+| 2026-07-22 | **Renamed the SOCKS5 pivot flag `--socks-proxy` → `-x` / `--proxy`** (§13). CLI-facing rename only: the option now takes a short `-x` and a long `--proxy`, and the help text is the concise `SOCKS5 proxy address (host:port or socks5://[user:pass@]host:port). Requires --dc or --dns.`. The Python parameter stays named `socks_proxy`, so the `SOURCES__SCCM__SOCKS_PROXY` env var, the `_FLAG_TO_ENV` mapping, `_parse_proxy_or_exit` / `_require_dc_or_dns_for_proxy`, and all downstream plumbing are unchanged. Registered `-x`/`--proxy` in the `_SHORT_OPTIONS_WITH_VALUES` / `_LONG_OPTIONS_WITH_VALUES` typo-detection tables so the suspicious-argument warnings still fire on the new flag. Per the no-backward-compat rule, `--socks-proxy` no longer works. Updated the §13 prose, the README Network row / Limitations / Proxying-pivoting examples, and the two `_parse_proxy_or_exit` error strings. No behavioral change to the interception itself. |
 | 2026-07-21 | **Wired `--nt-hash` / `--ticket` into the LDAP auth path + MSSQL EPA ticket-only warning** (ope-b7b2, subsumes ope-272e). LDAP was the last protocol ignoring pass-the-hash / pass-the-ticket: SCCM's `ADCredentials`/`ADClient` now forward `nt_hash` + `kerberos_ticket` onto the shared `LdapAuth`, so the shared lockout-safe waterfall selects `ntlm_hash` (ldap3 `LM:NT`) or ticket-backed GSSAPI by the same precedence used across SMB/WMI/HTTP (updated [§6](#6-windows-authentication-across-five-protocols) LDAP row). No shared-library change — SCCM's adapter simply stopped dead-ending the credentials. Separately, SCCM's MSSQL phase does only EPA detection, which distinguishes Allowed/Required by forging bogus/missing NTLM channel-binding AV pairs — impossible over impacket's opaque Kerberos login — so `test_epa` now logs a WARNING and skips when a ticket is the *sole* usable credential (explicit creds and current-user SSPI still take precedence and detect EPA normally, since EPA is a server-side/identity-agnostic setting). Pass-the-ticket-for-EPA was deliberately not implemented and no follow-up ticket was opened (owner decision). Offline tests: `tests/test_ad_pth_ptt.py` (3) + `tests/test_mssql_epa.py` (+2). Live-lab validated against `dc.mayyhem.com`: LDAP pass-the-hash bound `auth=ntlm_hash` and pass-the-ticket (runtime-minted `.kirbi`) bound `auth=kerberos`, both LDAPS:636+CBT, authenticated as `MAYYHEM\domainadmin`. |
 | 2026-07-21 | **Recursive GenericAll group expansion on the System Management container** (ope-e191), reconciled against final-review findings the same day. `ldap_system_management_dacl` used to only log a group holding GenericAll on the container — its members, who effectively inherit Full Control, were never discovered as targets. New helper `_expand_group_targets` (updated [§3](#3-recursive-target-discovery-and-collection)) fetches the group's `member` attribute directly (BASE-scope search on the group DN), registers computer members as scan targets (source `LDAP-GenericAllSystemManagement`), logs user members without scanning them, and recurses into nested groups with a `visited` set keyed on **group DN** (not SID, so a SID-less group cycle still terminates) to stop circular nesting. Huge memberships are paged transparently by the shared client's `ldap3` `auto_range` (on by default) — the collector no longer reassembles `member;range=N-M` pages itself; it only warns when a **residual** `member;range=` key survives, meaning auto_range failed to complete. `_parse_sd_generic_all` gained warning/debug logging on its five degraded-SD/ACE branches (too-short SD, out-of-range DACL offset, truncated ACE header, invalid ACE size, short access-mask) so a malformed ACL is distinguishable from a genuinely empty GenericAll set. Target discovery only — no new edges, no schema change, the SD parser stays GenericAll-only. `tests/test_ldap_smc_recursion.py` (5 tests: recursive expansion, circular-nesting termination via DN, unchanged direct-computer regression, auto-range full-membership no-warning, residual-range-key warning). |
 | 2026-07-20 | **Fixed inferred (CmRcService-only) client devices being attached to the CAS** (ope-e739). The `SCCM_HasClient` edge for a "possible" client started from `_root_code` (the CAS in a CAS-topped hierarchy), producing an impossible `CAS → SCCM_ClientDevice` edge — a port-parity bug against CMBP's explicit `siteType -eq "Primary Site"` filter (`ps1:3253-3254`). Two coordinated fixes (updated §11b): preproc `_node_client_device_possible` now stamps `site_code` from the new `_first_primary_code` helper (`MIN(site_code) WHERE site_type = 2`), falling back to the root only when a hierarchy has no Primary; and collect-side `ldap_cmrc_devices` picks a Primary via the new `_pick_client_device_site_code`, using `ctx.primary_site_codes` recorded from MP-capabilities `site_type` during `ldap_management_points_raw`. The node id keeps its `@root_site_code` suffix for namespacing. Targeted offline tests updated/added (`node_client_device_possible_test.py`, `ldap_cmrc_site_code_test.py`); no impact on confirmed clients. |

@@ -41,9 +41,9 @@ def test_gate_suppresses_2509_keeps_older_and_unknown():
 
     _edge_coerce_relay_adminservice(con, s, disable_possible=False)
 
-    assert "CoerceAndRelayToAdminService" not in _kinds_for_site(con, s, "P09")
-    assert "CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "P03")
-    assert "CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "PNK")
+    assert "SCCM_CoerceAndRelayToAdminService" not in _kinds_for_site(con, s, "P09")
+    assert "SCCM_CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "P03")
+    assert "SCCM_CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "PNK")
 
 
 def test_gate_no_node_site_table_fails_open():
@@ -70,4 +70,4 @@ def test_gate_no_node_site_table_fails_open():
 
     _edge_coerce_relay_adminservice(con, s, disable_possible=False)
 
-    assert "CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "X")
+    assert "SCCM_CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "X")

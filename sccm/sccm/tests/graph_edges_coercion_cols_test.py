@@ -10,9 +10,9 @@ def _seed(con):
     # dedup must array-union them (mirrors CMBP Upsert-Edge merge).
     con.execute(
         "INSERT INTO sccm.graph_edges VALUES "
-        "('MAYYHEM.COM-S-1-5-11','PS1','CoerceAndRelayToAdminService',"
+        "('MAYYHEM.COM-S-1-5-11','PS1','SCCM_CoerceAndRelayToAdminService',"
         " ['Post-processing'], ['Coerce A, relay to X'], NULL),"
-        "('MAYYHEM.COM-S-1-5-11','PS1','CoerceAndRelayToAdminService',"
+        "('MAYYHEM.COM-S-1-5-11','PS1','SCCM_CoerceAndRelayToAdminService',"
         " ['Post-processing'], ['Coerce B, relay to X'], NULL),"
         # A non-relay edge with NULL coercion columns must survive as empty lists.
         "('PS1','C1','SCCM_Contains', ['SCCM_Invoke-PostProcessing'], NULL, NULL)"
@@ -25,7 +25,7 @@ def test_dedup_unions_coercion_pairs_and_handles_nulls():
     _graph_edges_dedup(con, "sccm")
     rows = con.execute(
         "SELECT kind, list_sort(coercion_victim_and_relay_target_pairs), coercion_victim_hostnames "
-        "FROM sccm.graph_edges WHERE kind = 'CoerceAndRelayToAdminService'"
+        "FROM sccm.graph_edges WHERE kind = 'SCCM_CoerceAndRelayToAdminService'"
     ).fetchall()
     assert len(rows) == 1
     assert rows[0][1] == ["Coerce A, relay to X", "Coerce B, relay to X"]
@@ -57,4 +57,4 @@ def test_split_carries_coercion_columns_to_ad_payload():
     assert "coercion_victim_hostnames" in sccm_cols
     # The AdminService relay (AuthUsers start) is AD-routed.
     ad_kinds = [r[0] for r in con.execute("SELECT kind FROM sccm.graph_edges_ad").fetchall()]
-    assert "CoerceAndRelayToAdminService" in ad_kinds
+    assert "SCCM_CoerceAndRelayToAdminService" in ad_kinds

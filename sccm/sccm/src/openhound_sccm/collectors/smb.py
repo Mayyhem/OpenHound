@@ -46,7 +46,6 @@ from typing import Any, Iterable, Optional
 from ..clients.smb import check_smb_signing, list_shares
 from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
-from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +198,6 @@ def _classify_shares(shares: list[tuple[str, str]]) -> _ShareClassification:
     )
 
 
-@with_log_context(phase="SMB")
 def collect_smb(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield SMB-derived rows for *target*: a signing fact, then SCCM share facts.
 

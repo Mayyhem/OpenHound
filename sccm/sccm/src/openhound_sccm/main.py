@@ -53,7 +53,7 @@ if TYPE_CHECKING:
     # The runtime import stays deferred inside the functions so importing this
     # module never pulls the shared library in at import time.
     from openhound_collector_common.orchestration import StagePaths
-    # Type-only import: ProxyConfig annotates the --socks-proxy helpers below.
+    # Type-only import: ProxyConfig annotates the --proxy helpers below.
     # The runtime import stays deferred inside _parse_proxy_or_exit for the same reason.
     from openhound_collector_common.proxy import ProxyConfig
 
@@ -193,6 +193,7 @@ _SHORT_OPTIONS_WITH_VALUES: dict[str, str] = {
     "-m": "--collection-methods",
     "-c": "--computers",
     "-t": "--threads",
+    "-x": "--proxy",
 }
 _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--progress",
@@ -219,7 +220,7 @@ _LONG_OPTIONS_WITH_VALUES: set[str] = {
     "--client-name",
     "--create-machine-account",
     "--registration-sleep",
-    "--socks-proxy",
+    "--proxy",
     "--dns",
     "--dns-resolver",
 }
@@ -229,6 +230,10 @@ _SENSITIVE_OPTIONS: set[str] = {
     "--machine-pass",
     "--nt-hash",
     "--ticket",
+    # A proxy address can embed credentials (socks5://user:pass@host:port),
+    # so mask it in the split-value warnings just like a password.
+    "-x",
+    "--proxy",
 }
 
 
@@ -321,17 +326,54 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
             os.environ[env_name] = str(value)
 
 
-def _apply_log_level(verbose: int, debug: bool) -> None:
-    """Adjust console logging based on verbosity flags + install the
-    ``[target][phase]`` prefix filter.
+# A level above CRITICAL (50) that no record can ever reach — used to mute a
+# console handler without detaching it. Reversible and in keeping with this
+# extension's "mutate live handler instances" approach (see ARCHITECTURE §7).
+_CONSOLE_MUTE_LEVEL = logging.CRITICAL + 1
 
-    (no flags) → INFO    (collection-step summaries by default)
-    ``-v``      → INFO   (same as default; kept for backwards compatibility)
-    ``-vv``     → VERBOSE (PS1 ``[Verbose]`` parity tier: per-AD-resolution, per-
-                  node-add, per-edge dedupe traces)
-    ``--debug`` → DEBUG  (everything, including dlt and ldap3 internals)
 
-    Highest-set wins.
+def _is_console_handler(handler: logging.Handler) -> bool:
+    """True for handlers that write to the terminal — the framework's
+    ``RichHandler`` (CLI mode) or its stdout ``StreamHandler`` (container mode) —
+    and False for on-disk sinks (the rotating JSON file, plus this extension's
+    ``_DiagnosticFileHandler`` / ``_OrderedLogFileHandler``).
+
+    ``FileHandler`` is a ``StreamHandler`` subclass, so it must be excluded first.
+    ``RichHandler`` is *not* a ``StreamHandler``, so it's matched by duck-typing
+    on its ``.console`` attribute (avoids importing rich just to isinstance it).
+    """
+    if isinstance(handler, logging.FileHandler):
+        return False
+    return isinstance(handler, logging.StreamHandler) or hasattr(handler, "console")
+
+
+def _silence_console_handlers() -> None:
+    """Mute every console handler on the root / ``dlt`` / ``openhound`` loggers by
+    raising it above CRITICAL. File handlers are left untouched, so ``--silent``
+    gags the terminal while the on-disk logs keep recording."""
+    for logger_name in ("", "dlt", "openhound"):
+        for handler in logging.getLogger(logger_name).handlers:
+            if _is_console_handler(handler):
+                logger.debug("Silencing console handler %r (--silent)", handler)
+                handler.setLevel(_CONSOLE_MUTE_LEVEL)
+
+
+def _apply_log_level(verbose: bool, debug: bool, silent: bool) -> None:
+    """Set the console log level from the verbosity flags — or mute the console
+    entirely with ``--silent`` — and install the ``[target][phase]`` prefix filter.
+
+    (no flags) → INFO     (collection-step summaries)
+    ``-v``      → VERBOSE  (PS1 ``[Verbose]`` parity tier: per-AD-resolution,
+                  per-node-add, per-edge dedupe traces)
+    ``--debug`` → DEBUG    (everything, including dlt and ldap3 internals)
+
+    ``--debug`` outranks ``-v``. ``--silent`` silences the *console only*: the
+    console handlers are raised above CRITICAL so nothing prints, while the root
+    logger stays at the requested detail level so the on-disk logs
+    (``collect_full_*`` / ``collect_issues_*``) keep recording. ``--silent``
+    therefore composes with ``-v`` / ``--debug`` — e.g. ``--silent --debug`` is a
+    quiet terminal with DEBUG-level file logs. (The full log always captures the
+    collector's own DEBUG regardless; ``--debug`` additionally adds dlt/ldap3.)
 
     The framework's default config uses a ``RichHandler`` (or stdout
     ``StreamHandler`` in container mode) wired up by
@@ -344,31 +386,38 @@ def _apply_log_level(verbose: int, debug: bool) -> None:
 
     if debug:
         level_name, level = "DEBUG", logging.DEBUG
-    elif verbose >= 2:
+    elif verbose:
         level_name, level = "VERBOSE", VERBOSE
     else:
         level_name, level = "INFO", logging.INFO
 
-    if level_name is not None:
-        os.environ["RUNTIME__LOG_LEVEL"] = level_name
-        os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
-        root = logging.getLogger()
-        # Lower the root logger so records of the requested level can reach
-        # any handler. Existing file handlers keep their own level.
-        if root.level == 0 or root.level > level:
-            root.setLevel(level)
+    os.environ["RUNTIME__LOG_LEVEL"] = level_name
+    os.environ["RUNTIME__LOG_CLI_LEVEL"] = level_name
+    root = logging.getLogger()
+    # Lower the root logger so records of the requested level can reach any
+    # handler. This is also what keeps --silent's on-disk logs at full detail:
+    # only the console handlers get muted below, never the root logger. Existing
+    # file handlers keep their own level.
+    if root.level == 0 or root.level > level:
+        root.setLevel(level)
+
+    if silent:
+        # Console-only mute — see _silence_console_handlers. Skip the level-lowering
+        # loop below entirely so the terminal handlers stay muted.
+        _silence_console_handlers()
+    else:
         for log in (root, logging.getLogger("dlt")):
             for handler in log.handlers:
                 if handler.level == 0 or handler.level > level:
                     handler.setLevel(level)
-        # The OpenHound framework's CLI handler uses ``OpenHoundRichFormatter``
-        # (see ``openhound/core/logging.py:170``) which appends
-        # `` (openhound_version=<v>)`` to every line. Swap the formatter
-        # for one that produces the same ``time=…, msg=…`` shape minus
-        # that suffix — keeps the framework's preferred format without
-        # touching OpenHound code. The JSON file handler keeps its own
-        # formatter so the structured log is untouched.
-        _strip_version_suffix_from_handlers()
+    # The OpenHound framework's CLI handler uses ``OpenHoundRichFormatter``
+    # (see ``openhound/core/logging.py:170``) which appends
+    # `` (openhound_version=<v>)`` to every line. Swap the formatter
+    # for one that produces the same ``time=…, msg=…`` shape minus
+    # that suffix — keeps the framework's preferred format without
+    # touching OpenHound code. The JSON file handler keeps its own
+    # formatter so the structured log is untouched.
+    _strip_version_suffix_from_handlers()
 
     install_filter()
 
@@ -604,7 +653,7 @@ def _require_domain_or_explain(flag_kwargs: dict) -> None:
 
 
 def _parse_proxy_or_exit(socks_proxy: Optional[str]) -> Optional["ProxyConfig"]:
-    """Parse --socks-proxy into a ProxyConfig, or exit(2) with a clear error."""
+    """Parse --proxy into a ProxyConfig, or exit(2) with a clear error."""
     from openhound_collector_common.proxy import SocksError, parse_proxy_address
     if not socks_proxy:
         return None
@@ -613,7 +662,7 @@ def _parse_proxy_or_exit(socks_proxy: Optional[str]) -> Optional["ProxyConfig"]:
         logger.info("SOCKS5 proxy configured: %s:%s", cfg.host, cfg.port)
         return cfg
     except SocksError as ex:
-        logger.error("Invalid --socks-proxy value %r: %s", socks_proxy, ex)
+        logger.error("Invalid --proxy value %r: %s", socks_proxy, ex)
         raise typer.Exit(2)
 
 
@@ -625,7 +674,7 @@ def _require_dc_or_dns_for_proxy(flag_kwargs: dict, proxy: Optional["ProxyConfig
         logger.debug("_require_dc_or_dns_for_proxy: DC/DNS pin present; ok")
         return
     logger.error(
-        "--socks-proxy requires --dc <ip/host> or --dns <internal-resolver-ip>: "
+        "--proxy requires --dc <ip/host> or --dns <internal-resolver-ip>: "
         "target names can't be resolved from the outside box under a pivot."
     )
     raise typer.Exit(2)
@@ -795,7 +844,10 @@ class _OrderedLogFileHandler(logging.Handler):
             self._path.parent.mkdir(parents=True, exist_ok=True)
             lines: list[str] = [f"\n{'=' * 72}\n# {resource_name}\n{'=' * 72}\n"]
             for rec in records:
-                label = _ORDERED_LEVEL_LABEL.get(rec.levelno) or f"L{rec.levelno:<6}"
+                # Fall back to the registered level name (padded) for any level not
+                # in the table above — notably VERBOSE (15), which the full log now
+                # captures — so it renders "VERBOSE" rather than a bare "L15".
+                label = _ORDERED_LEVEL_LABEL.get(rec.levelno) or f"{logging.getLevelName(rec.levelno):<8}"
                 ts = datetime.datetime.fromtimestamp(rec.created).strftime(_ORDERED_TS_FMT)
                 lines.append(f"{label} time={ts}, msg={rec.msg}\n")
                 if rec.exc_info and rec.exc_info[0] is not None:
@@ -982,29 +1034,30 @@ def collect_sccm(
     registration_sleep: int = typer.Option(10, "--registration-sleep", help="Seconds to wait post-registration before policy request. Not yet implemented."),
     # ---- Network ----
     socks_proxy: Optional[str] = typer.Option(
-        None, "--socks-proxy",
-        help="Route ALL collection traffic through a SOCKS5 proxy. Forms: "
-             "socks5://[user:pass@]host:port or bare host:port. Requires --dc "
-             "or --dns (internal names can't be resolved locally under a pivot).",
+        None, "-x", "--proxy",
+        help="SOCKS5 proxy address (host:port or "
+             "socks5://[user:pass@]host:port). Requires --dc or --dns.",
     ),
     dns_resolver: Optional[str] = typer.Option(None, "--dns", "--dns-resolver", help="DNS nameserver IP for all lookups (DC discovery, SRV probes). Omit to use system default."),
     # ---- General ----
-    verbose: int = typer.Option(0, "-v", "--verbose", count=True, help="Verbose output. -v=INFO (step summaries), -vv=VERBOSE (PS1 [Verbose] parity: per-resolution / per-node-add / per-edge dedupe traces)."),
-    debug: bool = typer.Option(False, "--debug", help="Debug output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
+    verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose console output (VERBOSE level: PS1 [Verbose] parity — per-resolution / per-node-add / per-edge dedupe traces). Default is INFO (step summaries)."),
+    silent: bool = typer.Option(False, "--silent", help="Silence all console output. The on-disk logs are still written: collect_full_* (always the complete DEBUG trace of the collector) and collect_issues_* (warnings/errors with tracebacks)."),
+    debug: bool = typer.Option(False, "--debug", help="Debug console output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
-    _apply_log_level(verbose, debug)
+    _apply_log_level(verbose, debug, silent)
 
     _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    log_path = output_path / f"collect_diagnostics_{_ts}.log"
+    log_path = output_path / f"collect_issues_{_ts}.log"
     _diag = _DiagnosticFileHandler(log_path)
 
-    # Ordered log — same records as the console, written resource-by-resource
-    # in completion order rather than dlt's interleaved round-robin order.
-    _ordered_log_path = output_path / f"collect_log_{_ts}.log"
-    _root_level = logging.root.level or logging.WARNING
-    _ordered_level = min(_root_level, logging.INFO)  # floor at INFO; lower if -v/-vv/--debug
-    _ordered = _OrderedLogFileHandler(_ordered_log_path, level=_ordered_level)
+    # Full log — the complete ordered record, written host-by-host (Stage 2) and
+    # resource-by-resource (Stage 1) in completion order rather than dlt's
+    # interleaved round-robin order. Always at DEBUG: the collector's own namespaces
+    # are pinned to DEBUG below, so a finished run always has the full trace on disk
+    # regardless of the console level (dlt / ldap3 internals still require --debug).
+    _ordered_log_path = output_path / f"collect_full_{_ts}.log"
+    _ordered = _OrderedLogFileHandler(_ordered_log_path, level=logging.DEBUG)
 
     from .log_context import (
         register_host_complete_callback,
@@ -1016,13 +1069,20 @@ def collect_sccm(
     logging.root.addHandler(_ordered)
     register_resource_complete_callback(_ordered.flush_resource)
     register_host_complete_callback(_ordered.flush_host)
-    # Lower the openhound_sccm namespace to DEBUG so companion debug lines emitted
-    # inside except blocks reach the file handler. Console handlers (pinned to WARNING
-    # by _apply_log_level) are unaffected — the file handler's own emit() guard drops
-    # any debug record that is NOT inside an active exception context.
-    _oh_logger = logging.getLogger("openhound_sccm")
-    _oh_original_level = _oh_logger.level
-    _oh_logger.setLevel(logging.DEBUG)
+    # Pin the collector's own namespaces (this extension + its shared library) to
+    # DEBUG so their DEBUG/VERBOSE records propagate to the file handlers regardless
+    # of the console level. The full log (level=DEBUG) captures them all; the console
+    # handlers keep their own level (set by _apply_log_level) so nothing extra prints;
+    # the issues handler's emit() guard still keeps only WARNING+ (plus companion
+    # DEBUG lines emitted inside an active exception). dlt / ldap3 stay at the root
+    # level, so their internals reach the full log only under --debug.
+    _debug_loggers = [
+        logging.getLogger("openhound_sccm"),
+        logging.getLogger("openhound_collector_common"),
+    ]
+    _debug_logger_levels = [(lg, lg.level) for lg in _debug_loggers]
+    for lg in _debug_loggers:
+        lg.setLevel(logging.DEBUG)
     try:
         _warn_for_suspicious_cli_arguments()
         flag_kwargs = locals()
@@ -1061,7 +1121,9 @@ def collect_sccm(
             set_shared_ad_cache({})
             set_shared_discovered_domains(set())
 
-            collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=_resolve_progress(progress))
+            # --silent also mutes the progress tracker (it renders straight to the
+            # console, bypassing logging), so force it off regardless of --progress.
+            collector = Collector(name=app.name, output_path=output_path, resources=resources, progress=_resolve_progress(ProgressOption.off if silent else progress))
             ctx = CollectContext(pipeline=collector)
 
             src = sccm_source()
@@ -1108,14 +1170,15 @@ def collect_sccm(
                 discovery_counts, per_host_counts, per_host_expected, output_path, run_all=run_all
             )
     finally:
-        _oh_logger.setLevel(_oh_original_level)
+        for lg, lvl in _debug_logger_levels:
+            lg.setLevel(lvl)
         unregister_resource_complete_callback(_ordered.flush_resource)
         unregister_host_complete_callback(_ordered.flush_host)
         _ordered.close()  # flushes any in-flight buffers before removal
         logging.root.removeHandler(_ordered)
         logging.root.removeHandler(_diag)
         if _ordered_log_path.exists():
-            logger.info("Collection log: %s", _ordered_log_path)
+            logger.info("Full log: %s", _ordered_log_path)
         if _diag.warning_count or _diag.error_count:
             w, e = _diag.warning_count, _diag.error_count
             parts = []
@@ -1370,18 +1433,18 @@ def _log_all_output_locations(
     # if a WARNING+ was emitted — so a clean run has no diagnostics file to list.
     # Each line is therefore guarded on existence.
     if collect_log_path.exists():
-        logger.info("    Collection log:      %s", collect_log_path)
+        logger.info("    Full log:            %s", collect_log_path)
     else:
-        logger.debug("Collection log not found at %s; omitting from summary.", collect_log_path)
+        logger.debug("Full log not found at %s; omitting from summary.", collect_log_path)
     if collect_diag_path.exists():
         note = (
             f"{diag_issue_count} warning(s)/error(s), with tracebacks"
             if diag_issue_count
             else "no warnings/errors"
         )
-        logger.info("    Diagnostics log:     %s  (%s)", collect_diag_path, note)
+        logger.info("    Issues log:          %s  (%s)", collect_diag_path, note)
     else:
-        logger.debug("Diagnostics log not found at %s; omitting from summary.", collect_diag_path)
+        logger.debug("Issues log not found at %s; omitting from summary.", collect_diag_path)
 
     logger.info("    Lookup DB:           %s", paths.lookup_db)
 

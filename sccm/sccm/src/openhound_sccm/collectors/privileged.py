@@ -29,7 +29,6 @@ from ..clients.http import ErrorClass, HttpClient
 from ..clients.http_auth import AuthMode
 from ..clients.wmi import WmiClient
 from ..context import SourceContext
-from ..log_context import with_log_context
 from .sms_rows import (
     _prop,
     _row,
@@ -352,7 +351,6 @@ def _collect(run: _Run, target: str) -> Iterator[tuple[str, dict]]:
     logger.info("%s collection completed for %s (site %s)", run.name, target, run.site_code)
 
 
-@with_log_context(phase="AdminService")
 def collect_adminservice(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield raw AdminService rows for one target, or nothing if it isn't a
     reachable SMS provider (the SMS_Identification gate fails)."""
@@ -372,7 +370,6 @@ def collect_adminservice(target: str, ctx: SourceContext) -> Iterable[tuple[str,
         client.close()
 
 
-@with_log_context(phase="WMI")
 def collect_wmi(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield raw WMI rows for one target, or nothing if it isn't a reachable SMS
     Provider over WMI. Runs only when AdminService did not already reach this host

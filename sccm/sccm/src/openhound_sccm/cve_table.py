@@ -8,7 +8,7 @@ https://github.com/synacktiv/SCCMVersionGuesser/blob/main/SCCMVersionGuesser.py)
 ``SCCM_Site`` node's ``versionCVEs`` property from the site's ``version`` (sourced from
 privileged AdminService/WMI collection or the unauthenticated HTTP ccmsetup.exe
 fingerprint). ``ADMINSERVICE_NTLM_MIN_BUILD`` is also consumed by ``transforms.py`` to
-gate the ``CoerceAndRelayToAdminService`` edge (SCCM 2509+ rejects NTLM at the AdminService).
+gate the ``SCCM_CoerceAndRelayToAdminService`` edge (SCCM 2509+ rejects NTLM at the AdminService).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import Optional
 
 # SCCM 2509 (build 9141) and later reject NTLM at the AdminService, mitigating the
 # coerce-and-relay-to-AdminService attack (Misconfiguration Manager TAKEOVER-5). Used by
-# transforms.py to gate the CoerceAndRelayToAdminService edge.
+# transforms.py to gate the SCCM_CoerceAndRelayToAdminService edge.
 ADMINSERVICE_NTLM_MIN_BUILD = 9141
 
 

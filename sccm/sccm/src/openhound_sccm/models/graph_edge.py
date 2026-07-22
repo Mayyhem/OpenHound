@@ -24,9 +24,9 @@ from openhound_collector_common.graph.graph_edge import GraphEdge as _BaseGraphE
 from ..edge_help import EDGE_HELP
 from ..graph import SCCMEdgeProperties, SCCMRelayEdgeProperties
 from ..kinds.edges import (
-    COERCE_AND_RELAY_TO_ADMIN_SERVICE,
-    COERCE_AND_RELAY_TO_MSSQL,
-    COERCE_AND_RELAY_TO_SMB,
+    MSSQL_COERCE_AND_RELAY_TO_MSSQL,
+    SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+    SCCM_COERCE_AND_RELAY_TO_SMB,
     TRAVERSABLE_EDGE_KINDS,
 )
 
@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 
 # The only edge kinds that carry coerce-and-relay context lists.
 _RELAY_KINDS = frozenset({
-    COERCE_AND_RELAY_TO_ADMIN_SERVICE,
-    COERCE_AND_RELAY_TO_MSSQL,
-    COERCE_AND_RELAY_TO_SMB,
+    SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+    MSSQL_COERCE_AND_RELAY_TO_MSSQL,
+    SCCM_COERCE_AND_RELAY_TO_SMB,
 })
 
 

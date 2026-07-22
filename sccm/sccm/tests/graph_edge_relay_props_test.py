@@ -7,7 +7,7 @@ def test_relay_kind_emits_relay_properties_with_coercion_lists():
     row = GraphEdge(
         start_id="MAYYHEM.COM-S-1-5-11",
         end_id="PS1",
-        kind=ek.COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+        kind=ek.SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE,
         collection_source=["Post-processing"],
         coercion_victim_and_relay_target_pairs=["Coerce SS01.mayyhem.com, relay to PROV01.mayyhem.com"],
         coercion_victim_hostnames=None,
@@ -26,7 +26,7 @@ def test_smb_relay_carries_victim_hostnames():
     row = GraphEdge(
         start_id="MAYYHEM.COM-S-1-5-11",
         end_id="S-1-5-21-1-2-3-1104",
-        kind=ek.COERCE_AND_RELAY_TO_SMB,
+        kind=ek.SCCM_COERCE_AND_RELAY_TO_SMB,
         collection_source=["SMB-Negotiate"],
         coercion_victim_and_relay_target_pairs=None,
         coercion_victim_hostnames=["SS01.mayyhem.com"],

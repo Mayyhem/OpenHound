@@ -6,7 +6,6 @@ from typing import Iterable, Any, Optional
 from ..clients.smb import negotiated_signing_required
 from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
-from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +295,6 @@ class _RegistryProbe:
             return None
 
 
-@with_log_context(phase="RemoteRegistry")
 def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield one row per (host, role) discovered via remote registry.
 

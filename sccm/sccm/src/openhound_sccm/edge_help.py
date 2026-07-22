@@ -817,7 +817,7 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/design-a-hierarchy-of-sites",
         ],
     ),
-    ek.SAME_HOST_AS: EdgeHelp(
+    ek.SCCM_SAME_HOST_AS: EdgeHelp(
         general=(
             "This indicates that the source and target nodes represent the same physical "
             "host: an Active Directory computer object and its corresponding SCCM client "
@@ -841,7 +841,7 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "https://learn.microsoft.com/en-us/intune/configmgr/core/clients/manage/client-installation-methods",
         ],
     ),
-    ek.LOCAL_ADMIN_REQUIRED: EdgeHelp(
+    ek.SCCM_LOCAL_ADMIN_REQUIRED: EdgeHelp(
         general=(
             "This indicates that the source computer (an SCCM site server) has local "
             "administrator rights on the target computer (another site system in the same "
@@ -874,7 +874,7 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),
-    ek.COERCE_AND_RELAY_TO_ADMIN_SERVICE: EdgeHelp(
+    ek.SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE: EdgeHelp(
         general=(
             "A Site Server can be coerced into authenticating to an SMS Provider whose "
             "AdminService accepts NTLM (inbound NTLM is not restricted), allowing the coerced "
@@ -943,7 +943,7 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),
-    ek.COERCE_AND_RELAY_TO_MSSQL: EdgeHelp(
+    ek.MSSQL_COERCE_AND_RELAY_TO_MSSQL: EdgeHelp(
         general=(
             "A computer with a sysadmin login on the SCCM site database can be coerced into "
             "authenticating to the site database server, whose MSSQL service does not enforce "
@@ -1003,7 +1003,7 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files",
         ],
     ),
-    ek.COERCE_AND_RELAY_TO_SMB: EdgeHelp(
+    ek.SCCM_COERCE_AND_RELAY_TO_SMB: EdgeHelp(
         general=(
             "A Site Server can be coerced into authenticating to a site system that does not "
             "require SMB signing, allowing the coerced authentication to be relayed over SMB "

@@ -115,7 +115,7 @@ unit-test stub above.)
 flags — see `openhound collect sccm --help`), so a single command with a
 comma-separated method list is equivalent to repeating the command per method,
 but the run-per-method form below makes it easy to isolate which protocol's
-proxy log entry corresponds to which run. `--socks-proxy` requires `--dc` or
+proxy log entry corresponds to which run. `--proxy` (`-x`) requires `--dc` or
 `--dns` (an internal-name pin — the collector cannot resolve mayyhem.com names
 locally once the proxy is up), and credentials come from `debug_epa_matrix.py`
 (don't hardcode them here).
@@ -126,7 +126,7 @@ uv run openhound collect sccm ./out \
   -d mayyhem.com --dc dc.mayyhem.com \
   -u <user> -p <password> \
   -c ps1-mp.mayyhem.com --threads 1 \
-  --socks-proxy socks5://127.0.0.1:1080 -m LDAP -vv
+  --proxy socks5://127.0.0.1:1080 -m LDAP -v
 
 # Repeat with -m SMB, -m HTTP, -m AdminService, -m MSSQL (or combine as
 # -m LDAP,SMB,HTTP,AdminService,MSSQL for a single run once each is confirmed
@@ -135,10 +135,10 @@ uv run openhound collect sccm ./out \
   -d mayyhem.com --dc dc.mayyhem.com \
   -u <user> -p <password> \
   -c ps1-mp.mayyhem.com --threads 1 \
-  --socks-proxy socks5://127.0.0.1:1080 -m SMB -vv
+  --proxy socks5://127.0.0.1:1080 -m SMB -v
 ```
 
-Use `ps1-sms.mayyhem.com` as the `-c`/`--sms` target for the AdminService/HTTP
+Use `ps1-sms.mayyhem.com` as the `-c` target for the AdminService/HTTP
 methods (per the lab notes: it's the live AdminService — 200 when the SMS
 Provider is up; an empty 500 is a transient post-boot warm-up; it's often
 powered off, so check port 443 first).
@@ -149,7 +149,7 @@ powered off, so check port 443 first).
 uv run openhound collect sccm ./out \
   -d mayyhem.com --dns <internal-resolver-ip> \
   -c ps1-mp.mayyhem.com --threads 1 \
-  --socks-proxy socks5://127.0.0.1:1080 -m LDAP -vv
+  --proxy socks5://127.0.0.1:1080 -m LDAP -v
 ```
 
 ### What to verify at each step

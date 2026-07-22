@@ -10,7 +10,6 @@ from typing import Any, Iterable
 
 from ..clients.mssql_epa import test_epa
 from ..context import SourceContext
-from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +25,11 @@ def _check_port(hostname: str, port: int, timeout: float = 3.0) -> bool:
         return False
 
 
-@with_log_context(phase="MSSQL")
 def collect_mssql(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield one row per MSSQL host that responds to probing on TCP/1433.
 
     EPA detection is performed via NTLM login probes (explicit credentials or
-    current-user SSPI). EPA enforcement drives the CoerceAndRelayToMSSQL derived
+    current-user SSPI). EPA enforcement drives the MSSQL_CoerceAndRelayToMSSQL derived
     edges, so hosts not listening on 1433 silently yield no row.
     """
     if not ctx.method_enabled("MSSQL"):

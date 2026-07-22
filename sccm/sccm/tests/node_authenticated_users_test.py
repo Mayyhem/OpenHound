@@ -4,7 +4,7 @@ from openhound_sccm.transforms import (
     _graph_edges_init, _edge_coerce_relay_adminservice, _node_authenticated_users,
 )
 from openhound_sccm.models.group import GroupNode
-from openhound_sccm.kinds.edges import COERCE_AND_RELAY_TO_MSSQL
+from openhound_sccm.kinds.edges import MSSQL_COERCE_AND_RELAY_TO_MSSQL
 
 
 def _seed(con):
@@ -61,7 +61,7 @@ def test_group_model_emits_authusers_with_domain_environmentid():
 def test_authenticated_users_built_from_non_adminservice_relay_kind():
     """Proves the relay_kinds IN-clause covers MSSQL (not just AdminService).
 
-    Seeds a CoerceAndRelayToMSSQL edge directly into graph_edges (start_id already in
+    Seeds a MSSQL_CoerceAndRelayToMSSQL edge directly into graph_edges (start_id already in
     AuthUsers form) plus the matching node_computer row so _domain_to_sid resolves, then
     confirms _node_authenticated_users inserts the AuthUsers node."""
     con = duckdb.connect()
@@ -79,7 +79,7 @@ def test_authenticated_users_built_from_non_adminservice_relay_kind():
     # Seed a MSSQL relay edge whose start_id is the AuthUsers form for corp.example.com.
     con.execute(
         f"INSERT INTO sccm.graph_edges VALUES "
-        f"('CORP.EXAMPLE.COM-S-1-5-11', 'some-login-id', '{COERCE_AND_RELAY_TO_MSSQL}', "
+        f"('CORP.EXAMPLE.COM-S-1-5-11', 'some-login-id', '{MSSQL_COERCE_AND_RELAY_TO_MSSQL}', "
         f"['MSSQL-ScanForEPA'], ['Coerce DB01.corp.example.com, relay to db01:1433'], NULL)"
     )
     _node_authenticated_users(con, "sccm")

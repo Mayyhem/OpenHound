@@ -41,7 +41,7 @@ def test_mssql_relay_default_emits_when_epa_null():
     start, end, kind, csrc, pairs = rows[0]
     assert start == "MAYYHEM.COM-S-1-5-11"
     assert end == "MAYYHEM\\SS01$@S-1-5-21-1-2-3-5001:1433"
-    assert kind == "CoerceAndRelayToMSSQL"
+    assert kind == "MSSQL_CoerceAndRelayToMSSQL"
     assert csrc == ["MSSQL-ScanForEPA"]  # EPA sources only
     assert pairs == ["Coerce SS01.mayyhem.com, relay to SQL01.mayyhem.com:1433"]
 

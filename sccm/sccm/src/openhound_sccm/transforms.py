@@ -1605,7 +1605,7 @@ def _dedup_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     NULL ad_domain_sid rows (real clients whose SID could not be resolved) are never
     grouped: the composite partition key isolates each by smsid, so distinct unresolved
-    devices are preserved (and simply won't get a SameHostAs edge — matches CMBP).
+    devices are preserved (and simply won't get a SCCM_SameHostAs edge — matches CMBP).
     """
     before = (con.execute(f"SELECT count(*) FROM {schema}.node_client_device").fetchone() or (0,))[0]
     con.execute(
@@ -1888,7 +1888,7 @@ def _node_client_device_possible(
 ) -> None:
     """Append inferred possible-client SCCM_ClientDevice rows from ldap_cmrc_devices
     (CMBP ps1:3272, fixed to a deterministic id). id = upper(object_sid)@root — its own
-    namespace, so it never merges with the Computer node (raw SID) and Stage 4 SameHostAs
+    namespace, so it never merges with the Computer node (raw SID) and Stage 4 SCCM_SameHostAs
     can later dedup it against a real client via ad_domain_sid. site_code (which the
     HasClient edge starts from) is the first Primary site, not the root — a CAS root
     cannot own clients (CMBP ps1:3253-3254). Gated by --disable-possible-edges and on a
@@ -2734,23 +2734,23 @@ def _edge_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) ->
 
 
 def _edge_same_host(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Computer <-> SCCM_ClientDevice SameHostAs, both directions (CMBP ps1:2314-2320).
+    """Computer <-> SCCM_ClientDevice SCCM_SameHostAs, both directions (CMBP ps1:2314-2320).
 
     Join the Computer node id (sid) to the deduped client device's ad_domain_sid.
     Two rows per match. CMBP set no collectionSource; the port tags
     'SCCM_Invoke-PostProcessing' for entity-panel provenance.
     """
-    from .kinds.edges import SAME_HOST_AS
+    from .kinds.edges import SCCM_SAME_HOST_AS
     _safe(con, "edge_same_host",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"SELECT computer.sid AS start_id, dev.smsid AS end_id, "
-          f"'{SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
           f"FROM {schema}.node_computer computer "
           f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
           f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL "
           f"UNION ALL "
           f"SELECT dev.smsid AS start_id, computer.sid AS end_id, "
-          f"'{SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
           f"FROM {schema}.node_computer computer "
           f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
           f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL")
@@ -2770,7 +2770,7 @@ def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> N
     Site codes are extracted from the 'Role@SiteCode' strings the same way CMBP did
     (everything after the first '@'); both sides are uppercased for a robust join.
     """
-    from .kinds.edges import LOCAL_ADMIN_REQUIRED
+    from .kinds.edges import SCCM_LOCAL_ADMIN_REQUIRED
     _safe(con, "edge_local_admin_required",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"WITH roles AS ("
@@ -2789,7 +2789,7 @@ def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> N
           f"  SELECT DISTINCT sid, site FROM roles WHERE site != ''"
           f") "
           f"SELECT ss.sid AS start_id, sys.sid AS end_id, "
-          f"'{LOCAL_ADMIN_REQUIRED}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_LOCAL_ADMIN_REQUIRED}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
           f"FROM site_servers ss "
           f"JOIN site_systems sys ON ss.site = sys.site AND ss.sid != sys.sid "
           f"JOIN nonsec n ON n.site = ss.site")
@@ -2927,7 +2927,7 @@ def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> No
 def _edge_coerce_relay_adminservice(
     con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
 ) -> None:
-    """CoerceAndRelayToAdminService: Authenticated Users -> SCCM_Site (CMBP ps1:6572-6624).
+    """SCCM_CoerceAndRelayToAdminService: Authenticated Users -> SCCM_Site (CMBP ps1:6572-6624).
 
     For each non-secondary site, every SMS Provider relay target is paired with every Site
     Server coercion victim (provider != site server). The relay coerces the site server and
@@ -2941,7 +2941,7 @@ def _edge_coerce_relay_adminservice(
     ps1:1955. Sites confirmed running SCCM 2509+ (build >= ADMINSERVICE_NTLM_MIN_BUILD) are
     excluded — the AdminService rejects NTLM there; unknown versions fail open (edge kept).
     _safe() skips+logs if site_hierarchy / node_computer is missing."""
-    from .kinds.edges import COERCE_AND_RELAY_TO_ADMIN_SERVICE
+    from .kinds.edges import SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE
     from .cve_table import ADMINSERVICE_NTLM_MIN_BUILD
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_computer always emits VARCHAR but be explicit.
@@ -2980,7 +2980,7 @@ def _edge_coerce_relay_adminservice(
         f") "
         f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
         f"  n.site_code AS end_id, "
-        f"  '{COERCE_AND_RELAY_TO_ADMIN_SERVICE}' AS kind, "
+        f"  '{SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE}' AS kind, "
         f"  ['Post-processing'] AS collection_source, "
         f"  ['Coerce ' || coalesce(srv.dnshostname, srv.sid) || ', relay to ' "
         f"    || coalesce(prov.dnshostname, prov.sid)] AS coercion_victim_and_relay_target_pairs, "
@@ -2994,7 +2994,7 @@ def _edge_coerce_relay_adminservice(
 def _edge_coerce_relay_mssql(
     con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
 ) -> None:
-    """CoerceAndRelayToMSSQL: Authenticated Users -> MSSQL_Login (CMBP ps1:6626-6726).
+    """MSSQL_CoerceAndRelayToMSSQL: Authenticated Users -> MSSQL_Login (CMBP ps1:6626-6726).
 
     Driven off node_mssql_login, which already encodes the (sysadmin computer, server)
     pairing CMBP reconstructs by hand (and already excludes the SQL host as its own
@@ -3006,7 +3006,7 @@ def _edge_coerce_relay_mssql(
     assume Off). A known EPA other than 'Off' always disqualifies the server. With
     --disable-possible-edges both must be EXPLICITLY 'Off'. collectionSource = the server's
     EPA-determination sources only (CMBP ps1:6715). _safe() skips+logs missing tables."""
-    from .kinds.edges import COERCE_AND_RELAY_TO_MSSQL
+    from .kinds.edges import MSSQL_COERCE_AND_RELAY_TO_MSSQL
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_mssql_server and node_computer always emit
     # VARCHAR but be explicit (same pattern as _edge_coerce_relay_adminservice).
@@ -3024,7 +3024,7 @@ def _edge_coerce_relay_mssql(
         f"INSERT INTO {schema}.graph_edges BY NAME "
         f"SELECT DISTINCT {_authed_users_id('v.dnshostname')} AS start_id, "
         f"  l.login_id AS end_id, "
-        f"  '{COERCE_AND_RELAY_TO_MSSQL}' AS kind, "
+        f"  '{MSSQL_COERCE_AND_RELAY_TO_MSSQL}' AS kind, "
         f"  coalesce(list_filter(s.collection_source, "
         f"    x -> x IN ('MSSQL-ScanForEPA', 'RemoteRegistry-MSSQL')), CAST([] AS VARCHAR[])) "
         f"    AS collection_source, "
@@ -3044,7 +3044,7 @@ def _edge_coerce_relay_mssql(
 def _edge_coerce_relay_smb(
     con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
 ) -> None:
-    """CoerceAndRelayToSMB: Authenticated Users -> Computer (CMBP ps1:6728-6781).
+    """SCCM_CoerceAndRelayToSMB: Authenticated Users -> Computer (CMBP ps1:6728-6781).
 
     The edge END is a site system whose SMB signing is NOT required (the relay target); the
     coerced victim is a Site Server in the same non-secondary site (system != server). Start
@@ -3055,7 +3055,7 @@ def _edge_coerce_relay_smb(
     collectionSource = the target's smb_signing_source filtered to the SMB-signing probes
     (CMBP ps1:6773). coercionVictimHostnames = the coerced site server's dnshostname.
     _safe() skips+logs missing tables."""
-    from .kinds.edges import COERCE_AND_RELAY_TO_SMB
+    from .kinds.edges import SCCM_COERCE_AND_RELAY_TO_SMB
     # Cast restrict_receiving_ntlm_traffic to VARCHAR before upper() — DuckDB types a
     # ?-bound NULL column as INTEGER at bind time, causing upper() to fail. This CAST is
     # harmless in production (the real column is VARCHAR). Same fix as E1/F1.
@@ -3085,7 +3085,7 @@ def _edge_coerce_relay_smb(
         f") "
         f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
         f"  tgt.sid AS end_id, "
-        f"  '{COERCE_AND_RELAY_TO_SMB}' AS kind, "
+        f"  '{SCCM_COERCE_AND_RELAY_TO_SMB}' AS kind, "
         f"  coalesce(list_filter(tgt.smb_signing_source, "
         f"    x -> x IN ('SMB-Negotiate', 'RemoteRegistry-SMBSigningCheck')), CAST([] AS VARCHAR[])) "
         f"    AS collection_source, "
@@ -3113,9 +3113,9 @@ def _node_authenticated_users(con: duckdb.DuckDBPyConnection, schema: str) -> No
     SID; the same domain computer that seeded the relay's start id seeds this map, so every
     relay-start id resolves."""
     from .kinds.edges import (
-        COERCE_AND_RELAY_TO_ADMIN_SERVICE,
-        COERCE_AND_RELAY_TO_MSSQL,
-        COERCE_AND_RELAY_TO_SMB,
+        SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE,
+        MSSQL_COERCE_AND_RELAY_TO_MSSQL,
+        SCCM_COERCE_AND_RELAY_TO_SMB,
     )
     # UPPER(FQDN) -> AD-domain SID, from every domain-joined computer.
     con.execute(
@@ -3128,8 +3128,8 @@ def _node_authenticated_users(con: duckdb.DuckDBPyConnection, schema: str) -> No
     )
     # Any newly-introduced relay edge kind must be added here so its start nodes get an
     # AUTHENTICATED USERS node.
-    relay_kinds = (f"('{COERCE_AND_RELAY_TO_ADMIN_SERVICE}', "
-                   f"'{COERCE_AND_RELAY_TO_MSSQL}', '{COERCE_AND_RELAY_TO_SMB}')")
+    relay_kinds = (f"('{SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE}', "
+                   f"'{MSSQL_COERCE_AND_RELAY_TO_MSSQL}', '{SCCM_COERCE_AND_RELAY_TO_SMB}')")
     _safe(
         con, "node_group<-authenticated_users",
         f"INSERT INTO {schema}.node_group BY NAME "

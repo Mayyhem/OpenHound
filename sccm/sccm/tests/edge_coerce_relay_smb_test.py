@@ -35,7 +35,7 @@ def test_smb_relay_default_emits():
     start, end, kind, csrc, victims = rows[0]
     assert start == "MAYYHEM.COM-S-1-5-11"
     assert end == "S-1-5-21-1-2-3-7001"          # the vulnerable site system
-    assert kind == "CoerceAndRelayToSMB"
+    assert kind == "SCCM_CoerceAndRelayToSMB"
     assert csrc == ["SMB-Negotiate"]
     assert victims == ["SS01.mayyhem.com"]        # the coerced site server
 

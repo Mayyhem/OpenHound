@@ -47,9 +47,9 @@ def test_pending_kind_edge_has_no_help_until_authored():
 def test_relay_edge_merges_help_and_keeps_coercion(monkeypatch):
     # Inject a block for a relay kind so the test does not depend on authored content.
     # graph_edge imported EDGE_HELP by reference, so mutating this dict is visible there.
-    monkeypatch.setitem(EDGE_HELP, ek.COERCE_AND_RELAY_TO_SMB, EdgeHelp(general="RELAY-GENERAL"))
+    monkeypatch.setitem(EDGE_HELP, ek.SCCM_COERCE_AND_RELAY_TO_SMB, EdgeHelp(general="RELAY-GENERAL"))
     e = _edge(
-        ek.COERCE_AND_RELAY_TO_SMB,
+        ek.SCCM_COERCE_AND_RELAY_TO_SMB,
         coercion_victim_hostnames=["SS01.mayyhem.com"],
     )
     assert isinstance(e.properties, SCCMRelayEdgeProperties)

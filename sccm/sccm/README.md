@@ -11,7 +11,7 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, and Stages 1–6 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasCurrentUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasADLastLogonUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SameHostAs`](#samehostas), [`LocalAdminRequired`](#localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice), [`CoerceAndRelayToMSSQL`](#coerceandrelaytomssql), [`CoerceAndRelayToSMB`](#coerceandrelaytosmb)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
+> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasCurrentUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasADLastLogonUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SCCM_SameHostAs`](#sccm_samehostas), [`SCCM_LocalAdminRequired`](#sccm_localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`SCCM_CoerceAndRelayToAdminService`](#sccm_coerceandrelaytoadminservice), [`MSSQL_CoerceAndRelayToMSSQL`](#mssql_coerceandrelaytomssql), [`SCCM_CoerceAndRelayToSMB`](#sccm_coerceandrelaytosmb)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -64,8 +64,8 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [SCCM_SecurityAdministrator](#sccm_securityadministrator)
   - [SCCM_AllPermissions](#sccm_allpermissions)
   - [SCCM_AssignAllPermissions](#sccm_assignallpermissions)
-  - [SameHostAs](#samehostas)
-  - [LocalAdminRequired](#localadminrequired)
+  - [SCCM_SameHostAs](#sccm_samehostas)
+  - [SCCM_LocalAdminRequired](#sccm_localadminrequired)
   - [MSSQL_Contains](#mssql_contains)
   - [MSSQL_ControlServer](#mssql_controlserver)
   - [MSSQL_ControlDB](#mssql_controldb)
@@ -77,9 +77,9 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [MSSQL_GetTGS](#mssql_gettgs)
   - [MSSQL_ServiceAccountFor](#mssql_serviceaccountfor)
   - [MSSQL_GetAdminTGS](#mssql_getadmintgs)
-  - [CoerceAndRelayToAdminService](#coerceandrelaytoadminservice)
-  - [CoerceAndRelayToMSSQL](#coerceandrelaytomssql)
-  - [CoerceAndRelayToSMB](#coerceandrelaytosmb)
+  - [SCCM_CoerceAndRelayToAdminService](#sccm_coerceandrelaytoadminservice)
+  - [MSSQL_CoerceAndRelayToMSSQL](#mssql_coerceandrelaytomssql)
+  - [SCCM_CoerceAndRelayToSMB](#sccm_coerceandrelaytosmb)
 - [Understanding the Codebase](#understanding-the-codebase)
 - [Contributing](#contributing)
 
@@ -102,20 +102,20 @@ This installs the runtime dependencies (`ldap3`, `impacket`, `dnspython`, and �
 Run from a domain-joined Windows host as the current user (the domain and a domain controller are auto-detected):
 
 ```powershell
-uv run openhound collect sccm .\out -vv
+uv run openhound collect sccm .\out -v
 ```
 
 Or supply everything explicitly (required on Linux/macOS, where the current-user domain context can't be auto-detected):
 
 ```powershell
-uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" -vv
+uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" -v
 ```
 
 Limit which per-host phases run, and which hosts they target:
 
 ```powershell
 # Only check the PS1 site database server for Extended Protection for Authentication
-uv run openhound collect sccm .\out -d mayyhem.com -m RemoteRegistry,MSSQL -c ps1-db.mayyhem.com -vv
+uv run openhound collect sccm .\out -d mayyhem.com -m RemoteRegistry,MSSQL -c ps1-db.mayyhem.com -v
 ```
 
 `collect` writes raw JSONL tables under `.\out\sccm\<table>\` and prints a per-resource row-count summary plus the next commands to run.
@@ -158,7 +158,7 @@ and the exact resume commands are logged, so you never have to recollect.
 
 Upload the resulting OpenGraph output via the BloodHound UI under **Administration → File Ingest**. To query the SCCM kinds, BloodHound must use the **PostgreSQL** graph backend (the prebuilt SCCM kinds will not resolve on Neo4j): https://bloodhound.specterops.io/get-started/custom-installation#postgresql
 
-> **Verbosity tip:** `-v` is the default INFO level (step summaries); `-vv` is the chattier VERBOSE level (per-resolution / per-node traces, matching the PowerShell tool's `[Verbose]` tier); `--debug` adds the framework's `dlt` and `ldap3` internals. Each run also writes an ordered, human-readable log (`collect_log_<timestamp>.log`) and a warnings/errors-with-tracebacks diagnostics file (`collect_diagnostics_<timestamp>.log`) into the output directory.
+> **Verbosity tip:** the console shows INFO (step summaries) by default; `-v` raises it to the chattier VERBOSE level (per-resolution / per-node traces, matching the PowerShell tool's `[Verbose]` tier); `--debug` adds the framework's `dlt` and `ldap3` internals; `--silent` mutes the console entirely. Whatever the console level, **every run always writes two files** into the output directory: **`collect_full_<timestamp>.log`** — the complete, human-ordered DEBUG trace of the collector, grouped host-by-host (per-host phases) and resource-by-resource (discovery), so you can always read the full story after the fact without re-running; and **`collect_issues_<timestamp>.log`** — just the warnings and errors, each with a full traceback (a clean run writes no issues file). `--debug` additionally folds `dlt`/`ldap3` internals into the full log.
 
 ---
 
@@ -213,7 +213,7 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 | **SMB** ([collectors/smb.py](src/openhound_sccm/collectors/smb.py)) | An **unauthenticated** SMB2-negotiate **signing-required** check (via [clients/smb.py](src/openhound_sccm/clients/smb.py)), then **authenticated** share enumeration (`NetShareEnum`) that classifies SCCM-specific shares — `SMS_SITE`/`SMS_<code>` (Site Server), `SMS_DP$` (Distribution Point), `REMINST` (PXE), `SCCMContentLib$`/`SMSPKG` (content library) — into site-system roles and a site code. Writes raw `smb_computers` / `smb_sites` tables. Skipped on hosts AdminService/WMI already collected. Collect-only (graph conversion is a later phase). | ✅ Implemented (collect-only) |
 | **DHCP** | Accepted as a `--collection-methods` token, but the per-host collector is not yet ported. | 🚧 Not yet ported |
 
-> The site version this HTTP fingerprint (or privileged AdminService/WMI collection) resolves also gates the [`CoerceAndRelayToAdminService`](#coerceandrelaytoadminservice) edge: a site **confirmed** to run **SCCM 2509 or later** (build ≥ 9141) suppresses the edge, because that AdminService version rejects NTLM authentication outright. An unknown or unparseable version keeps the edge (fail-open — a possible edge that can't be confirmed mitigated stays in the graph).
+> The site version this HTTP fingerprint (or privileged AdminService/WMI collection) resolves also gates the [`SCCM_CoerceAndRelayToAdminService`](#sccm_coerceandrelaytoadminservice) edge: a site **confirmed** to run **SCCM 2509 or later** (build ≥ 9141) suppresses the edge, because that AdminService version rejects NTLM authentication outright. An unknown or unparseable version keeps the edge (fail-open — a possible edge that can't be confirmed mitigated stays in the graph).
 
 ---
 
@@ -274,7 +274,7 @@ The collector relies on these assumptions about the target environment and how i
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
 - **CRED-2 (machine-account) flags are inert.** `--machine-name`, `--machine-pass`, `--client-name`, `--create-machine-account`, `--use-altauth`, and `--registration-sleep` are defined but not yet implemented (their help text says so).
-- **`--socks-proxy` cannot tunnel live current-user SSPI / OS-Kerberos, and carries no UDP.** Windows SSPI Negotiate and OS-Kerberos make their KDC/DCOM connections inside the OS (LSASS/win32com), not this process, so a userland socket hook cannot pull them through the pivot. Use `--ticket` (pass-the-ticket, which tunnels completely) or set up OS-level transparent proxying (tun2socks / Proxifier) on the outside box. Separately, DNS is forced onto TCP to ride the tunnel — SOCKS5 CONNECT is TCP-only, so no other UDP traffic is carried. See [Proxying / pivoting](#proxying--pivoting).
+- **`--proxy` cannot tunnel live current-user SSPI / OS-Kerberos, and carries no UDP.** Windows SSPI Negotiate and OS-Kerberos make their KDC/DCOM connections inside the OS (LSASS/win32com), not this process, so a userland socket hook cannot pull them through the pivot. Use `--ticket` (pass-the-ticket, which tunnels completely) or set up OS-level transparent proxying (tun2socks / Proxifier) on the outside box. Separately, DNS is forced onto TCP to ride the tunnel — SOCKS5 CONNECT is TCP-only, so no other UDP traffic is carried. See [Proxying / pivoting](#proxying--pivoting).
 
 ---
 
@@ -369,7 +369,7 @@ Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Prov
 | `--enable-bad-opsec` | Enable noisy operations (e.g. NAA decryption) likely to trip EDR *(consumed by not-yet-ported phases)*. |
 | `-t`, `--threads` | Per-host worker-pool size. Default `10`. |
 | `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
-| `--run-all` | After collecting, automatically run **preprocess** and **convert** in-process, producing the OpenGraph files in a single command. All paths are derived from `OUTPUT_PATH`: `lookup.duckdb`, the `sccm/` dataset dir, and `graph/`. On completion it logs a consolidated list of the run's output files — raw JSONL, the lookup DB, each OpenGraph JSON, and whichever collection/diagnostics logs were produced (a clean run with no warnings writes no diagnostics file) — so you don't have to scroll back through the run. Omit it to run the three stages manually (the default; a "next steps" hint is printed). |
+| `--run-all` | After collecting, automatically run **preprocess** and **convert** in-process, producing the OpenGraph files in a single command. All paths are derived from `OUTPUT_PATH`: `lookup.duckdb`, the `sccm/` dataset dir, and `graph/`. On completion it logs a consolidated list of the run's output files — raw JSONL, the lookup DB, each OpenGraph JSON, and the collect logs (`collect_full_*`, and `collect_issues_*` when a warning/error occurred) — so you don't have to scroll back through the run. Omit it to run the three stages manually (the default; a "next steps" hint is printed). |
 
 #### `--disable-possible-edges` and the coerce-and-relay edges
 
@@ -377,9 +377,9 @@ Without this flag (the default), the three Stage 6 coerce-and-relay edges treat 
 
 With `--disable-possible-edges`, each relay edge applies stricter gating: a relay path is only emitted when the relevant security setting is **explicitly confirmed off** in the collected data. Specifically:
 
-- A `CoerceAndRelayToAdminService` relay is only emitted when the SMS Provider's `restrictReceivingNtlmTraffic` is explicitly `Off` (not merely absent or uncollected).
-- A `CoerceAndRelayToMSSQL` relay is only emitted when the SQL host's NTLM restriction is explicitly `Off` **and** the SQL Server's Extended Protection is explicitly `Off`.
-- A `CoerceAndRelayToSMB` relay is only emitted when the target site system's SMB signing is confirmed not required **and** its NTLM restriction is explicitly `Off`.
+- A `SCCM_CoerceAndRelayToAdminService` relay is only emitted when the SMS Provider's `restrictReceivingNtlmTraffic` is explicitly `Off` (not merely absent or uncollected).
+- A `MSSQL_CoerceAndRelayToMSSQL` relay is only emitted when the SQL host's NTLM restriction is explicitly `Off` **and** the SQL Server's Extended Protection is explicitly `Off`.
+- A `SCCM_CoerceAndRelayToSMB` relay is only emitted when the target site system's SMB signing is confirmed not required **and** its NTLM restriction is explicitly `Off`.
 
 Use the default run for a full speculative-path view; use `--disable-possible-edges` when you want only confirmed-vulnerable paths:
 
@@ -416,7 +416,7 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 
 | Option | Description |
 |---|---|
-| `--socks-proxy` | Route **all** collection traffic (discovery + every per-host protocol) through a SOCKS5 proxy. Forms: `socks5://[user:pass@]host:port` or bare `host:port`. Requires `--dc` or `--dns`. See [Proxying / pivoting](#proxying--pivoting). |
+| `-x`, `--proxy` | Route **all** collection traffic (discovery + every per-host protocol) through a SOCKS5 proxy. Forms: `socks5://[user:pass@]host:port` or bare `host:port`. Requires `--dc` or `--dns`. See [Proxying / pivoting](#proxying--pivoting). |
 | `--dns`, `--dns-resolver` | DNS nameserver IP used for all lookups (DC discovery, SRV probes). Omit to use the system default. |
 
 ### Output & logging
@@ -425,8 +425,9 @@ openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\ou
 |---|---|
 | `--progress` | Progress backend. `off` (default) silences dlt's per-resource progress counters so only the collector's own `[target][phase]` logs print; pass `tqdm`, `log`, or `alive_progress` to re-enable a live tracker. |
 | `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
-| `-v`, `--verbose` | Repeatable. `-v` → INFO (step summaries), `-vv` → VERBOSE (per-resolution / per-node traces). |
-| `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). |
+| `-v`, `--verbose` | Raise the console to VERBOSE (per-resolution / per-node / per-edge traces; PS1 `[Verbose]` parity). Without it the console is INFO (step summaries). |
+| `--silent` | Silence **all** console output. The two on-disk logs (`collect_full_*` = complete DEBUG trace, `collect_issues_*` = warnings/errors with tracebacks) are still written. Also forces `--progress off`. |
+| `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). Outranks `-v`. |
 
 ### Proxying / pivoting
 
@@ -437,7 +438,7 @@ pivot inside the target network:
 openhound collect sccm ./out \
   -d mayyhem.com --dc dc.mayyhem.com \
   -u lowpriv -p 'Password123!' \
-  --socks-proxy socks5://127.0.0.1:1080
+  --proxy socks5://127.0.0.1:1080
 ```
 
 All discovery (LDAP/DNS/DC) and every per-host protocol (RemoteRegistry, MSSQL,
@@ -445,7 +446,7 @@ AdminService, WMI, HTTP, SMB) egress at the proxy. Destination names resolve at
 the proxy (socks5h); our own DNS lookups are forced onto TCP so they ride the
 tunnel too.
 
-**`--dc` or `--dns` is required** with `--socks-proxy`: internal names can't be
+**`--dc` or `--dns` is required** with `--proxy`: internal names can't be
 resolved from the outside box, so pin the DC (`--dc`) or point at an internal
 resolver reachable through the pivot (`--dns`).
 
@@ -552,13 +553,13 @@ flowchart LR
     SCCM_AdminUser -->|SCCM_FullAdministrator| SCCM_ClientDevice
     SCCM_AdminUser -->|SCCM_AllPermissions| SCCM_Site
     SCCM_Site -->|SCCM_HasClient| SCCM_ClientDevice
-    SCCM_ClientDevice -->|SameHostAs| Computer
+    SCCM_ClientDevice -->|SCCM_SameHostAs| Computer
     Computer -->|MSSQL_HostFor| MSSQL_Server
     MSSQL_Login -->|MSSQL_MemberOf| MSSQL_ServerRole
     MSSQL_ServerRole -->|MSSQL_ControlServer| MSSQL_Server
-    Group -->|CoerceAndRelayToAdminService| SCCM_Site
-    Group -->|CoerceAndRelayToMSSQL| MSSQL_Login
-    Group -->|CoerceAndRelayToSMB| Computer
+    Group -->|SCCM_CoerceAndRelayToAdminService| SCCM_Site
+    Group -->|MSSQL_CoerceAndRelayToMSSQL| MSSQL_Login
+    Group -->|SCCM_CoerceAndRelayToSMB| Computer
 
     classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
     classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
@@ -605,8 +606,8 @@ flowchart LR
     SCCM_AdminUser -->|SCCM_SecurityAdministrator| SCCM_ClientDevice
     SCCM_AdminUser -->|SCCM_AllPermissions| SCCM_Site
     Computer -->|SCCM_AssignAllPermissions| SCCM_Site
-    SCCM_ClientDevice -->|SameHostAs| Computer
-    Computer -->|LocalAdminRequired| Computer
+    SCCM_ClientDevice -->|SCCM_SameHostAs| Computer
+    Computer -->|SCCM_LocalAdminRequired| Computer
     MSSQL_Server -->|MSSQL_Contains| MSSQL_Database
     MSSQL_Database -->|MSSQL_Contains| MSSQL_DatabaseRole
     MSSQL_ServerRole -->|MSSQL_ControlServer| MSSQL_Server
@@ -620,9 +621,9 @@ flowchart LR
     User -->|MSSQL_ServiceAccountFor| MSSQL_Server
     User -->|MSSQL_GetAdminTGS| MSSQL_Server
     User -->|MSSQL_GetTGS| MSSQL_Login
-    Group -->|CoerceAndRelayToAdminService| SCCM_Site
-    Group -->|CoerceAndRelayToMSSQL| MSSQL_Login
-    Group -->|CoerceAndRelayToSMB| Computer
+    Group -->|SCCM_CoerceAndRelayToAdminService| SCCM_Site
+    Group -->|MSSQL_CoerceAndRelayToMSSQL| MSSQL_Login
+    Group -->|SCCM_CoerceAndRelayToSMB| Computer
 
     classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
     classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
@@ -707,7 +708,7 @@ An AD group observed in SCCM — either named in a device's or user's `security_
 | `SCCMInfra` | bool | `true` if this group appears in the SCCM admins tables. |
 | `SCCMResourceIDs` | list\<string\> | SCCM resource IDs in `"<id>@<site_code>"` format. |
 
-> **Synthetic Authenticated Users nodes (Stage 6).** For each domain that produces a coerce-and-relay edge, `preprocess` synthesises one `Group` node representing the Windows **Authenticated Users** well-known group for that domain. The node id follows SharpHound's well-known-SID form so it merges with any SharpHound-collected node for the same domain: `UPPER(<FQDN>)-S-1-5-11` (e.g. `MAYYHEM.COM-S-1-5-11`). The node is created lazily — only domains that actually have at least one relay edge start node get a node — and it carries `collectionSource = []` (the Group model does not populate a collection source for this synthetic node). Because the SID `S-1-5-11` has no domain part of its own, the `environmentid` is resolved from a co-occurring domain computer's AD domain SID. These nodes are the `start` of all three `CoerceAndRelayTo*` edge kinds.
+> **Synthetic Authenticated Users nodes (Stage 6).** For each domain that produces a coerce-and-relay edge, `preprocess` synthesises one `Group` node representing the Windows **Authenticated Users** well-known group for that domain. The node id follows SharpHound's well-known-SID form so it merges with any SharpHound-collected node for the same domain: `UPPER(<FQDN>)-S-1-5-11` (e.g. `MAYYHEM.COM-S-1-5-11`). The node is created lazily — only domains that actually have at least one relay edge start node get a node — and it carries `collectionSource = []` (the Group model does not populate a collection source for this synthetic node). Because the SID `S-1-5-11` has no domain part of its own, the `environmentid` is resolved from a co-occurring domain computer's AD domain SID. These nodes are the `start` of all three coerce-and-relay edge kinds (`SCCM_CoerceAndRelayToAdminService`, `MSSQL_CoerceAndRelayToMSSQL`, `SCCM_CoerceAndRelayToSMB`).
 
 ## SCCM_Site
 
@@ -772,7 +773,7 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `currentLogonUser` | string | Name of the user currently logged on. |
 | `ADLastLogonUser` | string | Name of the last AD-logged-on user. |
 | `is_confirmed_active_client` | bool | `true` for confirmed real SCCM-managed clients (AdminService/WMI source); `false` for inferred clients seen only via a CmRcService remote-control SPN. |
-| `ADDomainSID` | string | AD domain SID of the device (used for Stage 4 `SameHostAs` dedup). |
+| `ADDomainSID` | string | AD domain SID of the device (used for Stage 4 `SCCM_SameHostAs` dedup). |
 | `ADLastLogonTime` | string | Timestamp of the device's last AD logon as reported by SCCM. |
 | `ADLastLogonUserDomain` | string | Domain of the last AD-authenticated user (from `UserDomainName` in the device resource). |
 | `rootSiteCode` | string | Hierarchy root site code for this device's site hierarchy. |
@@ -1210,7 +1211,7 @@ Links an SMS Provider computer to every non-secondary `SCCM_Site` in the hierarc
 - **Traversable:** yes
 - **Abuse note:** Compromise of an SMS Provider host (e.g. via relay to the AdminService REST API) gives an attacker administrative control equivalent to a Full Administrator over the whole hierarchy.
 
-## SameHostAs
+## SCCM_SameHostAs
 
 Links a `Computer` AD node to its corresponding `SCCM_ClientDevice` record for the same physical host, matched by the client device's `ADDomainSID` equalling the computer's AD SID. Both directions are emitted (one edge `Computer → SCCM_ClientDevice`, one `SCCM_ClientDevice → Computer`). Only deduped real-client or inferred-client survivors (after `_dedup_client_device`) appear here — CmRcService-only twins that were merged into a real client do not produce orphan edges (CMBP `ps1:2314-2320`).
 
@@ -1219,7 +1220,7 @@ Links a `Computer` AD node to its corresponding `SCCM_ClientDevice` record for t
 - **Traversable:** yes
 - **Source:** `SCCM_Invoke-PostProcessing`
 
-## LocalAdminRequired
+## SCCM_LocalAdminRequired
 
 Links each site server (`Computer` hosting `SMS Site Server@<site>`) to every other site system in the same non-secondary site. A site server requires local-administrator rights on its peer site systems (CMBP `ps1:1882-1909`). Self-edges and secondary-site computers are excluded.
 
@@ -1340,9 +1341,9 @@ Links the SQL service account to the SQL Server it runs on, when the service acc
 
 ---
 
-## CoerceAndRelayToAdminService
+## SCCM_CoerceAndRelayToAdminService
 
-<a name="coerceandrelaytoadminservice"></a>
+<a name="sccm_coerceandrelaytoadminservice"></a>
 
 Links the **Authenticated Users** group of a site server's domain to the `SCCM_Site` that the site server belongs to, when NTLM coercion can relay the site server's credentials to an SMS Provider's AdminService endpoint. An attacker authenticating as any domain user can trigger NTLM authentication from the site server and relay it to the SMS Provider, gaining AdminService access and therefore SCCM administrative control over the site.
 
@@ -1359,9 +1360,9 @@ Links the **Authenticated Users** group of a site server's domain to the `SCCM_S
 | `collectionSource` | list\<string\> | Always `["Post-processing"]`. |
 | `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per coercion victim / relay target pair in the form `"Coerce <victim_fqdn>, relay to <provider_fqdn>"`. Shows which site server is coerced and which SMS Provider receives the relayed credential. |
 
-## CoerceAndRelayToMSSQL
+## MSSQL_CoerceAndRelayToMSSQL
 
-<a name="coerceandrelaytomssql"></a>
+<a name="mssql_coerceandrelaytomssql"></a>
 
 Links the **Authenticated Users** group of a sysadmin computer's domain to an `MSSQL_Login` on the site database server, when NTLM coercion can relay the sysadmin computer's credentials to the SQL Server. An attacker can coerce the sysadmin computer (a Primary Site Server or SMS Provider) and relay its NTLM credential to the SQL Server, authenticating as the corresponding Windows login and gaining `sysadmin` access to the site database.
 
@@ -1377,9 +1378,9 @@ Links the **Authenticated Users** group of a sysadmin computer's domain to an `M
 | `collectionSource` | list\<string\> | Sources that determined the SQL Server's EPA setting (e.g. `["MSSQL-ScanForEPA"]`, `["RemoteRegistry-MSSQL"]`). |
 | `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per victim / target pair: `"Coerce <victim_fqdn>, relay to <sql_host>:<port>"`. Shows which sysadmin computer is coerced and which SQL Server endpoint receives the relay. |
 
-## CoerceAndRelayToSMB
+## SCCM_CoerceAndRelayToSMB
 
-<a name="coerceandrelaytosmbedge"></a>
+<a name="sccm_coerceandrelaytosmbedge"></a>
 
 Links the **Authenticated Users** group of a site server's domain to a site system computer whose SMB signing is not required, when NTLM coercion can relay the site server's credentials to that computer over SMB. An attacker can coerce the site server and relay its NTLM credential over SMB to a peer site system that does not enforce SMB signing, gaining authenticated SMB access (and therefore potential code execution) on that host.
 
@@ -1389,7 +1390,7 @@ Links the **Authenticated Users** group of a site server's domain to a site syst
 - **`collectionSource`:** subset of `["SMB-Negotiate", "RemoteRegistry-SMBSigningCheck"]` — whichever SMB-signing probes observed the target's signing setting.
 - **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null `restrictReceivingNtlmTraffic` on the target is treated as vulnerable. With the flag, it must be explicitly `Off`. SMB signing must always be explicitly `false` (there is no assumed-vulnerable case for signing itself — it must be confirmed not required).
 - **Note:** Lands in the **AD payload** because both endpoints are AD nodes (`Group` and `Computer`).
-- **Bug fix note:** ConfigManBearPig's traversable allow-list (`ps1:2221`) named this kind `CoerceAndRelayNTLMtoSMB`, but the function that emits it (`ps1:6775`) used `CoerceAndRelayToSMB` — the mismatch left the edge non-traversable in CMBP. This port emits `CoerceAndRelayToSMB` and marks it traversable in `TRAVERSABLE_EDGE_KINDS`.
+- **Bug fix note:** ConfigManBearPig's traversable allow-list (`ps1:2221`) named this kind `CoerceAndRelayNTLMtoSMB`, but the function that emits it (`ps1:6775`) used `CoerceAndRelayToSMB` — the mismatch left the edge non-traversable in CMBP. This port emits `SCCM_CoerceAndRelayToSMB` and marks it traversable in `TRAVERSABLE_EDGE_KINDS`.
 
 | Property | Type | Description |
 |---|---|---|

@@ -17,11 +17,11 @@ def test_traversable_set_unchanged_for_role_edges():
 
 
 def test_stage4_edge_kind_values():
-    assert ek.SAME_HOST_AS == "SameHostAs"
-    assert ek.LOCAL_ADMIN_REQUIRED == "LocalAdminRequired"
+    assert ek.SCCM_SAME_HOST_AS == "SCCM_SameHostAs"
+    assert ek.SCCM_LOCAL_ADMIN_REQUIRED == "SCCM_LocalAdminRequired"
 
 
 def test_stage4_edges_are_traversable():
     # Both are traversable per CMBP :2216-2249 (already in the frozenset by string).
-    assert ek.SAME_HOST_AS in ek.TRAVERSABLE_EDGE_KINDS
-    assert ek.LOCAL_ADMIN_REQUIRED in ek.TRAVERSABLE_EDGE_KINDS
+    assert ek.SCCM_SAME_HOST_AS in ek.TRAVERSABLE_EDGE_KINDS
+    assert ek.SCCM_LOCAL_ADMIN_REQUIRED in ek.TRAVERSABLE_EDGE_KINDS

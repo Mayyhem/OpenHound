@@ -25,7 +25,7 @@ def test_same_host_as_both_directions_for_real_client():
     )
     transforms(con)
     edges = con.execute(
-        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SameHostAs'"
+        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SCCM_SameHostAs'"
     ).fetchall()
     assert ("S-1-5-21-1-2-3-1104", "GUID:ABC") in edges
     assert ("GUID:ABC", "S-1-5-21-1-2-3-1104") in edges
@@ -41,7 +41,7 @@ def test_same_host_as_for_possible_client_without_twin():
     )
     transforms(con)
     edges = con.execute(
-        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SameHostAs'"
+        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SCCM_SameHostAs'"
     ).fetchall()
     assert ("S-1-5-21-1-2-3-1200", "S-1-5-21-1-2-3-1200@PS1") in edges
     assert ("S-1-5-21-1-2-3-1200@PS1", "S-1-5-21-1-2-3-1200") in edges
@@ -57,6 +57,6 @@ def test_same_host_as_collection_source_tagged():
     )
     transforms(con)
     src = con.execute(
-        "SELECT collection_source FROM sccm.graph_edges WHERE kind = 'SameHostAs' LIMIT 1"
+        "SELECT collection_source FROM sccm.graph_edges WHERE kind = 'SCCM_SameHostAs' LIMIT 1"
     ).fetchone()[0]
     assert src == ["SCCM_Invoke-PostProcessing"]

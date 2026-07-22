@@ -166,7 +166,14 @@ class HttpClient:
                 return self._get_negotiate(url)
             resp = self._session.get(url, timeout=self._timeout, headers=headers)
             logger.debug("HTTP GET %s -> %s (anonymous)", url, resp.status_code)
-            logger.debug("HTTP GET %s content: %s", url, resp.content)
+            # Truncate the body preview: a binary fetch (e.g. ccmsetup.exe) is
+            # multiple MB, and this line now always lands in the full on-disk log.
+            # Slice the bytes first so we never repr() the whole body.
+            _body = resp.content or b""
+            _preview = repr(_body[:1024])[:1024]
+            if len(_body) > 1024:
+                _preview += f" ...({len(_body)} bytes total, truncated)"
+            logger.debug("HTTP GET %s content: %s", url, _preview)
             return HttpResult(resp.status_code, resp.content, ErrorClass.RESPONSE)
         except Exception as exc:  # noqa: BLE001 - classify any transport failure
             cls = classify_exception(exc)

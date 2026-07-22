@@ -42,7 +42,6 @@ from typing import Any, Iterable, Iterator, Optional
 from ..clients.http import ErrorClass, HttpClient, HttpResult
 from ..clients.http_auth import AuthMode
 from ..context import SourceContext
-from ..log_context import with_log_context
 
 logger = logging.getLogger(__name__)
 
@@ -470,7 +469,6 @@ class _HttpProbe:
 
 # --- orchestrator + entry point --------------------------------------------
 
-@with_log_context(phase="HTTP")
 def collect_http(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """Yield role-tagged rows discovered by unauthenticated HTTP probing of *target*.
 

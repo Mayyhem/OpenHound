@@ -17,7 +17,7 @@ def test_site_server_is_local_admin_on_other_site_systems():
     )
     transforms(con)
     edges = con.execute(
-        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'LocalAdminRequired'"
+        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SCCM_LocalAdminRequired'"
     ).fetchall()
     assert ("S-1-5-21-1-2-3-100", "S-1-5-21-1-2-3-200") in edges      # site server -> MP
     assert ("S-1-5-21-1-2-3-200", "S-1-5-21-1-2-3-100") not in edges  # MP is NOT admin on the server
@@ -39,7 +39,7 @@ def test_no_local_admin_required_for_secondary_site():
     )
     transforms(con)
     n = con.execute(
-        "SELECT count(*) FROM sccm.graph_edges WHERE kind = 'LocalAdminRequired'"
+        "SELECT count(*) FROM sccm.graph_edges WHERE kind = 'SCCM_LocalAdminRequired'"
     ).fetchone()[0]
     assert n == 0
 
@@ -59,7 +59,7 @@ def test_multiple_site_servers_are_mutually_local_admin():
     )
     transforms(con)
     edges = con.execute(
-        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'LocalAdminRequired'"
+        "SELECT start_id, end_id FROM sccm.graph_edges WHERE kind = 'SCCM_LocalAdminRequired'"
     ).fetchall()
     assert ("S-1-5-21-1-2-3-100", "S-1-5-21-1-2-3-101") in edges
     assert ("S-1-5-21-1-2-3-101", "S-1-5-21-1-2-3-100") in edges

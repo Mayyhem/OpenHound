@@ -1,4 +1,4 @@
-"""Offline tests for --socks-proxy parsing and --dc/--dns validation."""
+"""Offline tests for --proxy parsing and --dc/--dns validation."""
 import pytest
 import typer
 

@@ -35,7 +35,7 @@ def test_adminservice_relay_default_emits_with_null_ntlm():
     start, end, kind, csrc, pairs = rows[0]
     assert start == "MAYYHEM.COM-S-1-5-11"
     assert end == "PS1"          # non-secondary site code (raw case)
-    assert kind == "CoerceAndRelayToAdminService"
+    assert kind == "SCCM_CoerceAndRelayToAdminService"
     assert csrc == ["Post-processing"]
     assert pairs == ["Coerce SS01.mayyhem.com, relay to PROV01.mayyhem.com"]
 

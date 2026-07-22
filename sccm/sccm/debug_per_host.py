@@ -46,12 +46,12 @@ from openhound_sccm.phased_pipeline import DONE, WorkQueue, build_streams, run_p
 from openhound_sccm.source import _expand_allowed_targets
 
 # Log to the console exactly like the main collector: reuse its own setup, which
-# lowers the framework's console handler to the VERBOSE tier (-vv parity), strips
-# the "(openhound_version=...)" suffix its formatter appends, and installs the
+# lowers the framework's console handler (here to the DEBUG tier), strips the
+# "(openhound_version=...)" suffix its formatter appends, and installs the
 # [target][phase] prefix filter. Reusing the framework handler (rather than adding
 # a second one) is what avoids the duplicate / version-suffixed lines.
-# (Pass debug=True for the DEBUG tier with dlt / ldap3 internals.)
-_apply_log_level(verbose=2, debug=True)
+# (Set debug=False, verbose=True for the VERBOSE tier without dlt / ldap3 internals.)
+_apply_log_level(verbose=False, debug=True, silent=False)
 
 # Fallback: when no console handler is present (e.g. output redirected with no
 # TTY, so the framework attached only a file handler), add one so the harness
