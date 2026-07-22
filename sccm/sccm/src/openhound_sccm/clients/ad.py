@@ -8,9 +8,9 @@ anonymous fallbacks), the paged-search loop, and the SID/GUID decoders — all
 originally proven here and generalized into the shared library (which the MSSQL
 collector also consumes). This subclass keeps only the SCCM-specific surface:
 
-  * constructed from SCCM's :class:`ADCredentials` (username+password or
-    integrated auth only — SCCM does not pass an NT hash / Kerberos ticket to
-    LDAP), mapped onto the shared ``LdapAuth``;
+  * constructed from SCCM's :class:`ADCredentials` (username+password, an NT hash
+    for pass-the-hash, a base64 Kerberos ticket for pass-the-ticket, or
+    integrated auth), mapped onto the shared ``LdapAuth``;
   * :meth:`_entry_to_dict` emits **snake_case** keys (``dns_host_name`` …) so
     dlt's table loader doesn't mangle camelCase, and preserves opaque binary
     attributes (``ntSecurityDescriptor`` / ``dnsRecord``) as raw bytes;
@@ -47,6 +47,11 @@ class ADCredentials:
     domain_controller: str | None = None
     username: str | None = None
     password: str | None = None
+    # Pass-the-hash (bare 32-hex NT or LM:NT) and pass-the-ticket (base64
+    # KRB-CRED / .kirbi). The shared waterfall selects the bind mode by
+    # credential precedence: ticket -> nt_hash -> password -> integrated.
+    nt_hash: str | None = None
+    kerberos_ticket: str | None = None
     # Optional port override. ``None`` lets ``bind()`` auto-detect the transport
     # (LDAPS 636 → StartTLS 389 → LDAP 389+sign/seal). Setting a value pins the
     # port and narrows the attempt chain: 636/3269 → LDAPS; anything else → LDAP
@@ -77,15 +82,18 @@ class ADClient(AdClient):
         # Kept for callers that read ``ctx.ad.creds`` (clients/http.py,
         # collectors/dns.py read ``creds.domain_controller``).
         self.creds = credentials
-        # SCCM binds LDAP with username+password or integrated auth only (no
-        # LDAP pass-the-hash / pass-the-ticket), so only these LdapAuth fields
-        # are populated; the shared waterfall handles the rest.
+        # SCCM binds LDAP with username+password, an NT hash (pass-the-hash), a
+        # Kerberos ticket (pass-the-ticket), or integrated auth; the shared
+        # LdapAuth + waterfall selects the mode by credential precedence
+        # (ticket → nt_hash → password → SSPI/anonymous).
         super().__init__(
             domain=credentials.domain,
             dc=credentials.domain_controller,
             auth=LdapAuth(
                 username=credentials.username,
                 password=credentials.password,
+                nt_hash=credentials.nt_hash,
+                kerberos_ticket=credentials.kerberos_ticket,
             ),
             port=credentials.port,
         )

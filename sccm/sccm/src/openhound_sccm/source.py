@@ -258,6 +258,8 @@ def source(
         domain_controller=domain_controller,
         username=username,
         password=password,
+        nt_hash=nt_hash,
+        kerberos_ticket=kerberos_ticket,
         port=ldap_port,
     )
     ctx = SourceContext(

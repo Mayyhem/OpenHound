@@ -296,11 +296,11 @@ uv run openhound collect sccm <output_path> [resources...] [options]
 | `--dc`, `--domain-controller` | DC hostname or IP. If omitted, resolved from the domain via DNS SRV (`_ldap._tcp.dc._msdcs.<domain>`). |
 | `-u`, `--username` | `DOMAIN\user` for explicit authentication. Omit to use the current Windows user (integrated auth). |
 | `-p`, `--password` | Password for explicit authentication. |
-| `--nt-hash` | NT hash for pass-the-hash (bare 32-hex; empty LM half assumed). Used by AdminService Kerberos (as the RC4 key) and NTLM, and by the SMB-based phases (RemoteRegistry, SMB) via impacket. |
-| `--ticket` | Base64 Kerberos ticket (`.kirbi` / KRB-CRED) for pass-the-ticket. Kerberos only — no NTLM fallback. Honored by AdminService/WMI and the SMB-based phases (RemoteRegistry, SMB). |
+| `--nt-hash` | NT hash for pass-the-hash (bare 32-hex; empty LM half assumed). Used by LDAP, AdminService Kerberos (as the RC4 key) and NTLM, the SMB-based phases (RemoteRegistry, SMB) via impacket, and the MSSQL EPA probe. |
+| `--ticket` | Base64 Kerberos ticket (`.kirbi` / KRB-CRED) for pass-the-ticket. Kerberos only — no NTLM fallback. Honored by LDAP, AdminService/WMI, and the SMB-based phases (RemoteRegistry, SMB). Not used for the MSSQL EPA probe — pass-the-ticket can't probe channel binding, so a ticket-only run logs a warning and skips EPA (use `-p`/`--nt-hash` there). |
 | `--ldap-port` | Pin the LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389 with sign-and-seal). |
 
-#### Authentication methods (AdminService / WMI / HTTP)
+#### Authentication methods
 
 The shared HTTP client ([clients/http.py](src/openhound_sccm/clients/http.py)) authenticates to the SCCM AdminService with **Negotiate**, in this precedence:
 
@@ -314,6 +314,8 @@ The **WMI fallback** ([clients/wmi.py](src/openhound_sccm/clients/wmi.py)) reuse
 
 The **SMB-based phases** — RemoteRegistry ([collectors/registry.py](src/openhound_sccm/collectors/registry.py)) and SMB ([collectors/smb.py](src/openhound_sccm/collectors/smb.py)) — authenticate through the shared `connect_smb` ([clients/smb_sso.py](src/openhound_sccm/clients/smb_sso.py)), which honors the same credential set over SMB: **pass-the-ticket** (`kerberosLogin` with the supplied TGT), **pass-the-hash** (`--nt-hash`), explicit **password** NTLM, current-user **SSPI** Negotiate, then an anonymous **null session**. SMB's signing-required check is unauthenticated (negotiate-only) and so works regardless of the credential method.
 
+The **LDAP discovery phase** ([clients/ad.py](src/openhound_sccm/clients/ad.py)) honors the same credential set over `ldap3` through the shared lockout-safe waterfall: **pass-the-ticket** (GSSAPI bind via a private ccache) → **pass-the-hash** (`--nt-hash`, ldap3 `LM:NT` NTLM bind) → explicit **password** NTLM → integrated **Kerberos** / current-user **SSPI** → anonymous, each auto-detecting the transport (LDAPS:636 → StartTLS:389 → LDAP:389 sign-and-seal). Only genuine bad-credential result-49 subcodes halt the waterfall, so transport fallbacks never increment `badPwdCount`.
+
 ```bash
 # Passwordless, as the current domain user (domain-joined collector):
 uv run openhound collect sccm ./out -d mayyhem.com -c ps1-sms.mayyhem.com
@@ -325,6 +327,14 @@ uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
 # Pass-the-ticket (base64 .kirbi):
 uv run openhound collect sccm ./out -d mayyhem.com -u MAYYHEM\\sccmadmin \
     --ticket "$(base64 -w0 ticket.kirbi)" -c ps1-sms.mayyhem.com
+
+# LDAP-only, pass-the-hash (bind to the DC with an NT hash — no cleartext password):
+uv run openhound collect sccm ./out -d mayyhem.com --dc dc.mayyhem.com \
+    -u MAYYHEM\\domainadmin --nt-hash 8846f7eaee8fb117ad06bdd830b7586c -m LDAP
+
+# LDAP-only, pass-the-ticket (bind with a base64 .kirbi):
+uv run openhound collect sccm ./out -d mayyhem.com --dc dc.mayyhem.com \
+    --ticket "$(base64 -w0 ticket.kirbi)" -m LDAP
 ```
 
 > **Status:** the auth client is implemented and unit- and live-validated against the lab AdminService. The **AdminService**, **WMI**, and **HTTP** per-host phases are implemented (collect-only); see [`--collection-methods`](#collection). HTTP uses the client's **anonymous** mode — it reads the unauthenticated 401/403/200 that reveal site-system roles.

@@ -1,8 +1,8 @@
 # Tickets by Status
 
-> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Source of truth:** `.tickets/*.md`
+> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-21 (closed ope-b1e8, ope-e191; closed ope-272e — subsumed by ope-b7b2; closed ope-b7b2 — LDAP PtH/PtT live-validated; created ope-4ba1 — shared-lib flag-name follow-up) · **Source of truth:** `.tickets/*.md`
 >
-> This index groups all 91 tickets by their **verified** status — meaning each ticket was read
+> This index groups all 92 tickets by their **verified** status — meaning each ticket was read
 > in full (`gtk show`) and cross-checked against the actual code and git history on the
 > `integration` branch, not just trusting the `status:` field.
 >
@@ -19,10 +19,10 @@
 
 | Status | Before audit | `gtk` now | Code-true state |
 |---|---:|---:|---:|
-| Closed | 51 | **63** | 61 |
-| In&nbsp;Progress | 6 | **6** | 8 |
-| Open | 34 | **22** | 22 |
-| **Total** | **91** | **91** | **91** |
+| Closed | 51 | **67** | 65 |
+| In&nbsp;Progress | 6 | **5** | 7 |
+| Open | 34 | **20** | 20 |
+| **Total** | **91** | **92** | **92** |
 
 The 2-ticket gap between "`gtk` now" and "code-true state" is **Ope-f3di** and **Ope-scp1** —
 kept `closed` as *superseded* even though their work isn't actually done. Their scope lives in
@@ -61,7 +61,7 @@ that's yours to do after review.
 
 | Ticket | Was | Why |
 |---|---|---|
-| [ope-b7b2](.tickets/ope-b7b2.md) | open | 2 of 4 auth paths wired (SMB, RemoteRegistry, WMI done; LDAP + MSSQL not) |
+| [ope-b7b2](.tickets/ope-b7b2.md) | open→closed | (at audit time) 2 of 4 auth paths wired; since completed & CLOSED by ope-b7b2 — LDAP PtH/PtT wired + live-validated, MSSQL ticket-only EPA warning |
 | [Ope-rhzx](.tickets/Ope-rhzx.md) | open | Role-based RBAC done; granular per-op "Individual Permissions" absent |
 | [Ope-15m7](.tickets/Ope-15m7.md) | open | AuthUsers seed node synthesized; `ldap_group_memberships` not implemented |
 | [Ope-liu7](.tickets/Ope-liu7.md) | open | Container DACL parsed but only GenericAll; no ACL table / takeover edges |
@@ -75,9 +75,20 @@ that's yours to do after review.
 | [Ope-f3di](.tickets/Ope-f3di.md) ⚠️ | Closed as superseded by [ope-1f0f](.tickets/ope-1f0f.md) (still open). Reopening would duplicate tracking — its logging-audit scope belongs in the umbrella. A note was added to ope-1f0f. |
 | [Ope-scp1](.tickets/Ope-scp1.md) ⚠️ | Same rationale — variable-scope audit scope folded into ope-1f0f. |
 
+### Closed after the audit (2026-07-21) — implemented + closed this session
+
+Two tickets were implemented (subagent-driven; plan `docs/superpowers/plans/2026-07-21-tier1-tier2-smc-abuse-and-cleanup.md`) and closed *after* the reconciliation above:
+
+| Ticket | Was | What shipped |
+|---|---|---|
+| [ope-b1e8](.tickets/ope-b1e8.md) | open | Dead `--sms`/`--sms-provider` flag + plumbing removed; README/ARCHITECTURE point at `-c`. |
+| [ope-e191](.tickets/ope-e191.md) | open | Recursive GenericAll group expansion in `ldap_system_management_dacl` (cycle-guarded; ldap3 auto_range-aware). |
+
+`ope-1f0f` stays **open** — only its lint half landed; the conditional-logging pass remains. `Ope-liu7`'s takeover edges remain **deferred**.
+
 ---
 
-## Closed (61 code-verified)
+## Closed (63 code-verified)
 
 Tickets whose requested change is actually present in the code. All are now recorded `closed`
 in `gtk`.
@@ -117,6 +128,7 @@ in `gtk`.
 - [ope-9d62](.tickets/ope-9d62.md) — Implement HTTP per-host collector
 - [ope-aa39](.tickets/ope-aa39.md) — Add entity-panel help content to SCCM edge property bags
 - [ope-afc8](.tickets/ope-afc8.md) — Fix SCCM_HasMember landing on Computer nodes for non-client members
+- [ope-b1e8](.tickets/ope-b1e8.md) — Dead collect flag `--sms`/`--sms-provider` removed; docs point at `-c`
 - [ope-b287](.tickets/ope-b287.md) — Implement AdminService per-host collector (multi-table)
 - [ope-b916](.tickets/ope-b916.md) — Wire SCCM version→CVE fingerprinting into HTTP + site node
 - [ope-c660](.tickets/ope-c660.md) — Implement WMI per-host collector (folded into privileged.py)
@@ -126,6 +138,7 @@ in `gtk`.
 - [ope-d820](.tickets/ope-d820.md) — Stage 6: Coerce-and-relay possible edges
 - [ope-da2a](.tickets/ope-da2a.md) — Filter debug_per_host.py to specific collectors (mirror -m)
 - [ope-df0e](.tickets/ope-df0e.md) — Fix SCCM_AssignAllPermissions DB→every-site over-emission
+- [ope-e191](.tickets/ope-e191.md) — Recursively expand group members of GenericAll holders (cycle-guarded)
 - [ope-ec50](.tickets/ope-ec50.md) — Fix SCCM_ClientDevice name missing @siteCode suffix
 - [ope-f27c](.tickets/ope-f27c.md) — `collect sccm --run-all`: end-to-end flag + shared orchestration fn
 - [ope-f651](.tickets/ope-f651.md) — Migrate SCCM onto shared library (duplicate stub of ope-1f49)
@@ -146,6 +159,8 @@ in `gtk`.
 - [ope-3d28](.tickets/ope-3d28.md) — Implement MSSQL per-host collector
 - [ope-6716](.tickets/ope-6716.md) — Stage 5: MSSQL nodes and edges
 - [ope-6aa7](.tickets/ope-6aa7.md) — Split AD nodes/edges into a separate untagged OpenGraph file
+- [ope-272e](.tickets/ope-272e.md) — LDAP pass-the-hash placeholder — **subsumed by ope-b7b2** (LDAP pass-the-hash + pass-the-ticket wired 2026-07-21)
+- [ope-b7b2](.tickets/ope-b7b2.md) — Wire `--nt-hash`/`--ticket` into all auth paths — LDAP PtH/PtT wired + **live-validated** (2026-07-21); MSSQL EPA ticket-only warning; MSSQL PtT-for-EPA descoped (owner decision, no follow-up ticket)
 
 > **Note:** [Ope-f3di](.tickets/Ope-f3di.md) and [Ope-scp1](.tickets/Ope-scp1.md) are also recorded
 > `closed` but their work is **not** actually done — they were closed as superseded by the open
@@ -153,9 +168,8 @@ in `gtk`.
 
 ---
 
-## In Progress (8 code-verified)
+## In Progress (7 code-verified)
 
-- [ope-b7b2](.tickets/ope-b7b2.md) — Wire `--nt-hash`/`--ticket` into LDAP/SMB/RemoteRegistry/MSSQL (2 of 4 done) *(reconciled → in_progress)*
 - [Ope-rhzx](.tickets/Ope-rhzx.md) — Individual Permissions port (role RBAC done, granular per-op not) *(reconciled → in_progress)*
 - [Ope-15m7](.tickets/Ope-15m7.md) — Seed Nodes / Edges audit (AuthUsers seed done, group memberships not) *(reconciled → in_progress)*
 - [Ope-liu7](.tickets/Ope-liu7.md) — System Management Container abuse (GenericAll only, no takeover edges) *(reconciled → in_progress)*
@@ -166,7 +180,7 @@ in `gtk`.
 
 ---
 
-## Open (22 code-verified)
+## Open (20 code-verified)
 
 Tickets with no meaningful implementation found — genuinely not started. All recorded `open`.
 
@@ -184,11 +198,9 @@ Tickets with no meaningful implementation found — genuinely not started. All r
 - [Ope-txs0](.tickets/Ope-txs0.md) — Search Other Discovered Domains via LDAP
 - [Ope-zaja](.tickets/Ope-zaja.md) — Relay to Management Point
 - [ope-1172](.tickets/ope-1172.md) — Test different port / named instance (QA task)
-- [ope-272e](.tickets/ope-272e.md) — LDAP pass-the-hash (`--nt-hash`) support — placeholder
+- [ope-4ba1](.tickets/ope-4ba1.md) — Make shared `AdClient` credential-summary warning flag-name-agnostic (surfaced by ope-b7b2)
 - [ope-7da1](.tickets/ope-7da1.md) — Wire `--socks-proxy` in MSSQL collector
 - [ope-90fc](.tickets/ope-90fc.md) — Collapse duplicate cross-site SCCMResourceIDs to canonical entry
 - [ope-a214](.tickets/ope-a214.md) — SCCM edge Composition property + admin-user AssignAllPermissions gap
 - [ope-ad1c](.tickets/ope-ad1c.md) — AdminService/WMI don't identify DP roles / client-cert status
-- [ope-b1e8](.tickets/ope-b1e8.md) — Dead collect flag: `--sms`/`--sms-provider` accepted but ignored
-- [ope-e191](.tickets/ope-e191.md) — Recursively expand group members of GenericAll holders
 - [ope-f173](.tickets/ope-f173.md) — Add Kerberos to the LDAP auth ladder for explicit CLI creds

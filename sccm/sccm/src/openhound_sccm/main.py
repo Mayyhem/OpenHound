@@ -951,8 +951,8 @@ def collect_sccm(
     domain_controller: Optional[str] = typer.Option(None, "--dc", "--domain-controller", help="DC hostname or IP. If omitted, resolved from --domain via DNS SRV (_ldap._tcp.dc._msdcs.<domain>)."),
     username: Optional[str] = typer.Option(None, "-u", "--username", help="DOMAIN\\\\user for explicit auth."),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password for explicit auth."),
-    nt_hash: Optional[str] = typer.Option(None, "--nt-hash", help="NT hash for pass-the-hash auth (bare 32-hex NT hash; LM half assumed empty). Used by AdminService Kerberos (RC4 key) and NTLM, and by the SMB-based phases (RemoteRegistry, SMB)."),
-    ticket: Optional[str] = typer.Option(None, "--ticket", help="Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for pass-the-ticket. Kerberos only, no NTLM fallback. Honored by AdminService/WMI and the SMB-based phases (RemoteRegistry, SMB)."),
+    nt_hash: Optional[str] = typer.Option(None, "--nt-hash", help="NT hash for pass-the-hash auth (bare 32-hex NT hash; LM half assumed empty). Used by LDAP, AdminService (Kerberos RC4 key and NTLM), the SMB-based phases (RemoteRegistry, SMB), and the MSSQL EPA probe."),
+    ticket: Optional[str] = typer.Option(None, "--ticket", help="Base64-encoded Kerberos ticket (.kirbi / KRB-CRED) for pass-the-ticket. Kerberos only, no NTLM fallback. Honored by LDAP, AdminService/WMI, and the SMB-based phases (RemoteRegistry, SMB). Not used for the MSSQL EPA probe (it cannot probe channel binding — use -p/--password or --nt-hash there)."),
     ldap_port: Optional[int] = typer.Option(None, "--ldap-port", help="Pin LDAP port. Omit to auto-detect (LDAPS:636 → StartTLS:389 → LDAP:389+sign/seal). 636/3269 → LDAPS; any other port → LDAP."),
     # ---- Collection ----
     collection_methods: Optional[str] = typer.Option(

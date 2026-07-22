@@ -1,6 +1,6 @@
 ---
 id: ope-e191
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-06-03T20:38:59Z
@@ -30,3 +30,9 @@ Track visited group SIDs/DNs in a set to avoid infinite loops from circular grou
 - User members are yielded for modeling.
 - Circular group nesting does not cause infinite recursion (visited-set).
 - Behavior for direct, non-group GenericAll principals is unchanged.
+
+## Notes
+
+**2026-07-21T15:56:50Z**
+
+Closed (2026-07-21): recursive GenericAll group expansion added to ldap_system_management_dacl via _expand_group_targets — computer members registered as targets (LDAP-GenericAllSystemManagement), users logged, nested groups recursed, cycle guard keyed on group_dn. Range handling reconciled to ldap3 auto_range (which already pages large groups fully); a defensive warning fires only if a residual member;range= key shows auto_range did not complete (no silent truncation). Tests: tests/test_ldap_smc_recursion.py; per-task + whole-branch reviewed; green. Code pushed by user.

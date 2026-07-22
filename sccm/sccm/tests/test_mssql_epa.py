@@ -91,3 +91,29 @@ def test_test_epa_surfaces_allowed_required_verbatim(monkeypatch):
     )
     result = mssql_epa.test_epa(target="x", username="u", password="p", domain="d")
     assert result.extended_protection == "Allowed/Required"
+
+
+def test_test_epa_warns_and_skips_when_only_ticket(monkeypatch, caplog):
+    """Ticket only (no explicit creds, no SSPI) -> WARNING + None; detect_epa never called."""
+    import logging
+    called = []
+    monkeypatch.setattr(mssql_epa, "_sspi_available", lambda: False)
+    monkeypatch.setattr(mssql_epa, "detect_epa", lambda *a, **k: called.append(1))
+    with caplog.at_level(logging.WARNING):
+        result = mssql_epa.test_epa(target="ps1-db.mayyhem.com", domain="mayyhem.com",
+                                    kerberos_ticket="Zm9vYmFy")
+    assert result is None
+    assert called == []
+    assert "pass-the-ticket" in caplog.text.lower()
+    assert "--nt-hash" in caplog.text
+
+
+def test_test_epa_prefers_sspi_over_ticket_only(monkeypatch):
+    """Ticket + SSPI available -> SSPI is used (EPA is server-side; SSPI still detects it)."""
+    captured = {}
+    monkeypatch.setattr(mssql_epa, "_sspi_available", lambda: True)
+    monkeypatch.setattr(mssql_epa, "detect_epa",
+                        lambda t, a, **k: (captured.update(auth=a) or _VERDICT))
+    result = mssql_epa.test_epa(target="x", domain="d", kerberos_ticket="Zm9vYmFy")
+    assert result.extended_protection == "Required"
+    assert captured["auth"].use_sspi is True

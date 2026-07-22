@@ -8,9 +8,10 @@ shared library (which the MSSQL collector also uses). This module keeps only
 SCCM's collector-facing glue:
 
   * :func:`test_epa` — the credential-ladder entry point the MSSQL collector calls;
-    it selects explicit-creds vs current-user SSPI (vs skip), pins the registered
-    ``MSSQLSvc`` SPN from the host's AD SPN list, runs the shared ``detect_epa``,
-    and returns an :class:`EPAResult` (or ``None`` when no usable auth is available);
+    it selects explicit-creds vs current-user SSPI (vs a ticket-only WARNING+skip,
+    since pass-the-ticket can't probe channel binding, vs skip), pins the
+    registered ``MSSQLSvc`` SPN from the host's AD SPN list, runs the shared
+    ``detect_epa``, and returns an :class:`EPAResult` (or ``None``);
   * :class:`EPAResult` — the small result record the collector reads;
   * :func:`_select_mssql_spn` — SPN selection from the AD SPN list.
 
@@ -79,15 +80,18 @@ def test_epa(
     username: Optional[str] = None,
     password: Optional[str] = None,
     nt_hash: Optional[str] = None,
+    kerberos_ticket: Optional[str] = None,
     spns: Optional[list] = None,
 ) -> Optional[EPAResult]:
     """Determine EPA enforcement for one SQL Server via the shared detector.
 
     Credential ladder: explicit credentials (password or NT hash) -> current-user
-    SSPI integrated auth -> skip (returns ``None``). *spns* is the host's AD SPN
-    list, used to pin the registered ``MSSQLSvc`` SPN so the service-binding AV
-    pair matches what the server expects. Raises :class:`EPAPrereqError` (from the
-    shared detector) when the baseline login can't establish a trustworthy result.
+    SSPI integrated auth -> (ticket-only: WARNING + skip, because pass-the-ticket
+    cannot probe channel binding) -> skip (returns ``None``). *spns* is the host's
+    AD SPN list, used to pin the registered ``MSSQLSvc`` SPN so the service-binding
+    AV pair matches what the server expects. Raises :class:`EPAPrereqError` (from
+    the shared detector) when the baseline login can't establish a trustworthy
+    result.
     """
     remote_name = remote_name or target
     spn = _select_mssql_spn(spns, remote_name, port)
@@ -99,6 +103,20 @@ def test_epa(
     elif _sspi_available():
         logger.info("EPA testing %s via current-user SSPI (NTLM) integrated auth", target)
         auth = Auth(use_sspi=True, domain=domain, spn=spn)
+    elif kerberos_ticket:
+        # Pass-the-ticket cannot drive EPA detection: the probe tells Allowed from
+        # Required by forging bogus/missing NTLM channel-binding AV pairs, and
+        # impacket's Kerberos login exposes no hook to do that. Warn and skip
+        # rather than emit a misleading verdict. (This branch is reached only when
+        # a ticket is the *sole* usable credential -- explicit creds and SSPI, both
+        # of which can detect EPA, take precedence above.)
+        logger.warning(
+            "EPA testing %s skipped: pass-the-ticket (--ticket) cannot probe EPA "
+            "enforcement. For EPA detection supply -p/--password or --nt-hash, or "
+            "run on a domain-joined Windows host to use current-user SSPI.",
+            target,
+        )
+        return None
     else:
         logger.warning("EPA testing %s skipped: no credentials and SSPI unavailable", target)
         return None

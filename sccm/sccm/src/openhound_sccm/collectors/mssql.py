@@ -68,7 +68,8 @@ def collect_mssql(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[s
 
     logger.info("MSSQL port %d is open", port)
 
-    # Probe EPA enforcement using the credential ladder (explicit creds -> SSPI -> skip).
+    # Probe EPA enforcement using the credential ladder (explicit creds -> SSPI ->
+    # ticket-only WARNING+skip -> skip).
     epa_result = test_epa(
         target=target,
         port=port,
@@ -77,6 +78,7 @@ def collect_mssql(target: str, ctx: SourceContext) -> Iterable[tuple[str, dict[s
         username=ctx.username,
         password=ctx.password,
         nt_hash=ctx.nt_hash,
+        kerberos_ticket=ctx.kerberos_ticket,
         spns=spns,
     )
 
