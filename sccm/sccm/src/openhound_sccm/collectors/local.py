@@ -259,7 +259,14 @@ def local_client_logs_targets(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     ]
 
     unc_pattern = re.compile(r"\\\\([a-zA-Z0-9\-_\s]{2,15}(?:\.[a-zA-Z0-9\-_\s]{1,64}){0,3})(\\[^\\\/:\*\?`\"<>\|;]{1,64})+(\\)?", re.IGNORECASE)
-    url_pattern = re.compile(r"\w+://(?:[\w@][\w.:@]+@)?([\w][\w.-]*)", re.IGNORECASE)
+    # group(1) is the bare hostname used for target discovery (no port/path);
+    # the trailing optional port and path/query keep group(0) spanning the whole
+    # URL so the "Found URL" verbose log prints it in full, the way CMBP's
+    # path-tail regex did. Without them group(0) stopped at "scheme://host".
+    url_pattern = re.compile(
+        r"\w+://(?:[\w@][\w.:@]+@)?([\w][\w.-]*)(?::\d+)?(?:/[\w.?=%&\-@/$,]*)?",
+        re.IGNORECASE,
+    )
 
     # Maps discovered hostname (lowercase) to its source type for targeted log messages.
     discovered: dict[str, str] = {}
