@@ -44,6 +44,15 @@ class ComputerNode(BaseAsset):
     sccm_client_certificate_required: bool | None = None
     sccm_hosts_content_library: bool | None = None
     sccm_is_pxe_support_enabled: bool | None = None
+    # AD attributes LEFT-JOINed on by _join_ad_props (Task A3); all null when this
+    # SID was never LDAP-resolved.
+    enabled: bool | None = None
+    type: str | None = None
+    is_domain_principal: bool | None = None
+    object_class: list[str] | None = None
+    service_principal_name: list[str] | None = None
+    cn: str | None = None
+    domain: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -93,6 +102,13 @@ class ComputerNode(BaseAsset):
                 SCCMClientCertificateRequired=self.sccm_client_certificate_required,
                 SCCMHostsContentLibrary=self.sccm_hosts_content_library,
                 SCCMIsPXESupportEnabled=self.sccm_is_pxe_support_enabled,
+                Domain=self.domain,
+                Enabled=self.enabled,
+                IsDomainPrincipal=self.is_domain_principal,
+                Type=self.type,
+                objectClass=self.object_class,
+                servicePrincipalName=self.service_principal_name,
+                CN=self.cn,
             ),
         )
 

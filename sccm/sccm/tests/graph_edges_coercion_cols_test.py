@@ -8,14 +8,16 @@ def _seed(con):
     _graph_edges_init(con, "sccm")
     # Two duplicate relay rows for the same (start,kind,end) with different pairs:
     # dedup must array-union them (mirrors CMBP Upsert-Edge merge).
+    # Trailing NULL on each row is sccm_infra (unrelated to this test; only
+    # SCCM_IsMappedTo populates it -- see edge_is_mapped_to_sccminfra_test.py).
     con.execute(
         "INSERT INTO sccm.graph_edges VALUES "
         "('MAYYHEM.COM-S-1-5-11','PS1','SCCM_CoerceAndRelayToAdminService',"
-        " ['Post-processing'], ['Coerce A, relay to X'], NULL),"
+        " ['Post-processing'], ['Coerce A, relay to X'], NULL, NULL),"
         "('MAYYHEM.COM-S-1-5-11','PS1','SCCM_CoerceAndRelayToAdminService',"
-        " ['Post-processing'], ['Coerce B, relay to X'], NULL),"
+        " ['Post-processing'], ['Coerce B, relay to X'], NULL, NULL),"
         # A non-relay edge with NULL coercion columns must survive as empty lists.
-        "('PS1','C1','SCCM_Contains', ['SCCM_Invoke-PostProcessing'], NULL, NULL)"
+        "('PS1','C1','SCCM_Contains', ['SCCM_Invoke-PostProcessing'], NULL, NULL, NULL)"
     )
 
 

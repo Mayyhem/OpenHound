@@ -1,6 +1,7 @@
 import logging
 import pathlib
 from collections.abc import Iterable
+from typing import Any
 
 import dlt
 from openhound_collector_common.dlt.source_bridge import StreamBridge
@@ -200,6 +201,36 @@ def build_emit_resources(table_names=None):
     if table_names is None:
         return [emit() for emit in _EMIT_RESOURCES]
     return [_make_emit_resource(table)() for table in table_names]
+
+
+# ---------------------------------------------------------------------------
+# Finalization resource — dumps SourceContext.resolved_principals (populated
+# by resolve_principal() across BOTH the discovery stage and the per-host
+# stage) to the "ldap_resolved_principals" raw table.
+#
+# Deliberately NOT part of DISCOVERY_RESOURCE_NAMES, NOT part of
+# _EMIT_RESOURCES/build_emit_resources() (those drain per-host Phase streams;
+# this table isn't produced by a Phase — resolve_principal is called from
+# discovery collectors, register_target, and per-host phase code alike), and
+# NOT returned from source() below. main.py::_run_per_host_stage calls it
+# directly, in its own tiny pipeline.run, strictly after both the discovery
+# pass and the whole per-host worker pool have finished — the only point at
+# which ctx.resolved_principals is guaranteed complete. Registering it via
+# @app.resource still satisfies the framework's conformance guard (it checks
+# app.dlt_resources, populated at decoration/import time regardless of
+# whether the resource is ever included in a source's with_resources() set).
+@app.resource(
+    name="ldap_resolved_principals",
+    parallelized=False,
+    columns=raw_table_asset("ldap_resolved_principals"),
+)
+def ldap_resolved_principals(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+    """Yield every uniquely-resolved AD principal accumulated during this run.
+
+    A thin wrapper around ctx.resolved_principals — see
+    SourceContext._record_resolved_principal for how/when it's populated.
+    """
+    yield from list(ctx.resolved_principals.values())
 
 
 @app.source(name="sccm", max_table_nesting=0)

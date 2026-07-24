@@ -1,6 +1,6 @@
 # Tickets by Status
 
-> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created+closed ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename (user-verified); closed ope-76f1 (user-verified); created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open; created+closed ope-2f15 — renamed SCCM edge kinds to match schema.json, live-verified; reorganized collect-sccm `--help` into rich panels (Authentication/Collection/Performance/Output/Logging) and removed the 6 inert CRED-2 flags — removal noted on Ope-t7kv, reserved BloodHound Upload panel noted on Ope-8wi2, created ope-7313 — Testing panel capture, open) · **Source of truth:** `.tickets/*.md`
+> **Generated:** 2026-07-21 · **Reconciled:** 2026-07-21 · **Updated:** 2026-07-22 (created ope-76f1 — `-v`=VERBOSE + `--silent`, now in_progress; created ope-00df — per-file log-suppression follow-up, open; created+closed ope-cc0f — renamed `--socks-proxy` flag to `-x` / `--proxy`; created+closed ope-54be — ordered-log per-host grouping fix + always-DEBUG full log + log rename (user-verified); closed ope-76f1 (user-verified); created ope-e10b — emit `SCCM_HasNetworkAccessAccount` from Local collection, open; created+closed ope-2f15 — renamed SCCM edge kinds to match schema.json, live-verified; reorganized collect-sccm `--help` into rich panels (Authentication/Collection/Performance/Output/Logging) and removed the 6 inert CRED-2 flags — removal noted on Ope-t7kv, reserved BloodHound Upload panel noted on Ope-8wi2, created ope-7313 — Testing panel capture, open) · **2026-07-23:** created ope-961c — flesh out `disableLoopbackCheck` + add an NTLM-reflection relay edge (open); created ope-c141 + ope-fb99 — CMBP-parity property gaps found via `--compare-to-zip` (populate all AD node props to CMBP parity; emit missing SCCM ClientDevice/Site/edge props), both open; created+closed ope-6569 — quiet expected `http_*`/`smb_*` fallback-table misses in preproc (WARNING→DEBUG when a privileged transport ran; stays WARNING in HTTP-only/SMB-only runs), offline-verified · **2026-07-24:** created ope-8c44 (open) — implement direct BloodHound CE upload (schema + results) from SCCM via a reusable uploader in `openhound-collector-common`; **linked to Ope-8wi2** ("Upload Directly to BloodHound"), whose original design (reuse OpenHound core's ingest destination) was **pivoted** during an owner grill to porting the Go MSSQLHound flow (PUT `/api/v2/extensions` + `/api/v2/file-upload/*`). Plan: `sccm/sccm/docs/superpowers/plans/2026-07-24-bloodhound-direct-upload.md`; executed the CMBP-parity property plan (ope-c141 Phase A AD props + ope-fb99 Phase B SCCM props: SCCM_Site.siteSystemRoles, SCCM_IsMappedTo.SCCMInfra edge prop, SCCM_ClientDevice telemetry extras) via SDD — code done + green, awaiting user test/commit (both still `open`); created+**fix-applied** ope-c0c0 (bug found during B3) — `SCCM_ClientDevice` lastOnlineTime/lastOfflineTime were always empty due to a `c_n_`-vs-`cn_` raw-column typo (dlt/`_snake` treat "CN" as one token); corrected + regression test (proven red→green), linked to ope-fb99, `open` awaiting commit; created ope-6b93 (open) — investigate parity gap where a Local-only/low-priv collector host builds no `SCCM_ClientDevice` node (CMBP does via Local `Upsert-Node`, ps1:4008), with a note to investigate other remote collection methods available to a local-admin-but-not-SCCM-admin principal, linked to ope-fb99 · **Source of truth:** `.tickets/*.md`
 >
 > This index groups all 92 tickets by their **verified** status — meaning each ticket was read
 > in full (`gtk show`) and cross-checked against the actual code and git history on the
@@ -19,10 +19,10 @@
 
 | Status | Before audit | `gtk` now | Code-true state |
 |---|---:|---:|---:|
-| Closed | 51 | **71** | 69 |
+| Closed | 51 | **72** | 70 |
 | In&nbsp;Progress | 6 | **5** | 7 |
-| Open | 34 | **23** | 23 |
-| **Total** | **91** | **99** | **99** |
+| Open | 34 | **26** | 26 |
+| **Total** | **91** | **103** | **103** |
 
 > **2026-07-22 additions (not part of the 2026-07-21 audit):** [ope-76f1](.tickets/ope-76f1.md)
 > (`-v`=VERBOSE + `--silent`) and [ope-54be](.tickets/ope-54be.md) (ordered-log per-host grouping fix +
@@ -101,7 +101,7 @@ Two tickets were implemented (subagent-driven; plan `docs/superpowers/plans/2026
 
 ---
 
-## Closed (67 code-verified)
+## Closed (68 code-verified)
 
 Tickets whose requested change is actually present in the code. All are now recorded `closed`
 in `gtk`.
@@ -111,6 +111,10 @@ in `gtk`.
 - [ope-76f1](.tickets/ope-76f1.md) — `-v`=VERBOSE (was a no-op INFO) + `--silent` console mute (files still written)
 - [ope-54be](.tickets/ope-54be.md) — Ordered-log per-host grouping fix + always-DEBUG full log + rename (`collect_full_*` / `collect_issues_*`) + VERBOSE label fix + ccmsetup HTTP content-log truncation
 - [ope-2f15](.tickets/ope-2f15.md) — Renamed SCCM edge kinds to match `schema.json` (`SCCM_` prefix on SameHostAs/LocalAdminRequired/CoerceAndRelayToAdminService/CoerceAndRelayToSMB; `MSSQL_CoerceAndRelayToMSSQL` into the MSSQL schema; schema.json `SameAdminsAs`→`AdminsReplicatedTo`). Spun out `SCCM_HasNetworkAccessAccount` to ope-e10b (still open)
+
+**Implemented + closed 2026-07-23** (offline-verified — unit tests + real-DB check; awaiting user commit):
+
+- [ope-6569](.tickets/ope-6569.md) — Quiet expected `http_*`/`smb_*` fallback-table misses in preproc: an absent fallback role table now logs at DEBUG (not WARNING) when a privileged transport (AdminService/WMI) ran, and still WARNs in HTTP-only/SMB-only runs. Root cause (not a bug): the SMS Provider *is* the AdminService host → privileged-collected → HTTP probe skipped → `http_smsproviders` empty by design. Renamed `_sccm_sibling_miss`→`_sccm_expected_miss` + added `_privileged_transport_ran`; 4 new tests in `transforms_safe_fallback_test.py`
 
 - [Ope-6cei](.tickets/Ope-6cei.md) — Concurrency / Parallelism: wire `--threads` into Phase 3 per-host collection
 - [Ope-bmyk](.tickets/Ope-bmyk.md) — Abuse Info on Edges: per-edge abuse-path info + technique IDs in graph output
@@ -200,16 +204,20 @@ in `gtk`.
 
 ---
 
-## Open (23 code-verified)
+## Open (26 code-verified)
 
 Tickets with no meaningful implementation found — genuinely not started. All recorded `open`.
 
+- [ope-c141](.tickets/ope-c141.md) — Populate all AD node properties (Computer/User/Group) to CMBP parity instead of relying on SharpHound (links ope-fb99, ope-961c) *(created 2026-07-23)*
+- [ope-fb99](.tickets/ope-fb99.md) — Emit missing SCCM node/edge properties (ClientDevice extras, Site.siteSystemRoles, IsMappedTo.SCCMInfra) to CMBP parity *(created 2026-07-23)*
+- [ope-961c](.tickets/ope-961c.md) — Flesh out `disableLoopbackCheck` + add an NTLM-reflection relay edge (deferred from the cypher-query ideation session) *(created 2026-07-23)*
 - [ope-7313](.tickets/ope-7313.md) — Testing panel: reserve `rich_help_panel`; define its flags (dry-run / auth pre-flight) later *(created 2026-07-22)*
 - [ope-00df](.tickets/ope-00df.md) — Per-file log suppression `--no-diagnostics-log` / `--no-collect-log` (follow-up to ope-76f1) *(created 2026-07-22)*
 - [ope-e10b](.tickets/ope-e10b.md) — Emit `SCCM_HasNetworkAccessAccount` from Local collection (NAA from client WMI); schema.json placeholder with no emitter yet *(created 2026-07-22)*
 - [Ope-0t3h](.tickets/Ope-0t3h.md) — Client Push Installation Issues (CRED-1 / ELEVATE-1)
 - [Ope-4tdt](.tickets/Ope-4tdt.md) — DCOnly Mode (`--dc-only` flag)
-- [Ope-8wi2](.tickets/Ope-8wi2.md) — Upload Directly to BloodHound
+- [Ope-8wi2](.tickets/Ope-8wi2.md) — Upload Directly to BloodHound *(design pivoted 2026-07-24; implementation planned under linked [ope-8c44](.tickets/ope-8c44.md))*
+- [ope-8c44](.tickets/ope-8c44.md) — Direct BloodHound CE upload (schema + results) via shared `openhound-collector-common` uploader *(planned 2026-07-24; links Ope-8wi2)*
 - [Ope-emhc](.tickets/Ope-emhc.md) — Implement `--enable-bad-opsec` gating (flag defined but never gates)
 - [Ope-ew5k](.tickets/Ope-ew5k.md) — WMI Collection (client-side CIM tables)
 - [Ope-exvi](.tickets/Ope-exvi.md) — Findings / Remediations layer

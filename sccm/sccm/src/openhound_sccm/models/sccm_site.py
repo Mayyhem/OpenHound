@@ -54,6 +54,7 @@ class SCCMSite(BaseAsset):
     source_forest: str | None = None
     admin_users: list[str] = Field(default_factory=list)
     stored_accounts: list[str] = Field(default_factory=list)
+    site_system_roles: list[str] = Field(default_factory=list)
     # Site/SQL server identity (CMBP ps1:7052-7065, 3040), derived in _node_site.
     site_server_fqdn: str | None = None
     site_server_domain_sid: str | None = None
@@ -116,6 +117,7 @@ class SCCMSite(BaseAsset):
                 sourceForest=self.source_forest,
                 adminUsers=list(self.admin_users),
                 storedAccounts=list(self.stored_accounts),
+                siteSystemRoles=list(self.site_system_roles),
                 siteServerFQDN=self.site_server_fqdn,
                 siteServerDomainSID=self.site_server_domain_sid,
                 SQLServerFQDN=self.sql_server_fqdn,

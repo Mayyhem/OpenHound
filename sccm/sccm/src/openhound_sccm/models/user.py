@@ -34,6 +34,15 @@ class UserNode(BaseAsset):
     distinguished_name: str | None = None
     user_principal_name: str | None = None
     sam_account_name: str | None = None
+    # AD attributes LEFT-JOINed on by _join_ad_props (Task A3); all null when this
+    # SID was never LDAP-resolved.
+    enabled: bool | None = None
+    type: str | None = None
+    is_domain_principal: bool | None = None
+    object_class: list[str] | None = None
+    service_principal_name: list[str] | None = None
+    cn: str | None = None
+    domain: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -73,6 +82,13 @@ class UserNode(BaseAsset):
                 distinguishedName=self.distinguished_name,
                 userPrincipalName=self.user_principal_name,
                 samAccountName=self.sam_account_name,
+                Domain=self.domain,
+                Enabled=self.enabled,
+                IsDomainPrincipal=self.is_domain_principal,
+                Type=self.type,
+                objectClass=self.object_class,
+                servicePrincipalName=self.service_principal_name,
+                CN=self.cn,
             ),
         )
 

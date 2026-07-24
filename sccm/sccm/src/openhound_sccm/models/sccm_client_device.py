@@ -60,6 +60,13 @@ class SCCMClientDevice(BaseAsset):
     # Collection membership lists — Stage 3 C4 (CMBP ps1:7228-7229).
     collection_ids: list[str] = Field(default_factory=list)
     collection_names: list[str] = Field(default_factory=list)
+    # Telemetry extras — Task B3 (CMBP parity). currentManagementPoint/SID: Local
+    # SMS_Authority + AdminService device resource (ps1:4010-4011/7233-7234). previousSMSID/
+    # ChangeDate: Local-only, CCM_Client's PreviousClientId/ClientIdChangeDate (ps1:4016-4017).
+    current_management_point: str | None = None
+    current_management_point_sid: str | None = None
+    previous_smsid: str | None = None
+    previous_smsid_change_date: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -113,6 +120,16 @@ class SCCMClientDevice(BaseAsset):
                 # Collection membership lists (Stage 3 C4).
                 collectionIds=self.collection_ids or [],
                 collectionNames=self.collection_names or [],
+                # Telemetry extras (Task B3).
+                currentManagementPoint=self.current_management_point,
+                currentManagementPointSID=self.current_management_point_sid,
+                previousSMSID=self.previous_smsid,
+                previousSMSIDChangeDate=self.previous_smsid_change_date,
+                # userName/userDomainName intentionally mirror ADLastLogonUser/
+                # ADLastLogonUserDomain -- CMBP emits the same collected value under both
+                # output keys (ps1:7225/7253 and 7226/7254), not a mismapping.
+                userName=self.ad_last_logon_user_name,
+                userDomainName=self.ad_last_logon_user_domain,
             ),
         )
 

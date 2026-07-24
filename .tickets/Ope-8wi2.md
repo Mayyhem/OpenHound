@@ -2,7 +2,7 @@
 id: Ope-8wi2
 status: open
 deps: []
-links: []
+links: [ope-8c44]
 created: 2026-05-28T13:31:15Z
 type: feature
 priority: 2
@@ -27,3 +27,7 @@ Add --bloodhound-url, --bloodhound-token (CE) and --bhe-url, --bhe-token (Enterp
 **2026-07-22T16:24:34Z**
 
 CLI panel reserved (2026-07-22): during the collect-sccm --help reorg, the operator asked for a 'BloodHound Upload' rich_help_panel. It was NOT added yet because there are no upload flags. When this ticket is implemented, add the upload flag(s) to collect_sccm() (or a dedicated 'openhound upload' path) with rich_help_panel='BloodHound Upload' so they render as their own titled section in --help. Sibling reorg note: options are grouped into Authentication/Collection/Performance/Output/Logging panels via rich_help_panel; follow that pattern.
+
+**2026-07-24T13:54:55Z**
+
+2026-07-24: Design PIVOTED during a grill with the owner. Original design (reuse OpenHound core's ingest DLT destination + --bhe-url/--bhe-token) was rejected. New locked design: port the Go MSSQLHound flow (PUT /api/v2/extensions for schema + POST /api/v2/file-upload/{start,{id},end} for a results zip; HMAC or Bearer auth; retry on 429/5xx) into a REUSABLE uploader in openhound-collector-common, then wire into SCCM collect (--run-all) and convert. Uploads BOTH schema.json + schema_MSSQL.json, honors --disable-possible-edges, adds --upload-dir + --skip-collection. Implementation tracked in linked ope-8c44. Full plan: sccm/sccm/docs/superpowers/plans/2026-07-24-bloodhound-direct-upload.md

@@ -69,6 +69,9 @@ class SCCMEdgeProperties(EdgeProperties):
         opsec: Entity-panel "OPSEC" text — detection / operational-security
             considerations for abusing this edge — or None.
         references: Entity-panel "References" URLs for this edge kind, or None.
+        SCCMInfra: True when this edge flags its start-node principal as SCCM
+            infrastructure (CMBP ps1:7807, SCCM_IsMappedTo only) — or None for every
+            other edge kind, which convert prunes so their panels stay uncluttered.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     general: str | None = field(default=None, kw_only=True)
@@ -76,6 +79,7 @@ class SCCMEdgeProperties(EdgeProperties):
     linuxAbuse: str | None = field(default=None, kw_only=True)
     opsec: str | None = field(default=None, kw_only=True)
     references: list[str] | None = field(default=None, kw_only=True)
+    SCCMInfra: bool | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -163,6 +167,21 @@ class ComputerProperties(NodeProperties):
             or null if not collected.
         SCCMIsPXESupportEnabled: Whether this computer has PXE (network boot) support
             turned on for SCCM OS deployment, or null if not collected.
+        Domain: The AD domain (e.g. ``lab.local``) this computer's account belongs to,
+            or null if the account was never resolved against AD (e.g. an SCCM-only
+            device record with no matching AD object).
+        Enabled: Whether this computer account is enabled in AD (True), disabled
+            (False), or null if it was never resolved against AD.
+        IsDomainPrincipal: True if this computer was successfully resolved to a real AD
+            object via LDAP, or null if it wasn't (so this is unknown rather than "no").
+        Type: The AD object type this computer resolved to (e.g. ``Computer``), or null
+            if it was never resolved against AD.
+        objectClass: The AD `objectClass` attribute values for this computer's account
+            (e.g. ``["top", "person", "computer"]``), or null if never resolved against AD.
+        servicePrincipalName: The Kerberos Service Principal Names (SPNs) published on
+            this computer's AD account, or null if never resolved against AD.
+        CN: The AD `cn` (Common Name) attribute for this computer's account, or null if
+            never resolved against AD.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SCCMSiteSystemRoles: list[str] = field(default_factory=list, kw_only=True)
@@ -180,6 +199,13 @@ class ComputerProperties(NodeProperties):
     SCCMClientCertificateRequired: bool | None = field(default=None, kw_only=True)
     SCCMHostsContentLibrary: bool | None = field(default=None, kw_only=True)
     SCCMIsPXESupportEnabled: bool | None = field(default=None, kw_only=True)
+    Domain: str | None = field(default=None, kw_only=True)
+    Enabled: bool | None = field(default=None, kw_only=True)
+    IsDomainPrincipal: bool | None = field(default=None, kw_only=True)
+    Type: str | None = field(default=None, kw_only=True)
+    objectClass: list[str] | None = field(default=None, kw_only=True)
+    servicePrincipalName: list[str] | None = field(default=None, kw_only=True)
+    CN: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -206,6 +232,20 @@ class UserProperties(NodeProperties):
             the SQL service account or AD users (HasSession, MSSQL_GetTGS/GetAdminTGS/
             ServiceAccountFor, SCCM_HasPrimaryUser/HasADLastLogonUser/IsMappedTo) can resolve
             their User endpoint by ``samAccountName``.
+        Domain: The AD domain (e.g. ``lab.local``) this user's account belongs to, or
+            null if the account was never resolved against AD.
+        Enabled: Whether this user account is enabled in AD (True), disabled (False),
+            or null if it was never resolved against AD.
+        IsDomainPrincipal: True if this user was successfully resolved to a real AD
+            object via LDAP, or null if it wasn't (so this is unknown rather than "no").
+        Type: The AD object type this user resolved to (e.g. ``User``), or null if it
+            was never resolved against AD.
+        objectClass: The AD `objectClass` attribute values for this user's account
+            (e.g. ``["top", "person", "user"]``), or null if never resolved against AD.
+        servicePrincipalName: The Kerberos Service Principal Names (SPNs) published on
+            this user's AD account, or null if never resolved against AD.
+        CN: The AD `cn` (Common Name) attribute for this user's account, or null if
+            never resolved against AD.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
@@ -214,6 +254,13 @@ class UserProperties(NodeProperties):
     distinguishedName: str | None = field(default=None, kw_only=True)
     userPrincipalName: str | None = field(default=None, kw_only=True)
     samAccountName: str | None = field(default=None, kw_only=True)
+    Domain: str | None = field(default=None, kw_only=True)
+    Enabled: bool | None = field(default=None, kw_only=True)
+    IsDomainPrincipal: bool | None = field(default=None, kw_only=True)
+    Type: str | None = field(default=None, kw_only=True)
+    objectClass: list[str] | None = field(default=None, kw_only=True)
+    servicePrincipalName: list[str] | None = field(default=None, kw_only=True)
+    CN: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -227,10 +274,33 @@ class GroupProperties(NodeProperties):
             a built-in SCCM security group) rather than an ordinary AD group.
         SCCMResourceIDs: The SCCM internal "ResourceID" number(s) that identify this
             group inside SCCM's own database, one per site it's known to.
+        Domain: The AD domain (e.g. ``lab.local``) this group belongs to, or null if
+            it was never resolved against AD.
+        Enabled: Whether this group is enabled in AD — always null in practice, since
+            AD groups have no ACCOUNTDISABLE bit, but present for schema symmetry with
+            Computer/User.
+        IsDomainPrincipal: True if this group was successfully resolved to a real AD
+            object via LDAP, or null if it wasn't (so this is unknown rather than "no").
+        Type: The AD object type this group resolved to (e.g. ``Group``), or null if it
+            was never resolved against AD.
+        objectClass: The AD `objectClass` attribute values for this group (e.g.
+            ``["top", "group"]``), or null if never resolved against AD.
+        servicePrincipalName: The Kerberos Service Principal Names (SPNs) published on
+            this group's AD object, or null if never resolved against AD (groups rarely
+            carry SPNs, but the field is present for schema symmetry).
+        CN: The AD `cn` (Common Name) attribute for this group, or null if never
+            resolved against AD.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SCCMInfra: bool = field(default=False, kw_only=True)
     SCCMResourceIDs: list[str] = field(default_factory=list, kw_only=True)
+    Domain: str | None = field(default=None, kw_only=True)
+    Enabled: bool | None = field(default=None, kw_only=True)
+    IsDomainPrincipal: bool | None = field(default=None, kw_only=True)
+    Type: str | None = field(default=None, kw_only=True)
+    objectClass: list[str] | None = field(default=None, kw_only=True)
+    servicePrincipalName: list[str] | None = field(default=None, kw_only=True)
+    CN: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -266,6 +336,12 @@ class SCCMSiteProperties(NodeProperties):
         adminUsers: The node IDs of every `SCCM_AdminUser` granted access at this site.
         storedAccounts: The node IDs of every AD user/group whose credentials are saved
             in this site as a "stored account" (e.g. for OSD task sequences or client push).
+        siteSystemRoles: One "<dnsHostName>: <role>@<siteCode>" string per computer that
+            hosts a site-system role at this site (e.g. "srv1.corp.local: SMS Site
+            Server@CAS"), aggregated from every node_computer whose own per-host
+            SCCMSiteSystemRoles list contains a role suffixed with this site's code
+            (CMBP ps1:1851-1897). Distinct from `Computer.SCCMSiteSystemRoles`, which is
+            the same role data viewed per-host instead of per-site.
         SCCMInfra: Always true for a site node — sites are always part of the SCCM
             infrastructure by definition.
         siteServerFQDN: The fully-qualified DNS name of the server running this site.
@@ -300,6 +376,7 @@ class SCCMSiteProperties(NodeProperties):
     sourceForest: str | None = field(default=None, kw_only=True)
     adminUsers: list[str] = field(default_factory=list, kw_only=True)
     storedAccounts: list[str] = field(default_factory=list, kw_only=True)
+    siteSystemRoles: list[str] = field(default_factory=list, kw_only=True)
     SCCMInfra: bool = field(default=True, kw_only=True)
     # Site/SQL server identity (CMBP ps1:7052-7065, 3040). The *DomainSID fields hold the full
     # resolved computer/account SID (CMBP names them "DomainSID" but stores the whole object SID).
@@ -528,6 +605,18 @@ class SCCMClientDeviceProperties(NodeProperties):
         collectionNames: The names of the collections identified by `collectionIds`.
         SCCMInfra: True if this device is itself part of the SCCM infrastructure
             (rare for a client device; usually False).
+        currentManagementPoint: The name of the Management Point this device currently
+            uses, from AdminService/WMI or (for the collector's own host) Local SMS_Authority.
+        currentManagementPointSID: The resolved AD SID of the computer named in
+            `currentManagementPoint`.
+        previousSMSID: This device's previous SMS unique identifier, if SCCM re-issued it
+            a new one (Local-only; CCM_Client's `PreviousClientId`).
+        previousSMSIDChangeDate: The timestamp SCCM recorded when `previousSMSID` changed to
+            the current `SMSID` (Local-only; CCM_Client's `ClientIdChangeDate`).
+        userName: The name of the user Active Directory's `lastLogon`/`lastLogonTimestamp`
+            attributes show most recently signed in to this device. Mirrors `ADLastLogonUser`
+            -- CMBP emits the same collected value under both output keys.
+        userDomainName: The AD domain of the user in `userName`. Mirrors `ADLastLogonUserDomain`.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SMSID: str | None = field(default=None, kw_only=True)
@@ -562,6 +651,13 @@ class SCCMClientDeviceProperties(NodeProperties):
     collectionIds: list[str] = field(default_factory=list, kw_only=True)
     collectionNames: list[str] = field(default_factory=list, kw_only=True)
     SCCMInfra: bool = field(default=False, kw_only=True)
+    # Telemetry extras — Task B3 (CMBP ps1:4010-4011/4016-4017/7233-7234/7253-7254).
+    currentManagementPoint: str | None = field(default=None, kw_only=True)
+    currentManagementPointSID: str | None = field(default=None, kw_only=True)
+    previousSMSID: str | None = field(default=None, kw_only=True)
+    previousSMSIDChangeDate: str | None = field(default=None, kw_only=True)
+    userName: str | None = field(default=None, kw_only=True)
+    userDomainName: str | None = field(default=None, kw_only=True)
 
 
 # ----------------------------------------------------------------------------

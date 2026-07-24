@@ -962,6 +962,31 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
             bridge.drain_to_unblock()
             pool_thread.join(timeout=0.1)
         _source.clear_bridge()
+
+    # ctx.resolved_principals now reflects every AD principal resolved during
+    # the WHOLE run: Stage-1 discovery (which finished before this function
+    # was even called) plus every per-host phase above — pool_thread is only
+    # not alive once run_pipeline's ThreadPoolExecutor has joined all its
+    # workers, so every resolve_principal() call any phase made has already
+    # happened. It isn't produced by a Phase, so it has no stream of its own
+    # among the per-host tables; emit it here, in its own tiny pipeline.run,
+    # now that the whole run's resolutions are guaranteed to be in. Skipped
+    # (with a debug log) only when this function is exercised without a real
+    # context, e.g. collect_summary_test's row-count test — never in a real
+    # collect run, where collect_sccm only calls this with a live context.
+    if ctx is not None:
+        try:
+            pipeline.run(
+                [_source.ldap_resolved_principals(ctx)],
+                write_disposition="append",
+                loader_file_format="jsonl",
+            )
+        except Exception as exc:
+            # Both stages above already succeeded and are on disk — losing this
+            # last, separate pipeline.run shouldn't take collect_sccm down with it.
+            logger.warning("Failed to persist ldap_resolved_principals: %s", exc)
+    else:
+        logger.debug("Skipping ldap_resolved_principals emission: no context supplied")
     return per_host_counts
 
 
@@ -1029,12 +1054,33 @@ def collect_sccm(
     tables: Contract = typer.Option(Contract.evolve, rich_help_panel="Output", help="Contract for newly-seen resources/tables."),
     columns: Contract = typer.Option(Contract.evolve, rich_help_panel="Output", help="Contract for unknown fields."),
     data_type: Contract = typer.Option(Contract.freeze, rich_help_panel="Output", help="Contract for type mismatches."),
+    # ---- Testing ----
+    # Both flags imply --run-all (there is no graph to test/compare without a
+    # completed convert), so collect_sccm forces run_all on below.
+    run_integration_tests: bool = typer.Option(
+        False, "--run-integration-tests", rich_help_panel="Testing",
+        help="Implies --run-all, then assert the resulting graph against the built-in mayyhem "
+             "lab fixtures. Prints PASS/FAIL/SKIP + summary + coverage, writes "
+             "integration_results-<ts>.json, and exits non-zero if any case fails.",
+    ),
+    compare_to_zip: Optional[pathlib.Path] = typer.Option(
+        None, "--compare-to-zip", rich_help_panel="Testing",
+        help="Implies --run-all, then deep-diff this run's graph (A) against an arbitrary node/edge "
+             "payload B (a CMBP zip or another OpenHound run). Reports property-level differences and "
+             "writes compare-<ts>.json. Informational: always exits 0.",
+    ),
     # ---- Logging ----
     verbose: bool = typer.Option(False, "-v", "--verbose", rich_help_panel="Logging", help="Verbose console output (VERBOSE level: PS1 [Verbose] parity — per-resolution / per-node-add / per-edge dedupe traces). Default is INFO (step summaries)."),
     silent: bool = typer.Option(False, "--silent", rich_help_panel="Logging", help="Silence all console output. The on-disk logs are still written: collect_full_* (always the complete DEBUG trace of the collector) and collect_issues_* (warnings/errors with tracebacks)."),
     debug: bool = typer.Option(False, "--debug", rich_help_panel="Logging", help="Debug console output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug, silent)
+
+    # Testing against a graph (fixtures or a comparison zip) requires a completed
+    # convert, so either flag implies --run-all rather than making the operator
+    # pass both.
+    if run_integration_tests or compare_to_zip is not None:
+        run_all = True
 
     _ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1200,6 +1246,24 @@ def collect_sccm(
             output_path, _paths, _ordered_log_path, log_path,
             _diag.warning_count + _diag.error_count,
         )
+        # --compare-to-zip and --run-integration-tests both need the graph convert
+        # just produced. _ts is the same run timestamp used for the collect logs
+        # above, so every artifact from this invocation shares one suffix.
+        graph_dir = _paths.graph_out
+        if compare_to_zip is not None:
+            from openhound_sccm.integration import compare_to_zip as _compare_to_zip
+            _compare_to_zip(
+                graph_dir, compare_to_zip,
+                out_path=output_path / f"compare-{_ts}.json", log=logger.info,
+            )
+        if run_integration_tests:
+            from openhound_sccm.integration import run_integration_tests as _run_integration_tests
+            rc = _run_integration_tests(
+                graph_dir,
+                results_path=output_path / f"integration_results-{_ts}.json",
+                log=logger.info,
+            )
+            raise typer.Exit(code=rc)
     else:
         logger.debug("--run-all not set; leaving preprocess/convert to the operator.")
     return load_info
@@ -1535,6 +1599,10 @@ def _preproc_table_map() -> dict[str, str]:
         # SMB per-host phase (smb.py yield "table", row)
         "smb_computers",
         "smb_sites",
+        # Finalization resource (source.py @app.resource name=...), dumping
+        # SourceContext.resolved_principals after both stages finish —
+        # see _run_per_host_stage's trailing pipeline.run call below.
+        "ldap_resolved_principals",
     ]
     return {table: f"sccm/{table}" for table in base_tables}
 

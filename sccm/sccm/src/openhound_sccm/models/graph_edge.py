@@ -58,6 +58,10 @@ class GraphEdge(_BaseGraphEdge):
     coercion_victim_and_relay_target_pairs: list[str] | None = None
     coercion_victim_hostnames: list[str] | None = None
 
+    # SCCM_IsMappedTo rows carry this true (CMBP parity); every other kind leaves it
+    # NULL, so convert prunes the property from their panels.
+    sccm_infra: bool | None = None
+
     @property
     def edges(self) -> Iterator[Edge]:
         """Yield one Edge for this row.
@@ -90,6 +94,7 @@ class GraphEdge(_BaseGraphEdge):
                 collectionSource=self.collection_source or [],
                 coercionVictimAndRelayTargetPairs=self.coercion_victim_and_relay_target_pairs or [],
                 coercionVictimHostnames=self.coercion_victim_hostnames or [],
+                SCCMInfra=self.sccm_infra,
                 **help_fields,
             )
         else:
@@ -97,6 +102,7 @@ class GraphEdge(_BaseGraphEdge):
             properties = SCCMEdgeProperties(
                 traversable=traversable,
                 collectionSource=self.collection_source or [],
+                SCCMInfra=self.sccm_infra,
                 **help_fields,
             )
         yield Edge(

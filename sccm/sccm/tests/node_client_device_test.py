@@ -45,8 +45,11 @@ def test_client_device_timestamp_scalars():
     con.execute("CREATE TABLE sccm.adminservice_client_devices AS "
                 "SELECT 'GUID-A' AS smsid, 'SRV01' AS name, 10 AS resource_id, 'PS1' AS site_code, "
                 "true AS is_client, false AS is_obsolete, "
-                "'2026-01-10' AS last_active_time, '2026-01-11' AS c_n_last_online_time, "
-                "'2026-01-09' AS c_n_last_offline_time")
+                # Raw columns are cn_last_online_time/cn_last_offline_time (dlt/_snake treat
+                # "CN" as one token); the old c_n_* names were a typo that never matched real
+                # data -- see ope-c0c0 and client_device_extras_test.py.
+                "'2026-01-10' AS last_active_time, '2026-01-11' AS cn_last_online_time, "
+                "'2026-01-09' AS cn_last_offline_time")
     transforms(con)
     r = con.execute(
         "SELECT last_active_time, last_online_time, last_offline_time "

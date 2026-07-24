@@ -1,8 +1,8 @@
 """Tests for the collect-sccm ``--help`` panel grouping and the CRED-2 removal.
 
 The options carry a ``rich_help_panel`` so ``--help`` renders titled sections
-(Authentication / Collection / Performance / Output / Logging) instead of one
-flat list, and the six inert CRED-2 / machine-account flags were deleted.
+(Authentication / Collection / Performance / Output / Testing / Logging) instead
+of one flat list, and the six inert CRED-2 / machine-account flags were deleted.
 
 Most assertions read the option metadata off ``collect_sccm``'s signature — that
 is deterministic and needs no live domain auto-detection. Two end-to-end checks
@@ -59,6 +59,9 @@ EXPECTED_PANEL = {
     "tables": "Output",
     "columns": "Output",
     "data_type": "Output",
+    # Testing — assert/diff the graph a run just produced; both imply --run-all.
+    "run_integration_tests": "Testing",
+    "compare_to_zip": "Testing",
     # Logging
     "verbose": "Logging",
     "silent": "Logging",
@@ -67,7 +70,7 @@ EXPECTED_PANEL = {
 
 # Panel display order in --help follows the order each panel first appears in the
 # parameter list, so this is also the intended source ordering.
-PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Logging"]
+PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Testing", "Logging"]
 
 
 def _option_params():
@@ -136,7 +139,7 @@ def _help_output():
     return result.output
 
 
-def test_help_renders_all_five_panels():
+def test_help_renders_all_panels():
     out = _help_output()
     for panel in PANEL_ORDER:
         assert panel in out, f"panel {panel!r} missing from --help"

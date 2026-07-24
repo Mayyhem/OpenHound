@@ -73,6 +73,8 @@ class ADClient(AdClient):
         "samaccountname": "sam_account_name",
         "userprincipalname": "user_principal_name",
         "objectclass": "object_class",
+        "useraccountcontrol": "user_account_control",
+        "serviceprincipalname": "service_principal_name",
     }
     # Attributes whose values are always opaque binary blobs and must NOT be
     # UTF-8-decoded (doing so corrupts them via errors="replace" substitution).

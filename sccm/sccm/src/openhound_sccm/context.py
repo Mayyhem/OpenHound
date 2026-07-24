@@ -19,6 +19,14 @@ from .models.target_entry import TargetEntry
 logger = logging.getLogger(__name__)
 
 
+def _domain_from_dn(dn: str) -> str | None:
+    """Derive a dotted domain name from a DN's DC= components, e.g.
+    "CN=Bob,DC=corp,DC=local" -> "corp.local". Returns None if the DN has
+    no DC= components (shouldn't happen for AD objects, but stay defensive)."""
+    parts = [p.split("=", 1)[1] for p in dn.split(",") if p.strip().lower().startswith("dc=")]
+    return ".".join(parts) if parts else None
+
+
 @dataclass
 class SourceContext:
     ad: ADClient
@@ -44,6 +52,15 @@ class SourceContext:
     work_queue: Any = field(default=None)
     ad_resolution_cache: dict[str, dict[str, Any] | None] = field(default_factory=dict)
     discovered_domains: set = field(default_factory=set)
+
+    # Every uniquely-resolved AD principal from this run, keyed by SID —
+    # populated by resolve_principal() on each fresh (non-cache-hit) success,
+    # regardless of whether the hit came during discovery or a per-host phase.
+    # Unlike ad_resolution_cache (keyed by lookup string, holds hits AND
+    # misses), this is a pure, deduped record of resolved objects, meant to be
+    # dumped to the "ldap_resolved_principals" raw table (source.py) once the
+    # whole run finishes — see main.py::_run_per_host_stage.
+    resolved_principals: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Site codes emitted into the sited DLT table during the preproc stage
     # collected from LDAP, local WMI
@@ -187,6 +204,8 @@ class SourceContext:
                 return self.ad_resolution_cache[cache_key]
             result = self._ldap_resolve_dn(name)
             self.ad_resolution_cache[cache_key] = result
+            if result is not None:
+                self._record_resolved_principal(result)
             return result
 
         # Strip DOMAIN\username prefix; use prefix as domain hint
@@ -218,6 +237,7 @@ class SourceContext:
             result = self._ldap_resolve(name, domain)
             self.ad_resolution_cache[domain_key] = result
             if result is not None:
+                self._record_resolved_principal(result)
                 return result
 
         # All domains exhausted — store sentinel so repeat calls short-circuit
@@ -229,11 +249,17 @@ class SourceContext:
         attrs = [
             "sAMAccountName", "objectSid", "dNSHostName", "cn",
             "distinguishedName", "objectClass", "userPrincipalName", "name",
+            "userAccountControl", "servicePrincipalName",
         ]
-        return next(
+        result = next(
             self.ad.paged_search("(objectClass=*)", attrs, base=dn, scope=BASE),
             None,
         )
+        # A DN-scoped lookup has no separate "domain" parameter to draw from
+        # (unlike _ldap_resolve), so derive it from the DN's own DC= components.
+        if isinstance(result, dict):
+            result["domain"] = _domain_from_dn(dn)
+        return result
 
     def _ldap_resolve(self, name: str, domain: str) -> Optional[dict]:
         """Fire a single paged_search for name within the given domain's base DN."""
@@ -259,10 +285,52 @@ class SourceContext:
         attrs = [
             "sAMAccountName", "objectSid", "dNSHostName", "cn",
             "distinguishedName", "objectClass", "userPrincipalName", "name",
+            "userAccountControl", "servicePrincipalName",
         ]
         base = "DC=" + domain.replace(".", ",DC=") if domain else None
         results = list(self.ad.paged_search(ldap_filter, attrs, base=base, size_limit=1))
-        return results[0] if results else None
+        result = results[0] if results else None
+        # Stamp the domain this hit was resolved in — the caller (resolve_principal)
+        # already knows it, but this is the layer that actually gets the AD object
+        # back, so it's the natural place to attach it before returning.
+        if isinstance(result, dict):
+            result["domain"] = domain
+        return result
+
+    def _record_resolved_principal(self, ad_object: dict[str, Any]) -> None:
+        """Accumulate a freshly (non-cache-hit) resolved AD object for later
+        persistence to the "ldap_resolved_principals" raw table.
+
+        Called from both fresh-resolution return paths in resolve_principal
+        (the DN branch and the per-domain loop) — never from a cache-hit
+        return, since a cache hit's object was already recorded the first
+        time it was resolved. Deduped by SID: the same underlying AD object
+        can be reached via several different names/domains in one run, but
+        must appear only once in the table.
+        """
+        sid = ad_object.get("object_sid")
+        if not sid:
+            # No SID (e.g. a malformed/partial LDAP entry) — nothing to key
+            # the persisted row on, so there's nothing useful to record.
+            logger.debug("Resolved AD object has no object_sid; not persisting: %r", ad_object.get("distinguished_name"))
+            return
+        if sid in self.resolved_principals:
+            return  # already recorded via an earlier name/domain lookup
+        self.resolved_principals[sid] = {
+            "sid": sid,
+            "object_class": ad_object.get("object_class"),
+            "user_account_control": ad_object.get("user_account_control"),
+            "service_principal_name": ad_object.get("service_principal_name"),
+            "cn": ad_object.get("cn"),
+            "dns_host_name": ad_object.get("dns_host_name"),
+            "sam_account_name": ad_object.get("sam_account_name"),
+            "user_principal_name": ad_object.get("user_principal_name"),
+            "distinguished_name": ad_object.get("distinguished_name"),
+            # Stamped by _ldap_resolve (the domain it searched) or _ldap_resolve_dn
+            # (parsed from the DN's DC= components) before the object reaches here.
+            "domain": ad_object.get("domain"),
+        }
+        logger.debug("Recorded resolved principal for persistence: sid=%s cn=%s", sid, ad_object.get("cn"))
 
     def _is_allowed_target(self, identifier: str, ad_object: Optional[dict]) -> bool:
         """Mirror PS1's Test-AllowedTarget: empty allowed_targets means allow all.

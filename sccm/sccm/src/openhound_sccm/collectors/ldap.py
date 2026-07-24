@@ -621,7 +621,7 @@ def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited
     caller's yield), nested groups recurse; visited guards circular nesting."""
     group_dn = group_obj.get("distinguished_name")
     if not group_dn or group_dn in visited:
-        logger.debug("SMC group expansion: skipping visited/empty group %s", group_dn)
+        logger.debug("System Management container ACL group expansion: skipping visited/empty group %s", group_dn)
         return
     visited.add(group_dn)
     grp = next(ctx.ad.paged_search("(objectClass=*)", ["member"], base=group_dn, scope=BASE), None) or {}
@@ -634,17 +634,17 @@ def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited
     # knows membership may be incomplete rather than silently under-collecting.
     if any(str(k).lower().startswith("member;range=") for k in grp):
         logger.warning(
-            "SMC group expansion: group %s returned a range-limited member attribute "
+            "System Management container ACL group expansion: group %s returned a range-limited member attribute "
             "(ldap3 auto_range did not complete); membership may be incomplete — some "
             "controlling principals could be undiscovered. Review manually.",
             group_dn)
     if not members:
-        logger.debug("SMC group expansion: group %s has no members", group_dn)
+        logger.debug("System Management container ACL group expansion: group %s has no members", group_dn)
         return
     for member_dn in members:
         member = ctx.resolve_principal(member_dn)
         if not member:
-            logger.warning("SMC group expansion: could not resolve member %s", member_dn)
+            logger.warning("System Management container ACL group expansion: could not resolve member %s", member_dn)
             continue
         oc = member.get("object_class", [])
         oc = [oc] if isinstance(oc, str) else oc
@@ -655,10 +655,10 @@ def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited
         elif "group" in ocl:
             _expand_group_targets(ctx, member, visited)
         elif "user" in ocl:
-            logger.info("SMC group expansion: user member %s controls the container (modeled, not a scan target)",
+            logger.info("System Management container ACL group expansion: user member %s controls the container (modeled, not a scan target)",
                         member.get("sam_account_name"))
         else:
-            logger.warning("SMC group expansion: member %s has unhandled objectClass %s", member_dn, ocl)
+            logger.warning("System Management container ACL group expansion: member %s has unhandled objectClass %s", member_dn, ocl)
 
 
 def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
@@ -679,7 +679,7 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
       optional InheritedObjectType(16) before the SID
     """
     if len(sd_bytes) < 20:
-        logger.warning("SMC ACL: security descriptor too short (%d bytes); cannot parse ACEs", len(sd_bytes))
+        logger.warning("System Management container ACL: security descriptor too short (%d bytes); cannot parse ACEs", len(sd_bytes))
         return []
 
     # Parse SECURITY_DESCRIPTOR header
@@ -687,7 +687,7 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
 
     if offset_dacl == 0 or offset_dacl >= len(sd_bytes):
         logger.warning(
-            "SMC ACL: DACL offset %d out of range (SD is %d bytes); cannot parse ACEs",
+            "System Management container ACL: DACL offset %d out of range (SD is %d bytes); cannot parse ACEs",
             offset_dacl, len(sd_bytes))
         return []
 
@@ -706,7 +706,7 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
 
     for _ in range(ace_count):
         if pos + 4 > len(sd_bytes):
-            logger.debug("SMC ACL: truncated ACE header at offset %d; stopping ACE scan", pos)
+            logger.debug("System Management container ACL: truncated ACE header at offset %d; stopping ACE scan", pos)
             break
 
         ace_type = sd_bytes[pos]
@@ -714,12 +714,12 @@ def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:
 
         if ace_size < 4 or pos + ace_size > len(sd_bytes):
             logger.debug(
-                "SMC ACL: invalid/overrunning ACE size %d at offset %d; stopping ACE scan",
+                "System Management container ACL: invalid/overrunning ACE size %d at offset %d; stopping ACE scan",
                 ace_size, pos)
             break
 
         if pos + 8 > len(sd_bytes):
-            logger.debug("SMC ACL: ACE at offset %d too short for an access mask; skipping", pos)
+            logger.debug("System Management container ACL: ACE at offset %d too short for an access mask; skipping", pos)
             pos += ace_size
             continue
 

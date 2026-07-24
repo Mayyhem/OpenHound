@@ -205,6 +205,11 @@
       "is_traversable": false
     },
     {
+      "name": "MSSQL_IsMappedTo",
+      "description": "",
+      "is_traversable": true
+    },
+    {
       "name": "MSSQL_IsTrustedBy",
       "description": "",
       "is_traversable": false

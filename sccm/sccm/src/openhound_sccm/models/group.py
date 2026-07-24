@@ -40,6 +40,15 @@ class GroupNode(BaseAsset):
     # have no domain part of their own. Populated by the _node_group coalesce
     # when a domain SID from a co-occurring device/user is available.
     fallback_domain_sid: str | None = None
+    # AD attributes LEFT-JOINed on by _join_ad_props (Task A3); all null when this
+    # SID was never LDAP-resolved.
+    enabled: bool | None = None
+    type: str | None = None
+    is_domain_principal: bool | None = None
+    object_class: list[str] | None = None
+    service_principal_name: list[str] | None = None
+    cn: str | None = None
+    domain: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -76,6 +85,13 @@ class GroupNode(BaseAsset):
                 collectionSource=[],
                 SCCMInfra=self.sccm_infra,
                 SCCMResourceIDs=self.sccm_resource_ids,
+                Domain=self.domain,
+                Enabled=self.enabled,
+                IsDomainPrincipal=self.is_domain_principal,
+                Type=self.type,
+                objectClass=self.object_class,
+                servicePrincipalName=self.service_principal_name,
+                CN=self.cn,
             ),
         )
 

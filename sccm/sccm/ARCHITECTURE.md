@@ -64,8 +64,10 @@ Every section follows the same spine:
   - [11g. Stage 5: MSSQL node merge and topology inference](#11g-stage-5-mssql-node-merge-and-topology-inference)
   - [11h. Stage 6: coerce-and-relay possible edges and the synthetic Authenticated Users node](#11h-stage-6-coerce-and-relay-possible-edges-and-the-synthetic-authenticated-users-node)
   - [11i. HTTP version fingerprint from ccmsetup.exe — a new HTTP-phase capability](#11i-http-version-fingerprint-from-ccmsetupexe--a-new-http-phase-capability)
+  - [11j. AD-object attribute capture via the per-host resolution cache](#11j-ad-object-attribute-capture-via-the-per-host-resolution-cache)
 - [12. One-command end-to-end: a `--run-all` flag, not a new verb](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)
 - [13. Tunneling all collection traffic through a SOCKS5 pivot](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)
+- [14. A shared integration-test and payload-diff engine, invoked off `--run-all`](#14-a-shared-integration-test-and-payload-diff-engine-invoked-off---run-all)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -144,6 +146,7 @@ became the shared one. What moved:
 | DNS resolution ([§5](#5-an-active-directory-cli-surface-and-context-auto-detection)) | `discovery/dns` (`make_resolver`) | `main.py::_resolve_dc_via_dns` calls the shared `make_resolver`, keeps the SCCM-specific SRV query |
 | End-to-end phase chaining ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | `orchestration/run` (`run_end_to_end`, `derive_stage_paths`, `StagePaths`) | `main.py::_run_e2e_after_collect` maps `--progress` and delegates; the `--run-all` flag on `collect_sccm` triggers it |
 | SOCKS5 pivot ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)) | `proxy/patch.py` (process-wide `socket` interception), `proxy/socks.py` (dialer/handshake), `discovery/dns.py` (`force_tcp`) | `main.py` parse/validate (`_parse_proxy_or_exit`, `_require_dc_or_dns_for_proxy`) + the install-around-run wrap (`socks_proxy_installed`); the four proxy-aware DNS sites (`_resolve_dc_via_dns`, two sites in `collectors/dns.py`, `context.resolve_ip`) |
+| Integration testing / payload diff ([§14](#14-a-shared-integration-test-and-payload-diff-engine-invoked-off---run-all)) | `integration_testing` (`graph.load_graph`, `matcher`, `cases.EdgeCase`/`NodeCase`, `runner.run_suite`, `compare.compare_graphs`, `coverage.report`) | `openhound_sccm/integration/` — mayyhem.com `fixtures/edges.py`+`fixtures/nodes.py` (61 `EdgeCase`, `NodeCase`s, two whole-graph invariants) and the `__init__.py` wiring (`run_integration_tests`, `compare_to_zip`) called from the two `collect sccm` **Testing** flags |
 
 **Governance.** From an extension agent's point of view the shared library is **read-only** — an SCCM
 change may not edit `openhound-collector-common`, exactly as it may not edit `openhound/` core. Promoting
@@ -861,13 +864,13 @@ All three live in [`transforms.py`](src/openhound_sccm/transforms.py) and run du
 has loaded the tables. The easy way to remember them: **`_safe` keeps the pipeline alive, `_ensure_columns`
 makes the columns exist, `_arr` makes the values the right shape.**
 
-1. **`_safe` — the safety net** ([transforms.py:16](src/openhound_sccm/transforms.py#L16)). Each "load
+1. **`_safe` — the safety net** ([transforms.py:90](src/openhound_sccm/transforms.py#L90)). Each "load
    source X into table Y" step runs as its own statement. If it fails, `_safe` **logs it and keeps going**
    instead of aborting the whole preproc. This is what lets a run that used only some collection methods
    still build a graph from whatever *was* collected. It mainly catches the missing-*table* case (a table
    that doesn't exist at all).
 
-2. **`_ensure_columns` — fill the gaps** ([transforms.py:27](src/openhound_sccm/transforms.py#L27)). Right
+2. **`_ensure_columns` — fill the gaps** ([transforms.py:101](src/openhound_sccm/transforms.py#L101)). Right
    before each coalesce, it looks at the source table and **adds any missing columns the SQL needs as empty
    (NULL) columns**. So whether a column vanished because dlt dropped it (all-NULL) or because that source
    never had it, the column now exists and the SQL compiles. Adding a column the SQL doesn't actually read
@@ -875,7 +878,7 @@ makes the columns exist, `_arr` makes the values the right shape.**
    from silently dropping a source just because one optional column went missing.
 
 3. **`_arr` (and `CAST(... AS VARCHAR[])`) — fix the shapes**
-   ([transforms.py:194](src/openhound_sccm/transforms.py#L194)). List-like columns arrive in several shapes:
+   ([transforms.py:124](src/openhound_sccm/transforms.py#L124)). List-like columns arrive in several shapes:
    a native list, a JSON array, JSON-array *text* inside a plain column, or a single scalar string. `_arr`
    turns **all of them into a real list** so DuckDB operations like `UNNEST` and array-union work. Without
    it, `UNNEST` on a JSON value errors out with "requires a single list as input." (The specific role-column
@@ -910,6 +913,17 @@ Given how much SCCM environments vary, the tolerant approach is the safer defaul
 - **Reading the log is the diagnostic.** `WARNING … skipped (missing source)` means a table that was never
   collected — usually a method you simply didn't run, which is normal. `ERROR … failed` means a table that
   *was* collected but still didn't load — that's the one worth chasing.
+- **Expected misses are demoted to DEBUG** by [`_sccm_expected_miss`](src/openhound_sccm/transforms.py), the
+  `expected_miss` predicate injected into `safe_execute`, so routine emptiness doesn't masquerade as a
+  warning. Two cases qualify: **(1) transport mirror** — the collector emits EITHER `wmi_<X>` OR
+  `adminservice_<X>` per data type, so a missing one whose sibling exists is normal; **(2) fallback-phase
+  skip** — HTTP and SMB are fallback phases that `should_run_phase` skips for any host a privileged transport
+  (AdminService/WMI) already collected ([§2](#2-sequential-phases-per-target-concurrent-across-targets--and-a-sequential-debug-harness)),
+  so an absent `http_*`/`smb_*` role table is expected *whenever any privileged transport ran this
+  collection*. The canonical example: the SMS Provider **is** the AdminService host, so it is
+  privileged-collected and its HTTP probe is skipped — leaving `http_smsproviders` empty (and its transform
+  a DEBUG skip) in every normal authenticated run. In an HTTP-only / SMB-only run no privileged table exists,
+  so those fallback misses correctly stay a WARNING.
 
 ### The downstream consequence: convert must omit null properties on output
 
@@ -1220,6 +1234,56 @@ probe in this file.
 
 ---
 
+### 11j. AD-object attribute capture via the per-host resolution cache
+
+`Computer`, `User`, and `Group` nodes now also carry the underlying AD object's own attributes —
+`Domain`, `Enabled`, `IsDomainPrincipal`, `Type`, `objectClass`, `servicePrincipalName`, `CN` (see
+[graph.py](src/openhound_sccm/graph.py) `ComputerProperties`/`UserProperties`/`GroupProperties`) —
+alongside the SCCM-specific properties already emitted. No new AD collector was added; the
+extension reuses AD-resolution work the collector was already doing for other reasons.
+
+Every phase that needs to turn a name/SID/DN into an AD object calls
+`SourceContext.resolve_principal` ([context.py:187](src/openhound_sccm/context.py#L187)) — LDAP
+discovery resolving admins, RemoteRegistry resolving current users, AdminService/WMI resolving
+device-referenced principals, and so on. `resolve_principal` already caches every lookup in
+`ad_resolution_cache` (hits *and* misses, keyed by lookup string — see
+[Where this code lives](#where-this-code-lives-the-shared-collector-common-library) for the
+"AD-resolution cache" reference in §1) to avoid repeat LDAP round-trips. It now *also* calls
+`_record_resolved_principal` ([context.py:300](src/openhound_sccm/context.py#L300)) on every fresh
+(non-cache-hit) success, deduping by SID into a second, purely-successful accumulator,
+`SourceContext.resolved_principals`.
+
+At the end of the per-host stage, a new DLT resource, `ldap_resolved_principals`
+([source.py:227](src/openhound_sccm/source.py#L227)), drains that accumulator into a raw table — one
+row per uniquely-resolved AD object, regardless of which phase resolved it. `preprocess`'s
+`_derive_ad_props` ([transforms.py:267](src/openhound_sccm/transforms.py#L267)) builds a
+`sid -> AD-attribute` lookup table (`ad_props`) from it — deriving `Enabled` from the
+`userAccountControl` `ACCOUNTDISABLE` bit, `Type` from the last `objectClass` element (title-cased),
+and always setting `IsDomainPrincipal = True` (every row in this table was, by construction,
+actually resolved against AD) — and `_join_ad_props`
+([transforms.py:341](src/openhound_sccm/transforms.py#L341)) LEFT JOINs it onto `node_computer`,
+`node_user`, and `node_group` by SID, before those tables reach `convert`.
+
+> **CRITICAL: resolved-principals-only, not a domain-wide sweep.** This reaches only the principals
+> the collector actually resolved during *this run* — site servers, admins, device-referenced
+> users/groups, and anything else a phase happened to look up. It is deliberately **not** a new LDAP
+> enumeration pass over the whole domain. A principal SCCM knows about (e.g. a device's
+> `primaryUser`) that no phase ever needed to resolve stays bare — `Domain`, `Enabled`,
+> `IsDomainPrincipal`, `Type`, `objectClass`, `servicePrincipalName`, and `CN` are all `null` on that
+> node, exactly as before this feature existed. This is **partial parity by design**: these seven
+> properties are best-effort enrichment of whatever the run already touched, not a guarantee that
+> every AD-native node in the graph carries them.
+
+**Trade-off.** `ldap_resolved_principals` is itself a best-effort finalization table whose own
+`pipeline.run` is allowed to fail without aborting the collect ([transforms.py:276](src/openhound_sccm/transforms.py#L276)),
+so it may be absent on some runs. `_derive_ad_props` treats it like any other optional source
+(`_ensure_columns` backfills missing/all-NULL columns, `_safe` logs and skips outright absence),
+leaving `ad_props` created-but-empty rather than raising, so `_join_ad_props`'s LEFT JOINs always
+bind — a missing or partial `ldap_resolved_principals` degrades to "no AD-attribute enrichment this
+run," never a preproc failure.
+
+---
+
 ## 12. One-command end-to-end: a `--run-all` flag, not a new verb
 
 ### The framework baseline
@@ -1370,6 +1434,92 @@ would leave four other protocols leaking traffic straight from the outside box.
 
 ---
 
+## 14. A shared integration-test and payload-diff engine, invoked off `--run-all`
+
+### The framework baseline
+
+A stock OpenHound collector's correctness is checked with ordinary unit tests against mocked HTTP
+responses — the framework has no notion of asserting the *shape and content of a collected OpenGraph
+payload* against a set of expected nodes/edges, and no comparator for diffing one collected payload
+against another. A small, stable cloud REST API doesn't usually need either.
+
+### Why it breaks for SCCM
+
+This collector's correctness has always been checked against ConfigManBearPig by hand: re-run the
+PowerShell predecessor's own test kit (`powershell_deprecated/Invoke-ConfigManBearPigUnitTests.ps1`),
+which asserted specific nodes/edges existed with position-based, `$expectedEdges_*`-hardcoded checks and a
+dead coverage report (`Get-MissingTests`); or run the standalone `compare_results.py`, which aligns two
+BloodHound zips by **list index**, not by identity. Neither is reachable from the collector's own CLI, so
+"collect, then immediately assert the graph is right" or "collect, then diff it against yesterday's run"
+took a separate, manual step outside `openhound collect sccm`.
+
+### The add-on: a shared assert/diff engine, two `collect` flags
+
+- **The engine is collector-agnostic** and lives in `openhound_collector_common/integration_testing/`
+  (no third-party deps — stdlib `json`/`zipfile`/`fnmatch` only):
+  - `graph.py` — `Graph`/`Node`/`Edge` + `load_graph`, accepting either a directory of `*.json` OpenGraph
+    payloads or a `.zip` of them; a duplicate node id across payloads (e.g. `sccm_*` + `ad_*`) merges by
+    unioning `kinds` and filling in missing properties rather than overwriting.
+  - `cases.py` — typed `EdgeCase`/`NodeCase` fixtures, each with a stable `id`, an optional `CountSpec`
+    (`exact` / `at_least` / `at_most`, combinable into a range) and a `negative` flag for "this must NOT
+    exist".
+  - `matcher.py` — `property_match` / `node_matches` / `edge_matches`, a direct port of the PowerShell
+    kit's `Test-PropertyMatch` / `Test-NodePattern` / `Test-EdgePattern`: case-insensitive matching,
+    `*`/`?` wildcards via `fnmatch`, list-subset semantics, tolerant `"True"/"1"`/`"False"/"0"` bool
+    coercion.
+  - `runner.py` — `run_suite` runs every edge/node case plus an optional list of whole-graph **invariant**
+    callables (`Callable[[Graph], Result]`) — a hook for cross-node checks that don't reduce to a single
+    case (the PS kit's one hardcoded `memberOf` root-site check generalizes to this hook). Prints the same
+    `<kind>: <description> - PASS/FAIL/SKIP` line shape as the PS kit, plus totals and a coverage report.
+  - `results.py` — `Result`/`Summary` + `write_results_json`.
+  - `compare.py` — `compare_graphs` builds a `ComparisonReport`: nodes/edges only in A vs. only in B, a
+    per-node/per-edge property diff (`only_in_a` / `only_in_b` / `changed`), and a **by-kind property
+    rollup** (which property names appear on a given kind in A but not B, and vice versa) — fixing
+    `compare_results.py`'s index-based fragility with identity-keyed comparison.
+  - `coverage.py` — `load_schema_kinds` / `coverage` / `report` diff a schema JSON's `node_kinds` /
+    `relationship_kinds` against the fixture-covered kinds, replacing the PS kit's dead `Get-MissingTests`.
+- **SCCM's fixtures + wiring are extension-local**, in `openhound_sccm/integration/` — none of the
+  mayyhem.com-specific knowledge is shared:
+  - `fixtures/edges.py` — 61 `EdgeCase` fixtures ported from the PS kit, retargeted at the new `SCCM_`/
+    `MSSQL_`-prefixed edge kind names (and the CMBP `CoerceAndRelaytoSMB` typo dropped).
+  - `fixtures/nodes.py` — `NodeCase` count fixtures per node kind, plus two whole-graph invariants:
+    AdminUser/SecurityRole/Collection node ids are canonicalized to the hierarchy root site code, and
+    every `SCCM_ClientDevice` belongs to a primary site (guards the ope-e739 regression).
+  - `__init__.py` — `run_integration_tests(graph_dir, ...)` (loads the graph, runs the fixtures against it
+    plus a `schema_SCCM.json` coverage report, returns `1` if any case failed, else `0`) and
+    `compare_to_zip(graph_dir, zip_path, ...)` (loads both graphs, runs `compare_graphs`, renders the
+    report, always returns `0`).
+- **Two `collect sccm` flags, in a new "Testing" help panel** (`main.py`). Both force `run_all = True`
+  before the pipeline starts, since there is no graph to test or diff without a completed convert:
+  - `--run-integration-tests` calls `run_integration_tests` once convert finishes, writing
+    `integration_results-<ts>.json`, then `raise typer.Exit(code=rc)` — the process exits non-zero if any
+    case failed.
+  - `--compare-to-zip <path>` calls `compare_to_zip` against an arbitrary node/edge payload — a CMBP zip
+    or another OpenHound run — writing `compare-<ts>.json`. Its return value is never turned into an exit
+    code, so the run always exits `0`: informational only, safe to run without breaking automation on
+    drift.
+  - Both reuse `_ts`, the same run timestamp already used for the collect logs, so every artifact from one
+    invocation shares a suffix.
+- **No new framework extension point.** This reuses exactly the pattern [§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)
+  established: a flag on the hand-registered `collect` command, running shared-library logic in-process
+  after the app's own `preprocessor`/`converter` hooks have already produced the graph.
+
+### Trade-offs
+
+- **The engine is shared; the correctness knowledge is not.** `integration_testing/` knows nothing about
+  SCCM, sites, or client devices, so adopting it for **MSSQL** means writing MSSQL's own `fixtures/` (its
+  own `EdgeCase`/`NodeCase` list and invariants), not importing SCCM's. `openhound_collector_common.integration_testing`
+  is available today for the MSSQL collector to wire the same two flags onto `collect mssql` against its
+  own graph.
+- **Supersedes, doesn't extend, the old validation flow.** The PowerShell test kit and `compare_results.py`
+  are no longer the sanctioned way to check a collection — these in-process flags cover the same
+  assert/diff ground without leaving the `collect` command and without requiring PowerShell.
+- **`--compare-to-zip` is diagnostic, not a gate.** Because it always exits `0`, a CI pipeline that wants
+  to fail a build on drift has to parse `compare-<ts>.json` itself; the flag's job is to surface
+  differences, not judge them.
+
+---
+
 ## Quick reference: which framework extension point each add-on uses
 
 | Divergence | Framework extension point used | Where it would edit core (but doesn't) |
@@ -1391,6 +1541,7 @@ would leave four other protocols leaking traffic straight from the outside box.
 | Coerce-and-relay possible edges + synthetic Authenticated Users node | Three relay edge builders in `_edge_coerce_relay_*`; `_node_authenticated_users` inserts lazily after relay builders; `SCCMRelayEdgeProperties` subclass for relay-only props; surgical `--disable-possible-edges` gate; `graph_edges` gains two `VARCHAR[]` coercion columns | No new framework extension point — extends §11b (persist-at-collect/gate-in-preproc), §11c (graph_edges + GraphEdge), and §11f (output-split routing) |
 | One-command end-to-end ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | A flag on the hand-registered `collect` Typer command + in-process calls to the app's registered `preproc`/`convert` hooks | A new top-level `run` verb in core (extensions load inside the root app's constructor and never get a reference to it, so they cannot mount a new verb) |
 | SOCKS5 pivot ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)) | Runtime mutation of the stdlib `socket` module (`socket.socket`/`create_connection`/`getaddrinfo`), installed only for the `collect` run | No extension point — there is no framework notion of tunneling traffic through a pivot at all, since a stock collector talks to one already-reachable REST endpoint |
+| Integration testing + payload diff ([§14](#14-a-shared-integration-test-and-payload-diff-engine-invoked-off---run-all)) | Two flags on the hand-registered `collect` Typer command (`--run-integration-tests`, `--compare-to-zip`), both forcing `--run-all` and calling the shared engine in-process after convert | No extension point — there is no framework notion of asserting or diffing a collected graph at all |
 
 ---
 
@@ -1415,6 +1566,8 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-24 | **Added §11j — AD-object attribute capture via the per-host resolution cache** (ope-c141, Phase A of a broader CMBP-parity property effort; also documents Phase B, ope-fb99, and the ope-c0c0 bug fix). `Computer`/`User`/`Group` nodes gain `Domain`, `Enabled`, `IsDomainPrincipal`, `Type`, `objectClass`, `servicePrincipalName`, `CN` (`graph.py` `ComputerProperties`/`UserProperties`/`GroupProperties`), sourced from AD attributes captured whenever `SourceContext.resolve_principal` freshly resolves a principal during collection (`context.py::_record_resolved_principal`), persisted by a new `ldap_resolved_principals` DLT resource run at the end of the per-host stage (`source.py`), and joined onto the three AD node tables in preproc via new `transforms._derive_ad_props`/`_join_ad_props`. Deliberately **resolved-principals-only** — not a domain-wide LDAP sweep; a principal never resolved during a run stays bare. No new framework divergence category — extends the existing collect-side-table + preproc-join pattern (§11a/§11b). Also (Phase B, ope-fb99): `SCCM_Site.siteSystemRoles` (per-site aggregation of `Computer.SCCMSiteSystemRoles`, empty on Secondary Sites); six new `SCCM_ClientDevice` telemetry-extra properties (`currentManagementPoint`, `currentManagementPointSID`, `previousSMSID`, `previousSMSIDChangeDate`, `userName`, `userDomainName`); and `SCCM_IsMappedTo` now carries `SCCMInfra = true` (the only edge kind that does). And a bug fix (ope-c0c0): `SCCM_ClientDevice.lastOnlineTime`/`lastOfflineTime` were always empty due to a `c_n_*` vs `cn_*` raw-column-name typo in `_node_client_device`; both now populate. Updated the README Node Reference (Computer/User/Group/SCCM_Site/SCCM_ClientDevice tables + Limitations) and Edge Reference (`SCCM_IsMappedTo`). |
+| 2026-07-22 | **Python integration-test kit + payload diff.** New shared `openhound_collector_common/integration_testing/` engine (graph loader for dir/zip, wildcard matcher, typed EdgeCase/NodeCase with exact/at_least/at_most counts, results+JSON, runner with a whole-graph invariant hook, deep comparator, schema-kind coverage). SCCM adds `openhound_sccm/integration/` fixtures (61 ported edge cases with new SCCM_/MSSQL_ names, node cases, memberOf invariant) and two `collect sccm` **Testing** flags: `--run-integration-tests` (assert vs mayyhem fixtures, non-zero exit on failure) and `--compare-to-zip` (property-level diff of this run vs an arbitrary payload, always exit 0). Both imply `--run-all`. Supersedes the PowerShell kit + `compare_results.py` for the assert/diff workflows. Shared-lib change is additive (new subpackage) so MSSQL can adopt the same engine + flags. |
 | 2026-07-22 | **Renamed five graph edge kinds to match the hand-maintained OpenGraph schema (`schema.json`).** Added the `SCCM_` namespace prefix to `SameHostAs`→`SCCM_SameHostAs`, `LocalAdminRequired`→`SCCM_LocalAdminRequired`, `CoerceAndRelayToAdminService`→`SCCM_CoerceAndRelayToAdminService`, and `CoerceAndRelayToSMB`→`SCCM_CoerceAndRelayToSMB`; moved the SQL relay into the separately maintained MSSQL schema as `CoerceAndRelayToMSSQL`→`MSSQL_CoerceAndRelayToMSSQL` (its end node is an `MSSQL_Login`, so it belongs to the MSSQL schema the operator uploads alongside this one). Reconciled the other direction too: `schema.json` had listed the site-replication edge as `SCCM_SameAdminsAs`, corrected to the code-true `SCCM_AdminsReplicatedTo`. Emission and entity-panel help key off the `kinds/edges.py` constants, so the change centers on the constant *values* + the `TRAVERSABLE_EDGE_KINDS` allow-list, then propagates to the saved cypher queries, README (Edge Reference / TOC / Mermaid), and the offline edge tests. CMBP-history references (the `CoerceAndRelayNTLMtoSMB` allow-list vs `CoerceAndRelayToSMB` emitter mismatch) are left verbatim as historical record. The schema also lists `SCCM_HasNetworkAccessAccount`, which no collector code emits yet — left as a placeholder and tracked in ope-e10b (emit from Local collection, reading the NAA from client WMI). No graph-shape change: same edges, new kind strings. |
 | 2026-07-22 | **Ordered-log per-host grouping fix + always-DEBUG full log + log rename** (ope-54be, §7). Three coupled logging-layer changes. (1) **Grouping bug:** the six Stage-2 per-host collectors were `@with_log_context`-decorated, which set a *resource* context (`func.__name__`) and fired resource-complete once per (host, phase) — so the ordered log filled with repeated `# collect_registry` fragments and the intended per-host `flush_host` was a no-op. Removed the decorator from `collect_registry` / `collect_mssql` / `collect_adminservice` / `collect_wmi` / `collect_http` / `collect_smb` (the engine's `phase_scope(target, phase)` already tags `[target][phase]`); with no resource context their records now bucket by host and flush once per host. Stage-1 discovery resources keep the decorator (DLT drives them interleaved). Regression guard: `tests/test_per_host_log_blocks.py::test_per_host_collectors_do_not_fire_resource_complete`. (2) **Always-DEBUG full log:** the ordered handler is now created at DEBUG and both collector namespaces (`openhound_sccm` + `openhound_collector_common`) are pinned to DEBUG for the run, so the full log always holds the complete collector trace regardless of console level; `dlt`/`ldap3` internals still require `--debug`. (3) **Rename:** `collect_log_* → collect_full_*`, `collect_diagnostics_* → collect_issues_*`; summary labels + README/§7 updated. Separately, truncated the ccmsetup.exe HTTP body-preview debug line in `clients/http.py` to 1024 chars (it dumped multi-MB binary, now always in the full log). The always-DEBUG change also surfaced a latent label bug: VERBOSE (level 15) was missing from `_ORDERED_LEVEL_LABEL`, so those newly-captured lines rendered as `L15` — the handler's fallback now uses `logging.getLevelName` so any named level (VERBOSE included) prints its name (guard: `test_verbose_records_render_with_level_name_not_l15`). |
 | 2026-07-22 | **`-v` now enables VERBOSE (was a no-op) + new `--silent` console mute** (ope-76f1, §7). The `-v`/`--verbose` option changed from a repeatable count (`-v`→INFO no-op, `-vv`→VERBOSE) to a plain boolean that raises the console straight to VERBOSE; the ladder is now `(none)`=INFO → `-v`=VERBOSE → `--debug`=DEBUG, and `-vv` is no longer valid (no-backward-compat rule). Added `--silent`, a **console-only** mute: `_silence_console_handlers` raises just the console handlers above `CRITICAL` (identified by the new `_is_console_handler` helper — not a `FileHandler`, and either a `StreamHandler` or a duck-typed Rich handler with `.console`), leaving the root logger and the two on-disk logs at their detail level. Because the mute is at the *handler* level, `--silent` composes with the verbosity flags — `--silent --debug` = quiet terminal, DEBUG-level file logs — and it also forces `--progress off` (the tracker bypasses logging). `_apply_log_level` gained a `silent` parameter. Offline tests: `tests/test_verbose_silent_flags.py` (13). Follow-up ope-00df tracks per-file `--no-diagnostics-log` / `--no-collect-log` switches. Updated §7 (VERBOSE bullet + new `--silent` bullet), the README verbosity tip + CLI options table. |

@@ -19,25 +19,62 @@ logger = logging.getLogger(__name__)
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
 
-def _sccm_sibling_miss(con: duckdb.DuckDBPyConnection, missing: str) -> bool:
-    """`expected_miss` predicate for the shared `safe_execute`.
+def _privileged_transport_ran(con: duckdb.DuckDBPyConnection) -> bool:
+    """True if any AdminService/WMI source table exists — i.e. a privileged
+    transport collected at least one host this run.
 
-    WMI/AdminService fallback-mirror logic: the collector produces EITHER
-    wmi_<X> OR adminservice_<X> tables for each data type — whichever transport
-    was available. A missing wmi_<X> when adminservice_<X> exists (or vice versa)
-    is a normal, expected miss, so `safe_execute` downgrades its log from WARNING
-    to DEBUG. Any other missing table (no sibling) stays a WARNING.
-
-    The sibling lookup is schema-agnostic (matches on table_name across schemas);
-    under the collector's single `sccm` schema this is equivalent to the old
-    schema-scoped check.
+    HTTP and SMB are *fallback* phases: ``should_run_phase`` skips them for any
+    host a privileged transport already collected (per_host_phases.py:116,
+    mirroring ConfigManBearPig.ps1:8617). So when a privileged transport ran, an
+    absent http_/smb_ role table just means every host they would cover was
+    collected the privileged way — an expected, benign miss, not a real problem.
+    The clearest example: the SMS Provider *is* the AdminService host, so it is
+    privileged-collected and its HTTP probe is skipped, leaving http_smsproviders
+    empty in every normal authenticated run.
     """
+    try:
+        found = con.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name LIKE 'adminservice_%' OR table_name LIKE 'wmi_%' "
+            "LIMIT 1"
+        ).fetchone()
+    except duckdb.Error:
+        # Can't query the catalog — stay safe and treat as "not privileged" (WARNING).
+        return False
+    return found is not None
+
+
+def _sccm_expected_miss(con: duckdb.DuckDBPyConnection, missing: str) -> bool:
+    """`expected_miss` predicate for the shared `safe_execute`: return True to
+    downgrade a missing-source-table log from WARNING to DEBUG.
+
+    Two benign-miss cases are specific to this collector:
+
+    1. Fallback-phase skip (http_ / smb_ tables). Handled by
+       ``_privileged_transport_ran``: when a privileged transport ran this
+       collection, an absent http_/smb_ role table is expected. In an
+       HTTP-only/SMB-only run (no privileged table) it stays a WARNING.
+
+    2. Transport-mirror (wmi_ <-> adminservice_). The collector produces EITHER
+       wmi_<X> OR adminservice_<X> per data type — whichever transport was
+       available. A missing one whose sibling exists is a normal, expected miss.
+
+    Any other missing table has no such excuse and stays a WARNING. The catalog
+    lookups are schema-agnostic (match on table_name across schemas); under the
+    collector's single `sccm` schema this is equivalent to a schema-scoped check.
+    """
+    # Case 1: HTTP/SMB are fallback phases — absent role tables are expected once
+    # a privileged transport has collected the hosts they would have covered.
+    if missing.startswith(("http_", "smb_")):
+        return _privileged_transport_ran(con)
+
+    # Case 2: wmi_/adminservice_ transport mirror — expected when the sibling ran.
     if missing.startswith("wmi_"):
         sibling = "adminservice_" + missing[len("wmi_"):]
     elif missing.startswith("adminservice_"):
         sibling = "wmi_" + missing[len("adminservice_"):]
     else:
-        # No transport-mirror prefix: not a fallback miss, so keep it a WARNING.
+        # Neither a fallback nor a transport-mirror prefix: a real miss (WARNING).
         return False
     try:
         found = con.execute(
@@ -54,10 +91,11 @@ def _safe(con: duckdb.DuckDBPyConnection, label: str, sql: str) -> None:
     """Run one SQL statement; log and continue if a source table is missing.
 
     Thin wrapper over the shared `safe_execute` engine, injecting SCCM's
-    wmi/adminservice sibling-miss downgrade (`_sccm_sibling_miss`) and this
-    module's logger so log records stay under `openhound_sccm.transforms`.
+    expected-miss downgrade (`_sccm_expected_miss`: wmi/adminservice transport
+    mirror + http/smb fallback-phase skip) and this module's logger so log
+    records stay under `openhound_sccm.transforms`.
     """
-    safe_execute(con, label, sql, expected_miss=_sccm_sibling_miss, logger=logger)
+    safe_execute(con, label, sql, expected_miss=_sccm_expected_miss, logger=logger)
 
 
 def _ensure_columns(
@@ -224,6 +262,106 @@ def _authed_users_id(dnshostname_col: str) -> str:
     (host) label stripped, uppercased (e.g. 'PROV01.mayyhem.com' -> 'MAYYHEM.COM-S-1-5-11').
     Always pair with a `<col> LIKE '%.%'` guard so a bare hostname can't yield a bad id."""
     return f"upper(regexp_replace({dnshostname_col}, '^[^.]+\\.', '')) || '-S-1-5-11'"
+
+
+def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Build sccm.ad_props (sid -> CMBP-parity AD attributes) from ldap_resolved_principals.
+
+    Enabled = userAccountControl bit 2 (ACCOUNTDISABLE) clear; Type = last objectClass
+    element title-cased (e.g. 'user' -> 'User'); IsDomainPrincipal = True for every row,
+    since only LDAP-resolved principals land in ldap_resolved_principals in the first
+    place. Must run before _node_computer/_node_user/_node_group so _join_ad_props has
+    something to join against.
+
+    ldap_resolved_principals is itself a best-effort finalization table (Task A2) whose
+    own pipeline.run is allowed to fail without aborting the collect, so it may be absent
+    this run. Treated like any other optional source: _ensure_columns backfills columns a
+    load never emitted or dropped as all-NULL, and _safe() logs+skips a missing table —
+    leaving ad_props created-but-empty (schema-complete) rather than raising, so the
+    LEFT JOINs in _join_ad_props always bind.
+    """
+    con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.ad_props ("
+        "sid VARCHAR, "
+        "enabled BOOLEAN, "
+        "type VARCHAR, "
+        "is_domain_principal BOOLEAN, "
+        "object_class VARCHAR[], "
+        "service_principal_name VARCHAR[], "
+        "cn VARCHAR, "
+        "domain VARCHAR"
+        ")"
+    )
+    _ensure_columns(con, schema, "ldap_resolved_principals", {
+        "object_class": "VARCHAR",
+        "user_account_control": "BIGINT",
+        "service_principal_name": "VARCHAR",
+        "cn": "VARCHAR",
+        "domain": "VARCHAR",
+    })
+    _oc = _arr("object_class")
+    _spn = _arr("service_principal_name")
+    _safe(
+        con,
+        "ad_props<-ldap_resolved_principals",
+        f"INSERT INTO {schema}.ad_props BY NAME "
+        # Collapse to one row per sid: ldap_resolved_principals can carry more than one
+        # row for the same principal (case-variant SID strings — the in-memory
+        # accumulator dedupes on the raw, case-sensitive SID — or a resumed/retried
+        # collect re-appending to the no-primary-key finalization resource). Without
+        # this GROUP BY, a duplicated sid here would duplicate a real node row through
+        # the LEFT JOIN in _join_ad_props.
+        f"SELECT sid, "
+        f"  any_value(enabled) AS enabled, "
+        f"  any_value(type) AS type, "
+        f"  any_value(is_domain_principal) AS is_domain_principal, "
+        f"  any_value(object_class) AS object_class, "
+        f"  any_value(service_principal_name) AS service_principal_name, "
+        f"  any_value(cn) AS cn, "
+        f"  any_value(domain) AS domain "
+        f"FROM ("
+        f"  SELECT upper(sid) AS sid, "
+        # userAccountControl arrives as VARCHAR in production (ldap3 raw values decode to
+        # strings and dlt infers a text column -- the BIGINT in _ensure_columns only applies
+        # when the column is absent), so TRY_CAST it before the bitwise AND. Without the cast
+        # DuckDB raises a VARCHAR & INTEGER binder error that _safe() would swallow, silently
+        # emptying ad_props. TRY_CAST -> NULL on a non-numeric value, yielding enabled=NULL.
+        f"    CASE WHEN user_account_control IS NULL THEN NULL "
+        f"         ELSE (TRY_CAST(user_account_control AS BIGINT) & 2) = 0 END AS enabled, "
+        f"    CASE WHEN len({_oc}) = 0 THEN NULL "
+        f"         ELSE upper(substr({_oc}[-1], 1, 1)) || lower(substr({_oc}[-1], 2)) END AS type, "
+        f"    TRUE AS is_domain_principal, "
+        f"    {_oc} AS object_class, "
+        f"    {_spn} AS service_principal_name, "
+        f"    cn, domain "
+        f"  FROM {schema}.ldap_resolved_principals "
+        f"  WHERE sid IS NOT NULL"
+        f") "
+        f"GROUP BY sid",
+    )
+    logger.info("ad_props built in schema %r", schema)
+
+
+def _join_ad_props(con: duckdb.DuckDBPyConnection, schema: str, table: str) -> None:
+    """LEFT JOIN sccm.ad_props (built by _derive_ad_props) onto an AD node table by sid.
+
+    Adds enabled / type / is_domain_principal / object_class / service_principal_name /
+    cn / domain, NULL wherever the SID was never LDAP-resolved. _safe() skips (leaving
+    `table` unchanged) if ad_props somehow isn't built yet — it always is when
+    _derive_ad_props runs first in the pipeline, but this keeps a standalone call to a
+    node builder (as in the unit tests) from crashing on a missing table.
+    """
+    _safe(
+        con,
+        f"{table}<-ad_props",
+        f"CREATE OR REPLACE TABLE {schema}.{table} AS "
+        f"SELECT t.*, ap.enabled, ap.type, ap.is_domain_principal, ap.object_class, "
+        f"  ap.service_principal_name, ap.cn, ap.domain "
+        f"FROM {schema}.{table} t "
+        f"LEFT JOIN {schema}.ad_props ap ON ap.sid = t.sid",
+    )
+    logger.debug("%s enriched with ad_props in schema %r", table, schema)
 
 
 def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -630,6 +768,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_computer nc "
         f"LEFT JOIN _sr sr ON nc.dnshostname IS NOT NULL AND lower(nc.dnshostname) = sr.host"
     )
+    _join_ad_props(con, schema, "node_computer")
     logger.info("node_computer built in schema %r", schema)
 
 
@@ -817,6 +956,7 @@ def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_user "
         f"GROUP BY sid"
     )
+    _join_ad_props(con, schema, "node_user")
     logger.info("node_user built in schema %r", schema)
 
 
@@ -971,6 +1111,7 @@ def _node_group(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"WHERE sid IS NOT NULL "
         f"GROUP BY upper(sid)"
     )
+    _join_ad_props(con, schema, "node_group")
     logger.info("node_group built in schema %r", schema)
 
 
@@ -1534,6 +1675,15 @@ def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     Collection lists (CMBP ps1:7228-7229): built from collection_members JOIN collections
     keyed on the device's resource_id_str (<resource_id>@<site>).
+
+    Current management point + previous SMSID (Task B3, CMBP ps1:4010-4011/4016-4017/
+    7233-7234): current_management_point already carries the AdminService/WMI value from
+    _node_client_device; here it's filled from local_wmi_ccm_client for the collector's own
+    host when AdminService had no value, then its SID is resolved via principal_by_name
+    (mirroring the other *_sid subqueries below), falling back to local_wmi_ccm_client's own
+    SID field if the name doesn't resolve. previous_smsid / previous_smsid_change_date are
+    Local-only (CCM_Client's PreviousClientId / ClientIdChangeDate) with no AdminService
+    equivalent, so they come from local_wmi_ccm_client alone.
     """
     root = _root_code(con, schema) or ""
     suffix = f" || '@{root}'" if root else ""
@@ -1565,13 +1715,40 @@ def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"WHERE sms_unique_identifier IS NOT NULL AND sid IS NOT NULL "
               f"  AND NOT coalesce(obsolete, false)")
 
+    # local_wmi_ccm_client is Local-only telemetry (root\CCM's CCM_Client WMI class) and is
+    # absent entirely on any collector host that is not itself an SCCM client -- the common
+    # case for a purely-privileged (AdminService/WMI) collection run. ensure_columns() only
+    # patches columns onto an EXISTING table, so create it as an empty stub first; the
+    # correlated subqueries below then always bind against a real (possibly empty) table
+    # instead of raising a CatalogException that would abort this whole rebuild statement
+    # (unlike the other source reads in this function, it isn't wrapped in _safe).
+    con.execute(f"CREATE TABLE IF NOT EXISTS {schema}.local_wmi_ccm_client (smsid VARCHAR)")
+    _ensure_columns(con, schema, "local_wmi_ccm_client", {
+        "smsid": "VARCHAR", "current_management_point": "VARCHAR",
+        "current_management_point_sid": "VARCHAR", "previous_smsid": "VARCHAR",
+        "previous_smsid_change_date": "VARCHAR",
+    })
+
+    # current_management_point's resolved value is needed twice below (the REPLACE itself,
+    # and again to look up its SID) -- a SELECT list item can't reference a sibling alias in
+    # DuckDB, so the expression is built once here and inlined both places instead of two
+    # copies drifting out of sync.
+    mp_name = (
+        f"coalesce(d.current_management_point, "
+        f"(SELECT lc.current_management_point FROM {schema}.local_wmi_ccm_client lc "
+        f"WHERE upper(lc.smsid) = d.smsid LIMIT 1))"
+    )
+
     # Rebuild node_client_device with SID columns and collection list columns appended.
     # ad_domain_sid: preserve any value already set (inferred clients carry
     # upper(object_sid)); fill NULLs (real clients) from the _dev_sid map above.
+    # current_management_point: AdminService/WMI's value wins; Local fills the gap for the
+    # collector's own host (CMBP ps1:4010 vs 7233 -- both write the same output key).
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_client_device AS SELECT d.* REPLACE ("
         f"  coalesce(d.ad_domain_sid, "
-        f"           (SELECT s.sid FROM _dev_sid s WHERE s.smsid = d.smsid LIMIT 1)) AS ad_domain_sid"
+        f"           (SELECT s.sid FROM _dev_sid s WHERE s.smsid = d.smsid LIMIT 1)) AS ad_domain_sid, "
+        f"  {mp_name} AS current_management_point"
         f"), "
         f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
         f" WHERE upper(pbn.name) = upper(trim(d.primary_user_name)) LIMIT 1) AS primary_user_sid, "
@@ -1581,13 +1758,26 @@ def _enrich_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f" WHERE upper(pbn.name) = upper(trim(d.ad_last_logon_user_name)) LIMIT 1) AS ad_last_logon_user_sid, "
         f"(SELECT pbn.sid FROM {schema}.principal_by_name pbn "
         f" WHERE upper(pbn.name) = upper(trim(d.last_mp_server_name)) LIMIT 1) AS last_reported_mp_server_sid, "
+        f"coalesce("
+        f"  (SELECT pbn.sid FROM {schema}.principal_by_name pbn "
+        f"   WHERE upper(pbn.name) = upper(trim({mp_name})) LIMIT 1), "
+        f"  (SELECT lc.current_management_point_sid FROM {schema}.local_wmi_ccm_client lc "
+        f"   WHERE upper(lc.smsid) = d.smsid LIMIT 1)"
+        f") AS current_management_point_sid, "
+        f"(SELECT lc.previous_smsid FROM {schema}.local_wmi_ccm_client lc "
+        f" WHERE upper(lc.smsid) = d.smsid LIMIT 1) AS previous_smsid, "
+        f"(SELECT lc.previous_smsid_change_date FROM {schema}.local_wmi_ccm_client lc "
+        f" WHERE upper(lc.smsid) = d.smsid LIMIT 1) AS previous_smsid_change_date, "
         f"coalesce((SELECT list_distinct(array_agg(coll_id)) FROM _devcoll x WHERE x.rid_key = d.resource_id_str), "
         f"         CAST([] AS VARCHAR[])) AS collection_ids, "
         f"coalesce((SELECT list_distinct(array_agg(coll_name)) FROM _devcoll x WHERE x.rid_key = d.resource_id_str), "
         f"         CAST([] AS VARCHAR[])) AS collection_names "
         f"FROM {schema}.node_client_device d"
     )
-    logger.info("node_client_device resolved SIDs (incl. ad_domain_sid) + collection lists enriched in schema %r", schema)
+    logger.info(
+        "node_client_device resolved SIDs (incl. ad_domain_sid, current_management_point) "
+        "+ previous_smsid + collection lists enriched in schema %r", schema
+    )
 
 
 def _dedup_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -1684,6 +1874,57 @@ def _enrich_site_lists(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_site s"
     )
     logger.info("node_site.admin_users + stored_accounts enriched in schema %r", schema)
+
+
+def _derive_site_system_roles(con: duckdb.DuckDBPyConnection, schema: str) -> dict[str, list[str]]:
+    """Add node_site.site_system_roles: per-site aggregation of site-system role
+    assignments (CMBP ps1:1851-1897).
+
+    node_computer.site_system_roles already carries each computer's own list of
+    "<role>@<site>" strings (this is what Computer.SCCMSiteSystemRoles emits,
+    per-host). CMBP separately re-aggregates that same data onto the SITE: for
+    every "<role>@<site>" entry whose site suffix matches a given site, that site's
+    siteSystemRoles list gains one "<dnsHostName>: <role>@<site>" string. The two
+    properties are deliberately distinct views (per-host vs per-site) of the same
+    underlying role assignments.
+
+    Must run after both _node_site and _node_computer have built their tables --
+    it reads node_computer.dnshostname/site_system_roles and joins the result back
+    onto node_site by site_code, preserving node_site's one-row-per-site_code shape
+    (LEFT JOIN + coalesce, so a site with no matching site-system computer keeps
+    its row with an empty list rather than being dropped or left NULL).
+
+    Returns the same {site_code: [entries]} mapping now stored in the new column,
+    for callers (namely: this function's own tests) that want the plain dict
+    without re-querying DuckDB.
+
+    CMBP only attributes siteSystemRoles to a site when that site is NOT a
+    Secondary Site (Type -ne "Secondary Site", ps1:1861-1865) -- Secondary Sites
+    always keep an empty list, matching the site_type != 1 ("nonsec") convention
+    used elsewhere in this module (e.g. _edge_local_admin_required).
+    """
+    # One row per (computer, role) pair, restricted to roles carrying a site
+    # suffix ("<role>@<site>"); the site code is everything after the '@'.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _site_system_role_entries AS "
+        f"SELECT upper(regexp_extract(role, '@(.+)$', 1)) AS site_code, "
+        f"  dnshostname || ': ' || role AS entry "
+        f"FROM {schema}.node_computer, UNNEST(site_system_roles) AS t(role) "
+        f"WHERE dnshostname IS NOT NULL AND role LIKE '%@%'"
+    )
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_site AS "
+        f"SELECT s.*, "
+        f"CASE WHEN coalesce(s.site_type, 0) = 1 THEN CAST([] AS VARCHAR[]) ELSE "
+        f"  coalesce("
+        f"    (SELECT list_distinct(array_agg(e.entry)) FROM _site_system_role_entries e "
+        f"     WHERE e.site_code = upper(s.site_code)), "
+        f"    CAST([] AS VARCHAR[])"
+        f"  ) END AS site_system_roles "
+        f"FROM {schema}.node_site s"
+    )
+    logger.info("node_site.site_system_roles derived in schema %r", schema)
+    return dict(con.execute(f"SELECT site_code, site_system_roles FROM {schema}.node_site").fetchall())
 
 
 def _node_security_role(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -1817,6 +2058,11 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
       ad_last_logon_time, ad_last_logon_user_domain, source_site_code (from brief)
       last_active_time, last_online_time, last_offline_time (reclassified PORT-NOW by matrix)
     SID resolution and collection lists are added by _enrich_client_device.
+
+    current_management_point (Task B3, CMBP ps1:7233): AdminService/WMI's broad source for
+    the device's current MP name (cn_access_mp). _enrich_client_device fills any gap from
+    local_wmi_ccm_client and resolves the SID; the Local-only fields (previousSMSID/
+    ChangeDate) have no AdminService equivalent and are added entirely in _enrich_client_device.
     """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_client_device ("
@@ -1826,6 +2072,7 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "primary_user_name VARCHAR, current_logon_user_name VARCHAR, ad_last_logon_user_name VARCHAR, "
         "ad_last_logon_time VARCHAR, ad_last_logon_user_domain VARCHAR, source_site_code VARCHAR, "
         "last_active_time VARCHAR, last_online_time VARCHAR, last_offline_time VARCHAR, "
+        "current_management_point VARCHAR, "
         "is_confirmed_active_client BOOLEAN, ad_domain_sid VARCHAR)"
     )
     _optional = {
@@ -1838,12 +2085,16 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         # Telemetry scalars (Stage 3 C4).
         "ad_last_logon_time": "VARCHAR", "user_domain_name": "VARCHAR",
         "source_site_code": "VARCHAR",
-        # dlt snake-cases ADLastLogonTime -> a_d_last_logon_time (collector fixes this
-        # back to ad_last_logon_time); CNLastOnlineTime -> c_n_last_online_time;
-        # CNLastOfflineTime -> c_n_last_offline_time; LastActiveTime -> last_active_time.
+        # The SMS device-resource "CN*" fields are Client-Notification telemetry (SCCM's fast
+        # online/offline push channel). Both sms_rows._snake() and dlt's snake_case convention
+        # treat "CN" as a single token, so the real raw columns are cn_last_online_time,
+        # cn_last_offline_time, and cn_access_mp -- NOT c_n_* (verified against a live bucket).
+        # (ADLastLogonTime -> a_d_last_logon_time, which the collector fixes back to
+        # ad_last_logon_time; LastActiveTime -> last_active_time.)
         "last_active_time": "VARCHAR",
-        "c_n_last_online_time": "VARCHAR",
-        "c_n_last_offline_time": "VARCHAR",
+        "cn_last_online_time": "VARCHAR",
+        "cn_last_offline_time": "VARCHAR",
+        "cn_access_mp": "VARCHAR",
     }
     for _src in ("adminservice_client_devices", "wmi_client_devices"):
         _ensure_columns(con, schema, _src, _optional)
@@ -1856,8 +2107,9 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"last_mp_server_name, primary_user AS primary_user_name, "
               f"current_logon_user AS current_logon_user_name, user_name AS ad_last_logon_user_name, "
               f"ad_last_logon_time, user_domain_name AS ad_last_logon_user_domain, source_site_code, "
-              f"last_active_time, c_n_last_online_time AS last_online_time, "
-              f"c_n_last_offline_time AS last_offline_time, "
+              f"last_active_time, cn_last_online_time AS last_online_time, "
+              f"cn_last_offline_time AS last_offline_time, "
+              f"cn_access_mp AS current_management_point, "
               f"true AS is_confirmed_active_client, NULL AS ad_domain_sid "
               f"FROM {schema}.{_src} "
               f"WHERE smsid IS NOT NULL AND coalesce(is_client, false) AND NOT coalesce(is_obsolete, false)")
@@ -1878,6 +2130,7 @@ def _node_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"any_value(last_active_time) AS last_active_time, "
         f"any_value(last_online_time) AS last_online_time, "
         f"any_value(last_offline_time) AS last_offline_time, "
+        f"any_value(current_management_point) AS current_management_point, "
         f"bool_or(is_confirmed_active_client) AS is_confirmed_active_client, any_value(ad_domain_sid) AS ad_domain_sid, ? AS root_site_code "
         f"FROM {schema}.node_client_device GROUP BY smsid", [root])
     logger.info("node_client_device built in schema %r", schema)
@@ -2288,12 +2541,15 @@ def _graph_edges_init(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Create the empty graph_edges table that every edge builder INSERTs into.
     Always runs (even with no site/edge data) so convert can read the table.
 
-    The coercion_* columns are populated only by the Stage 6 relay builders; every
-    other builder INSERTs BY NAME and leaves them NULL (dedup coalesces NULL -> [])."""
+    The coercion_* columns are populated only by the Stage 6 relay builders; sccm_infra
+    is populated only by _edge_is_mapped_to (CMBP parity, SCCM_IsMappedTo only); every
+    other builder INSERTs BY NAME and leaves them NULL (dedup coalesces coercion_*
+    NULL -> [] and leaves sccm_infra NULL when no duplicate row set it true)."""
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges "
         f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[], "
-        f"coercion_victim_and_relay_target_pairs VARCHAR[], coercion_victim_hostnames VARCHAR[])"
+        f"coercion_victim_and_relay_target_pairs VARCHAR[], coercion_victim_hostnames VARCHAR[], "
+        f"sccm_infra BOOLEAN)"
     )
 
 
@@ -2398,7 +2654,11 @@ def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
 def _edge_is_mapped_to(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """AD principal -> SCCM_AdminUser (CMBP ps1:7789-7807). start = upper(admin_sid)
-    if present, else logon_name resolved via principal_by_name; end = upper(logon_name)@root."""
+    if present, else logon_name resolved via principal_by_name; end = upper(logon_name)@root.
+
+    sccm_infra is set true on every row (CMBP parity: SCCM_IsMappedTo is the only edge
+    kind CMBP flags SCCMInfra=true on) so the AD principal's entity panel calls out that
+    it's SCCM admin infrastructure."""
     from .kinds.edges import SCCM_IS_MAPPED_TO
     root_lit = _root_code(con, schema) or ""
     end_expr = (f"upper(a.logon_name) || '@{root_lit}'" if root_lit else "upper(a.logon_name)")
@@ -2412,7 +2672,7 @@ def _edge_is_mapped_to(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _safe(con, f"edge_is_mapped_to<-{_src}",
               f"INSERT INTO {schema}.graph_edges BY NAME "
               f"SELECT coalesce(upper(a.admin_sid), pbn.sid) AS start_id, {end_expr} AS end_id, "
-              f"'{SCCM_IS_MAPPED_TO}' AS kind, ['{_tag}'] AS collection_source "
+              f"'{SCCM_IS_MAPPED_TO}' AS kind, ['{_tag}'] AS collection_source, true AS sccm_infra "
               f"FROM {schema}.{_src} a "
               f"LEFT JOIN {schema}.principal_by_name pbn ON upper(trim(a.logon_name)) = upper(pbn.name) "
               f"WHERE a.logon_name IS NOT NULL AND coalesce(upper(a.admin_sid), pbn.sid) IS NOT NULL")
@@ -3158,6 +3418,9 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     collection_source tags from all duplicate rows are merged into one distinct list
     (same array-union idiom as site_system_roles in _node_computer).
+
+    sccm_infra: bool_or() so a row set true by one source (or one duplicate) wins over
+    a NULL from another; stays NULL only when every duplicate row left it NULL.
     """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges AS "
@@ -3170,7 +3433,8 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"    AS coercion_victim_and_relay_target_pairs, "
         f"  coalesce(list_distinct(flatten(list(coercion_victim_hostnames) "
         f"    FILTER (WHERE coercion_victim_hostnames IS NOT NULL))), CAST([] AS VARCHAR[])) "
-        f"    AS coercion_victim_hostnames "
+        f"    AS coercion_victim_hostnames, "
+        f"  bool_or(sccm_infra) AS sccm_infra "
         f"FROM {schema}.graph_edges "
         f"GROUP BY start_id, end_id, kind"
     )
@@ -3254,7 +3518,7 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_ad AS "
         f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
-        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra "
         f"FROM {schema}.graph_edges e "
         f"WHERE EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"   OR EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
@@ -3262,7 +3526,7 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_sccm AS "
         f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
-        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra "
         f"FROM {schema}.graph_edges e "
         f"WHERE NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"  AND NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
@@ -3277,6 +3541,7 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
     _principal_by_name(con, schema)
     _site_hierarchy(con, schema)
+    _derive_ad_props(con, schema)  # must precede the AD node builders below (_join_ad_props)
     _node_computer(con, schema)
     _node_user(con, schema)
     _node_group(con, schema)
@@ -3306,6 +3571,7 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # so every edge builder references survivors (no graph_edges rewrite needed).
     _dedup_client_device(con, schema)
     _enrich_site_lists(con, schema)
+    _derive_site_system_roles(con, schema)
     # Stage 5: MSSQL nodes (built from SCCM topology + EPA scan; spec §6 Stage 5).
     _mssql_sql_servers(con, schema)
     _node_mssql_server(con, schema)

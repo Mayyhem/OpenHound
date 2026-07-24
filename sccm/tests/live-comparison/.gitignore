@@ -5,3 +5,38 @@ results/*.log
 results/*.zip
 results/*.duckdb
 results/*.json
+
+# 2026-07-22 edge-rename parity check (bulky regenerated artifacts; the modified
+# *.ps1 kit copy and the *.md report/summary ARE tracked). ** covers nested basis
+# subdirs like rename_check/possible_on/.
+rename_check/**/*.log
+rename_check/**/*.zip
+rename_check/**/*.duckdb
+rename_check/**/graph/
+
+# 2026-07-22 Python integration-test-kit live validation (Task 13). Regenerated result
+# artifacts are ignored; integration_check/SUMMARY.md is tracked.
+integration_check/**/*.json
+integration_check/**/*.log
+integration_check/**/*.duckdb
+integration_check/**/graph/
+
+# 2026-07-24 CMBP-parity property re-validation (Task C1). Regenerated artifacts are
+# ignored; parity_props_check/SUMMARY.md and the _compare.py harness ARE tracked.
+parity_props_check/lookup.duckdb
+parity_props_check/graph/
+parity_props_check/*.json
+parity_props_check/*.err
+
+# 2026-07-23 lowpriv (MAYYHEM\lowpriv) live CMBP-vs-OpenHound comparison. Bulky
+# regenerated artifacts are ignored; lowpriv_check/SUMMARY.md and the harness
+# scripts (Run-AsNetOnly.ps1, netonly-probe.ps1, run-cmbp-both.ps1,
+# run-openhound-both.ps1) ARE tracked.
+lowpriv_check/**/*.zip
+lowpriv_check/**/*.log
+lowpriv_check/**/*.duckdb
+lowpriv_check/**/*.json
+lowpriv_check/**/graph/
+lowpriv_check/**/*_console.txt
+lowpriv_check/cmbp/_runner_*.ps1
+lowpriv_check/**/*.out
