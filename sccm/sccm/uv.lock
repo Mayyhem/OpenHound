@@ -996,6 +996,7 @@ dependencies = [
     { name = "pyasn1" },
     { name = "pyasn1-modules" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "requests" },
     { name = "winkerberos", marker = "sys_platform == 'win32'" },
 ]
 
@@ -1008,6 +1009,7 @@ requires-dist = [
     { name = "pyasn1" },
     { name = "pyasn1-modules" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "winkerberos", marker = "sys_platform == 'win32'", specifier = ">=0.10.0" },
 ]
 

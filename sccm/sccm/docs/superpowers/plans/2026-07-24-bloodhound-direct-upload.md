@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **This repo forbids agent git commits** — every task ends at a *green checkpoint* (targeted tests pass, stop for the owner to review + commit), not a `git commit`.
 
-**Ticket:** ope-8c44
+**Ticket:** ope-8c44 (implementation of the pivoted [Ope-8wi2](../../../../.tickets/Ope-8wi2.md))
+
+**Verified against code 2026-07-24:** SCCM runs **openhound 0.1.4** (git `cbfc7fc`); its `@app.convert`/`run_convert`/`Converter(name, source_kind, input_path, output_path, lookup, progress, method)` internals and `run_end_to_end`'s `app.converter(input_path=, output_path=, lookup_file=, progress=)` call contract are byte-identical to what Task 10 assumes. `InputPath`/`OutputPath`/`DEFAULT_LOOKUP_FILE`/`Contract` are in `openhound.core.app`; `Converter`/`Method` in `openhound.core.convert`. Clean slate — no upload code exists yet; no `bloodhound/` dir in the shared lib; both `tests/` dirs exist. **Schema files are `schema_SCCM.json` + `schema_MSSQL.json`** at the SCCM package root (the SCCM one was renamed from `schema.json`).
 
 **Goal:** Add direct upload of the OpenHound graph to BloodHound CE — schema (custom node/edge kinds) and results (a zip of the OpenGraph files) — driven from the SCCM collector's `collect` (`--run-all`) and `convert` commands, built on a reusable uploader in `openhound-collector-common`.
 
-**Architecture:** Port the Go MSSQLHound upload flow ([`MSSQLHound/internal/uploader`](../../../../MSSQLHound/internal/uploader), [`internal/bloodhound/writer.go`](../../../../MSSQLHound/internal/bloodhound/writer.go)) into a new, framework-agnostic `bloodhound/` subpackage of `openhound-collector-common`: a small HTTP client (`PUT /api/v2/extensions` for schema; `POST /api/v2/file-upload/{start,{id},end}` job flow for results; HMAC or Bearer auth; retry on 429/5xx with exponential backoff), a zip bundler, and a schema-mutation helper. SCCM supplies its two schema files (`schema.json` + `schema_MSSQL.json`) and calls one shared `run_upload(...)` orchestration from both CLI commands. `convert sccm` must be **hand-registered** on the framework's `convert` Typer group (the `@app.convert` decorator exposes no seam for extra flags), mirroring how `collect sccm` is already hand-registered.
+**Architecture:** Port the Go MSSQLHound upload flow ([`MSSQLHound/internal/uploader`](../../../../MSSQLHound/internal/uploader), [`internal/bloodhound/writer.go`](../../../../MSSQLHound/internal/bloodhound/writer.go)) into a new, framework-agnostic `bloodhound/` subpackage of `openhound-collector-common`: a small HTTP client (`PUT /api/v2/extensions` for schema; `POST /api/v2/file-upload/{start,{id},end}` job flow for results; HMAC or Bearer auth; retry on 429/5xx with exponential backoff), a zip bundler, and a schema-mutation helper. SCCM supplies its two schema files (`schema_SCCM.json` + `schema_MSSQL.json`) and calls one shared `run_upload(...)` orchestration from both CLI commands. `convert sccm` must be **hand-registered** on the framework's `convert` Typer group (the `@app.convert` decorator exposes no seam for extra flags), mirroring how `collect sccm` is already hand-registered.
 
 **Tech Stack:** Python 3.13+, Typer (CLI), `requests` (HTTP), stdlib `hmac`/`hashlib`/`zipfile`/`json`, pytest. No changes to OpenHound core.
 
@@ -19,7 +21,7 @@ Copy these verbatim into every task's mental checklist:
   - **D2 — Code location:** Reusable uploader lives in `openhound-collector-common`. Wire into the **SCCM collector only** for now; MSSQL/future collectors adopt later.
   - **D3 — CLI placement:** Upload flags live on **both** `collect sccm` and `convert sccm`. `collect --run-all -B …` uploads end-to-end; `convert -B …` uploads what convert produced.
   - **D4 — Results payload:** a **zip** of the convert output JSON files. **No `seed_data.json`** (the `PUT /api/v2/extensions` schema already registers every kind).
-  - **D5 — Schemas uploaded:** **both** `sccm/sccm/schema.json` (namespace `SCCM`) and `sccm/sccm/schema_MSSQL.json` (namespace `MSSQL`), because the SCCM collector emits `MSSQL_*` edges/nodes whose kinds live in the MSSQL schema.
+  - **D5 — Schemas uploaded:** **both** `sccm/sccm/schema_SCCM.json` (namespace `SCCM`) and `sccm/sccm/schema_MSSQL.json` (namespace `MSSQL`), because the SCCM collector emits `MSSQL_*` edges/nodes whose kinds live in the MSSQL schema.
   - **D6 — Upload-only / standalone:** `--upload-dir <graph_dir>` uploads existing OpenGraph files without collecting/converting. `--skip-collection` (Go semantics) = push schema only, no collection.
   - **D7 — `--disable-possible-edges`:** before `PUT`, flip `is_traversable` → `false` for the "possible" relationship kinds in each schema (SCCM: the two coerce-and-relay kinds; MSSQL: the Go `PossibleEdgeKinds` set). Port of `SchemaJSONWithDisabledPossibleEdges`.
 - **Flag names (verbatim, mirror the Go tool):** `-B/--bloodhound <token-id>:<token_key>@<url>`, `--bloodhound-url` (env `BLOODHOUND_URL`), `--token-id` (env `BLOODHOUND_TOKEN_ID`), `--token-key` (env `BLOODHOUND_TOKEN_KEY`), `--upload-schema-only`, `--upload-results-only` (mutually exclusive), `--skip-collection`, `--upload-dir`.
@@ -1065,7 +1067,7 @@ Expected: PASS (all bloodhound tests green)
 - Consumes: `disable_possible_edges` (Task 5).
 - Produces: `load_sccm_schemas(disable_possible: bool) -> list[bytes]`, `SCCM_POSSIBLE_EDGE_KINDS`, `MSSQL_POSSIBLE_EDGE_KINDS` (used by Task 8).
 
-**Notes:** The two schema files live at the SCCM package root — `sccm/sccm/schema.json` and `sccm/sccm/schema_MSSQL.json`. From `src/openhound_sccm/bloodhound_schemas.py`, that root is `Path(__file__).resolve().parents[2]`. `SCCM_POSSIBLE_EDGE_KINDS` are the two Stage-6 coerce-and-relay kinds that carry `is_traversable: true` in `schema.json`. `MSSQL_POSSIBLE_EDGE_KINDS` mirrors the Go `PossibleEdgeKinds` list ([writer.go:22-29](../../../../MSSQLHound/internal/bloodhound/writer.go#L22-L29)).
+**Notes:** The two schema files live at the SCCM package root — `sccm/sccm/schema_SCCM.json` and `sccm/sccm/schema_MSSQL.json` (the SCCM schema was renamed from `schema.json` → `schema_SCCM.json`; verify with `ls sccm/sccm/schema*.json` before implementing). From `src/openhound_sccm/bloodhound_schemas.py`, that root is `Path(__file__).resolve().parents[2]`. `SCCM_POSSIBLE_EDGE_KINDS` are the two Stage-6 coerce-and-relay kinds that carry `is_traversable: true` in `schema_SCCM.json`. `MSSQL_POSSIBLE_EDGE_KINDS` mirrors the Go `PossibleEdgeKinds` list ([writer.go:22-29](../../../../MSSQLHound/internal/bloodhound/writer.go#L22-L29)).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1118,7 +1120,7 @@ Expected: FAIL — `ModuleNotFoundError: openhound_sccm.bloodhound_schemas`
 # sccm/sccm/src/openhound_sccm/bloodhound_schemas.py
 """Load the SCCM collector's BloodHound extensions schemas for upload.
 
-The SCCM collector emits both SCCM_* kinds (schema.json) and MSSQL_* kinds
+The SCCM collector emits both SCCM_* kinds (schema_SCCM.json) and MSSQL_* kinds
 (schema_MSSQL.json) — see kinds/edges.py — so a direct upload registers BOTH so
 every emitted edge/node renders. `--disable-possible-edges` flips the uncertain
 ("possible") relationship kinds to non-traversable in each schema before upload,
@@ -1135,7 +1137,7 @@ logger = logging.getLogger(__name__)
 
 # Package root holding the two hand-maintained schema files.
 _SCHEMA_ROOT = Path(__file__).resolve().parents[2]
-_SCCM_SCHEMA = _SCHEMA_ROOT / "schema.json"
+_SCCM_SCHEMA = _SCHEMA_ROOT / "schema_SCCM.json"
 _MSSQL_SCHEMA = _SCHEMA_ROOT / "schema_MSSQL.json"
 
 # SCCM's Stage-6 coerce-and-relay edges are the collector's "possible" edges.
@@ -1769,7 +1771,7 @@ Add a section documenting: (a) direct upload as a new capability built on `openh
 
 Run:
 ```bash
-gtk add-note ope-8c44 "Implemented: shared bloodhound uploader in openhound-collector-common (auth/client/uploader/zip/schema); SCCM collect+convert wired (-B/--bloodhound, env vars, --upload-schema-only/--upload-results-only, --skip-collection, --upload-dir); uploads schema.json + schema_MSSQL.json with --disable-possible-edges mutation; convert hand-registered. Offline tests green. Live lab validation vs bloodhound.mayyhem.com pending."
+gtk add-note ope-8c44 "Implemented: shared bloodhound uploader in openhound-collector-common (auth/client/uploader/zip/schema); SCCM collect+convert wired (-B/--bloodhound, env vars, --upload-schema-only/--upload-results-only, --skip-collection, --upload-dir); uploads schema_SCCM.json + schema_MSSQL.json with --disable-possible-edges mutation; convert hand-registered. Offline tests green. Live lab validation vs bloodhound.mayyhem.com pending."
 ```
 Then edit `TICKETS-BY-STATUS.md` to list ope-8c44 under the appropriate status (in_progress until live-validated).
 

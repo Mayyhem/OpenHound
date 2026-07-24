@@ -1,5 +1,6 @@
 import copy
 import datetime
+import duckdb
 import logging
 import os
 import pathlib
@@ -14,16 +15,19 @@ import types
 from enum import Enum
 import typer
 from openhound.cli.collect import collect as _collect_typer  # noqa: E402
+from openhound.cli.convert import convert as _convert_typer  # noqa: E402
 
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from openhound.core.app import (
     Contract,
+    DEFAULT_LOOKUP_FILE,
+    InputPath,
     OpenHound,
     OutputPath,
 )
 from openhound.core.collect import CollectContext, Collector
-from openhound.core.convert import ConvertContext
+from openhound.core.convert import ConvertContext, Converter, Method
 from openhound.core.preproc import PreProcContext
 from openhound.core.progress import Progress
 from dlt.common.pipeline import LoadInfo
@@ -47,6 +51,9 @@ from .models.sccm_site import SCCMSite
 from .models.stub_node import StubNode
 from .models.user import UserNode
 from .transforms import transforms
+from .bloodhound_schemas import load_sccm_schemas
+from .bloodhound_upload import run_upload
+from openhound_collector_common.bloodhound import build_uploader, resolve_credentials
 
 if TYPE_CHECKING:
     # Type-only import: StagePaths annotates the --run-all output-summary helpers.
@@ -310,6 +317,54 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
             os.environ[env_name] = str(value)
         else:
             os.environ[env_name] = str(value)
+
+
+# ---------------------------------------------------------------------------
+# Direct BloodHound CE upload (`-B`/`--bloodhound-url` + friends)
+# ---------------------------------------------------------------------------
+# Shared by `collect --run-all` (Task 9) and `convert` (Task 10): resolve creds
+# once, then dispatch through one helper so the schema/results decision logic
+# lives in exactly one place.
+def _resolve_upload_mode(upload_schema_only: bool, upload_results_only: bool) -> tuple[bool, bool]:
+    """Map the two upload-only switches to (upload_schema, upload_results).
+
+    Default is both. The two switches are mutually exclusive.
+    """
+    if upload_schema_only and upload_results_only:
+        raise typer.BadParameter(
+            "--upload-schema-only and --upload-results-only are mutually exclusive.",
+            param_hint="--upload-results-only",
+        )
+    if upload_schema_only:
+        return True, False
+    if upload_results_only:
+        return False, True
+    return True, True
+
+
+def _dispatch_bloodhound_upload(
+    *,
+    url: Optional[str],
+    token_id: Optional[str],
+    token_key: Optional[str],
+    disable_possible: bool,
+    results_dir: "Optional[pathlib.Path]",
+    work_dir: pathlib.Path,
+    upload_schema: bool,
+    upload_results: bool,
+    logger: logging.Logger,
+) -> None:
+    """Build the uploader and push schema/results. No-op if not configured."""
+    uploader = build_uploader(url, token_id, token_key, logger_=logger)
+    if uploader is None:
+        logger.debug("BloodHound upload not configured; skipping")
+        return
+    schemas = load_sccm_schemas(disable_possible) if upload_schema else []
+    run_upload(
+        uploader=uploader, schemas=schemas, results_dir=results_dir,
+        work_dir=work_dir, upload_schema=upload_schema, upload_results=upload_results,
+        logger=logger,
+    )
 
 
 # A level above CRITICAL (50) that no record can ever reach — used to mute a
@@ -1073,8 +1128,37 @@ def collect_sccm(
     verbose: bool = typer.Option(False, "-v", "--verbose", rich_help_panel="Logging", help="Verbose console output (VERBOSE level: PS1 [Verbose] parity — per-resolution / per-node-add / per-edge dedupe traces). Default is INFO (step summaries)."),
     silent: bool = typer.Option(False, "--silent", rich_help_panel="Logging", help="Silence all console output. The on-disk logs are still written: collect_full_* (always the complete DEBUG trace of the collector) and collect_issues_* (warnings/errors with tracebacks)."),
     debug: bool = typer.Option(False, "--debug", rich_help_panel="Logging", help="Debug console output (DEBUG level; very chatty, includes dlt and ldap3 internals)."),
+    # ---- BloodHound Upload ----
+    bloodhound: Optional[str] = typer.Option(None, "-B", "--bloodhound", rich_help_panel="BloodHound Upload", help="BloodHound CE credentials shorthand: <token-id>:<token_key>@<url> (uploads both schema and results)."),
+    bloodhound_url: Optional[str] = typer.Option(None, "--bloodhound-url", rich_help_panel="BloodHound Upload", help="BloodHound CE instance URL (env: BLOODHOUND_URL)."),
+    token_id: Optional[str] = typer.Option(None, "--token-id", rich_help_panel="BloodHound Upload", help="BloodHound API token ID (env: BLOODHOUND_TOKEN_ID)."),
+    token_key: Optional[str] = typer.Option(None, "--token-key", rich_help_panel="BloodHound Upload", help="BloodHound API token key (env: BLOODHOUND_TOKEN_KEY)."),
+    upload_schema_only: bool = typer.Option(False, "--upload-schema-only", rich_help_panel="BloodHound Upload", help="Only upload schema definitions (skip results)."),
+    upload_results_only: bool = typer.Option(False, "--upload-results-only", rich_help_panel="BloodHound Upload", help="Only upload collection results (skip schema)."),
+    skip_collection: bool = typer.Option(False, "--skip-collection", rich_help_panel="BloodHound Upload", help="Skip collection; with -B, push the schema only (or upload --upload-dir results)."),
+    upload_dir: Optional[pathlib.Path] = typer.Option(None, "--upload-dir", rich_help_panel="BloodHound Upload", help="Upload existing OpenGraph files from this directory instead of collecting/converting."),
 ) -> Optional[LoadInfo]:
     _apply_log_level(verbose, debug, silent)
+
+    # Resolve BloodHound creds up front so both the skip-collection and the
+    # --run-all paths use the same values. `upload_mode` also validates the
+    # mutually-exclusive switches early (before any collection work).
+    bh_url, bh_token_id, bh_token_key = resolve_credentials(
+        bloodhound, bloodhound_url, token_id, token_key)
+    upload_schema, upload_results = _resolve_upload_mode(upload_schema_only, upload_results_only)
+
+    # --skip-collection: do no collection. With creds, push schema (and, if
+    # --upload-dir is given, those existing results). Mirrors the Go tool.
+    if skip_collection:
+        logger.info("--skip-collection set: skipping collection.")
+        _dispatch_bloodhound_upload(
+            url=bh_url, token_id=bh_token_id, token_key=bh_token_key,
+            disable_possible=disable_possible_edges, results_dir=upload_dir,
+            work_dir=output_path, upload_schema=upload_schema,
+            upload_results=upload_results and upload_dir is not None,
+            logger=logger,
+        )
+        return None
 
     # Testing against a graph (fixtures or a comparison zip) requires a completed
     # convert, so either flag implies --run-all rather than making the operator
@@ -1246,6 +1330,15 @@ def collect_sccm(
             output_path, _paths, _ordered_log_path, log_path,
             _diag.warning_count + _diag.error_count,
         )
+        # Direct BloodHound upload of the graph convert just produced (or an
+        # explicit --upload-dir). results_dir is None-safe inside run_upload.
+        _dispatch_bloodhound_upload(
+            url=bh_url, token_id=bh_token_id, token_key=bh_token_key,
+            disable_possible=disable_possible_edges,
+            results_dir=upload_dir or _paths.graph_out,
+            work_dir=output_path, upload_schema=upload_schema,
+            upload_results=upload_results, logger=logger,
+        )
         # --compare-to-zip and --run-integration-tests both need the graph convert
         # just produced. _ts is the same run timestamp used for the collect logs
         # above, so every artifact from this invocation shares one suffix.
@@ -1265,6 +1358,16 @@ def collect_sccm(
             )
             raise typer.Exit(code=rc)
     else:
+        # Even without --run-all there is no graph to upload, but the operator
+        # may still want the schema (or an explicit --upload-dir) pushed.
+        if bh_url:
+            _dispatch_bloodhound_upload(
+                url=bh_url, token_id=bh_token_id, token_key=bh_token_key,
+                disable_possible=disable_possible_edges, results_dir=upload_dir,
+                work_dir=output_path, upload_schema=upload_schema,
+                upload_results=upload_results and upload_dir is not None,
+                logger=logger,
+            )
         logger.debug("--run-all not set; leaving preprocess/convert to the operator.")
     return load_info
 
@@ -1615,11 +1718,11 @@ def preproc(ctx: PreProcContext) -> dict[str, str]:
 
 @dlt.source(name="sccm_convert_noop")
 def _noop_convert_source():
-    """The framework runs Converter.run over whatever @app.convert returns. All real
-    emission happens in the Convert2-Read-DB pipeline (run in `convert` below), so this source carries
-    no graph-resource models — Converter.run finds no models and its own pipeline is a
-    no-op. opengraph_file appends uniquely-numbered files, so the two pipelines writing
-    to the same output dir never collide."""
+    """Converter.run runs over whatever `_sccm_convert_hook` returns. All real
+    emission happens in the Convert2-Read-DB pipeline (run in `_sccm_convert_hook` below), so
+    this source carries no graph-resource models — Converter.run finds no models and its own
+    pipeline is a no-op. opengraph_file appends uniquely-numbered files, so the two pipelines
+    writing to the same output dir never collide."""
 
     @dlt.resource(name="_noop")
     def _empty():
@@ -1681,9 +1784,108 @@ def _emit_split_graph(lookup: SCCMLookup, output_path) -> None:
     )
 
 
-@app.convert(lookup=SCCMLookup)
-def convert(ctx: ConvertContext):
+def _sccm_convert_hook(ctx: ConvertContext):
     """Emit the SCCM graph by reading the preproc DuckDB directly (Convert2-Read-DB), as two
     payloads (SCCM-tagged + untagged AD), then hand the framework a no-op source."""
     _emit_split_graph(ctx.lookup, ctx.output_path)
     return _noop_convert_source(), {}
+
+
+def _run_convert(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    lookup_file: pathlib.Path = DEFAULT_LOOKUP_FILE,
+    progress: Progress = Progress.tqdm,
+    method: Method = Method.write,
+):
+    """In-process convert callable — replicates the ~10-line closure the framework's
+    ``@app.convert`` decorator builds automatically (open a read-only lookup DB session,
+    build a ``Converter``, call the hook, run it).
+
+    Assigned to ``app.converter`` below so ``run_end_to_end`` (the --run-all chain) keeps
+    calling it exactly like before, and called directly by the hand-registered CLI command
+    so the convert step can sit alongside the BloodHound upload flags.
+    """
+    client = duckdb.connect(str(lookup_file), read_only=True)
+    lookup_session = SCCMLookup(client)
+    if isinstance(progress, str):
+        progress = Progress(progress)
+    converter = Converter(
+        name=app.name, source_kind=app.source_kind, input_path=input_path,
+        output_path=output_path, lookup=lookup_session, progress=progress, method=method,
+    )
+    source_method, extra_context = _sccm_convert_hook(
+        ConvertContext(input_path=input_path, output_path=output_path,
+                       lookup=lookup_session, pipeline=converter)
+    )
+    return converter.run(source_method, graph_resources=app.assets, extra_context=extra_context)
+
+
+# Set at module scope, same reasoning as `app.collector = collect_sccm` above: the
+# `@app.convert()` convenience decorator would normally wire this up, but we register
+# directly on the framework's Typer group instead so the convert command can carry the
+# BloodHound upload flags. `run_end_to_end` (the --run-all chain) calls `app.converter`
+# directly, so it must be set here regardless of which CLI command runs.
+app.converter = _run_convert
+
+
+@_convert_typer.command(
+    name="sccm",
+    help="Convert collected SCCM data to OpenGraph; optionally upload to BloodHound CE.",
+)
+def convert_sccm(
+    input_path: InputPath,
+    output_path: OutputPath,
+    lookup_file: pathlib.Path = typer.Option(DEFAULT_LOOKUP_FILE, "--lookup-file", help="DuckDB lookup file path."),
+    progress: ProgressOption = typer.Option(ProgressOption.off, help="Progress backend."),
+    disable_possible_edges: bool = typer.Option(False, "--disable-possible-edges", help="Disable uncertain/possible edges (also flips them non-traversable in the uploaded schema)."),
+    # ---- BloodHound Upload (identical surface to collect) ----
+    bloodhound: Optional[str] = typer.Option(None, "-B", "--bloodhound", rich_help_panel="BloodHound Upload", help="BloodHound CE credentials shorthand: <token-id>:<token_key>@<url>."),
+    bloodhound_url: Optional[str] = typer.Option(None, "--bloodhound-url", rich_help_panel="BloodHound Upload", help="BloodHound CE instance URL (env: BLOODHOUND_URL)."),
+    token_id: Optional[str] = typer.Option(None, "--token-id", rich_help_panel="BloodHound Upload", help="BloodHound API token ID (env: BLOODHOUND_TOKEN_ID)."),
+    token_key: Optional[str] = typer.Option(None, "--token-key", rich_help_panel="BloodHound Upload", help="BloodHound API token key (env: BLOODHOUND_TOKEN_KEY)."),
+    upload_schema_only: bool = typer.Option(False, "--upload-schema-only", rich_help_panel="BloodHound Upload", help="Only upload schema definitions."),
+    upload_results_only: bool = typer.Option(False, "--upload-results-only", rich_help_panel="BloodHound Upload", help="Only upload results."),
+    skip_collection: bool = typer.Option(
+        False, "--skip-collection", rich_help_panel="BloodHound Upload",
+        help="Skip conversion; with -B, push the schema only (or upload --upload-dir "
+        "results). Named to match `collect --skip-collection` so the same flags work "
+        "against either subcommand.",
+    ),
+    upload_dir: Optional[pathlib.Path] = typer.Option(None, "--upload-dir", rich_help_panel="BloodHound Upload", help="Upload existing OpenGraph files from this dir instead of converting."),
+) -> None:
+    _apply_log_level(verbose=False, debug=False, silent=False)
+    bh_url, bh_token_id, bh_token_key = resolve_credentials(bloodhound, bloodhound_url, token_id, token_key)
+    upload_schema, upload_results = _resolve_upload_mode(upload_schema_only, upload_results_only)
+
+    if skip_collection:
+        # Mirrors collect_sccm's --skip-collection: push the schema only (or the
+        # --upload-dir results too), without running the convert step at all.
+        logger.info("--skip-collection set: skipping convert.")
+        _dispatch_bloodhound_upload(
+            url=bh_url, token_id=bh_token_id, token_key=bh_token_key,
+            disable_possible=disable_possible_edges, results_dir=upload_dir,
+            work_dir=output_path, upload_schema=upload_schema,
+            upload_results=upload_results and upload_dir is not None,
+            logger=logger,
+        )
+        return
+
+    if upload_dir is not None:
+        # Standalone re-upload: skip convert, push the given graph dir.
+        logger.info("--upload-dir set: uploading existing graph, skipping convert.")
+        results_dir = upload_dir
+    else:
+        # Normal path: run the convert, then upload what it produced.
+        _run_convert(
+            input_path=input_path, output_path=output_path, lookup_file=lookup_file,
+            progress=_resolve_progress(progress), method=Method.write,
+        )
+        results_dir = output_path
+
+    _dispatch_bloodhound_upload(
+        url=bh_url, token_id=bh_token_id, token_key=bh_token_key,
+        disable_possible=disable_possible_edges, results_dir=results_dir,
+        work_dir=output_path, upload_schema=upload_schema, upload_results=upload_results,
+        logger=logger,
+    )

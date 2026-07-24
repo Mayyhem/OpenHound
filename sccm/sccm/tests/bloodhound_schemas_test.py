@@ -1,0 +1,34 @@
+import json
+
+from openhound_sccm.bloodhound_schemas import (
+    MSSQL_POSSIBLE_EDGE_KINDS,
+    SCCM_POSSIBLE_EDGE_KINDS,
+    load_sccm_schemas,
+)
+
+
+def test_loads_both_schemas_by_namespace():
+    schemas = load_sccm_schemas(disable_possible=False)
+    namespaces = {json.loads(s)["schema"]["namespace"] for s in schemas}
+    assert namespaces == {"SCCM", "MSSQL"}
+
+
+def test_disable_possible_flips_sccm_and_mssql_kinds():
+    schemas = load_sccm_schemas(disable_possible=True)
+    rels = {}
+    for s in schemas:
+        for r in json.loads(s)["relationship_kinds"]:
+            rels[r["name"]] = r["is_traversable"]
+    for kind in SCCM_POSSIBLE_EDGE_KINDS + MSSQL_POSSIBLE_EDGE_KINDS:
+        # Only assert kinds actually present in the shipped schemas.
+        if kind in rels:
+            assert rels[kind] is False, f"{kind} should be non-traversable"
+
+
+def test_default_leaves_possible_edges_traversable():
+    schemas = load_sccm_schemas(disable_possible=False)
+    rels = {}
+    for s in schemas:
+        for r in json.loads(s)["relationship_kinds"]:
+            rels[r["name"]] = r["is_traversable"]
+    assert rels.get("SCCM_CoerceAndRelayToSMB") is True

@@ -20,8 +20,8 @@
 | Status | Before audit | `gtk` now | Code-true state |
 |---|---:|---:|---:|
 | Closed | 51 | **76** | 74 |
-| In&nbsp;Progress | 6 | **5** | 7 |
-| Open | 34 | **26** | 26 |
+| In&nbsp;Progress | 6 | **5** | 8 |
+| Open | 34 | **26** | 25 |
 | **Total** | **91** | **107** | **107** |
 
 > **2026-07-22 additions (not part of the 2026-07-21 audit):** [ope-76f1](.tickets/ope-76f1.md)
@@ -41,6 +41,15 @@
 > (fix the truncated "Found URL" verbose log in the local client-log scrape) was created and **closed**
 > — offline-verified, listed under [Closed](#closed-67-code-verified). The count columns above were also
 > refreshed to current `gtk` output (prior sessions' new tickets had drifted the mirror from 103 to 107).
+>
+> **2026-07-24 (SDD implementation):** [ope-8c44](.tickets/ope-8c44.md) — direct BloodHound CE upload —
+> moved from **Open** to **In Progress** in the "Code-true state" column below (Tasks 1–10 of the plan
+> implemented and offline-tested: shared uploader in `openhound-collector-common`, SCCM `collect`/`convert`
+> wiring, both schemas, `--disable-possible-edges` mutation, `convert sccm` hand-registered; full SCCM
+> suite 731 pass). **Not** re-started via `gtk start`, so `gtk`'s own recorded status is still `open` — the
+> "gtk now" column is intentionally left at 26/5 to reflect that; only the code-true column and the section
+> below move. Live-lab validation against `bloodhound.mayyhem.com` (see the ticket's notes) is the
+> remaining work before this closes.
 
 The 2-ticket gap between "`gtk` now" and "code-true state" is **Ope-f3di** and **Ope-scp1** —
 kept `closed` as *superseded* even though their work isn't actually done. Their scope lives in
@@ -201,19 +210,20 @@ in `gtk`.
 
 ---
 
-## In Progress (7 code-verified)
+## In Progress (8 code-verified)
 
 - [Ope-rhzx](.tickets/Ope-rhzx.md) — Individual Permissions port (role RBAC done, granular per-op not) *(reconciled → in_progress)*
 - [Ope-15m7](.tickets/Ope-15m7.md) — Seed Nodes / Edges audit (AuthUsers seed done, group memberships not) *(reconciled → in_progress)*
 - [Ope-liu7](.tickets/Ope-liu7.md) — System Management Container abuse (GenericAll only, no takeover edges) *(reconciled → in_progress)*
 - [ope-1f0f](.tickets/ope-1f0f.md) — Code-quality pass (1 of 5 areas done; umbrella for f3di + scp1) *(reconciled → in_progress)*
 - [ope-e512](.tickets/ope-e512.md) — Per-domain collector rerun (resolution done, rerun not) *(reconciled → in_progress)*
+- [ope-8c44](.tickets/ope-8c44.md) ⚠️ — Direct BloodHound CE upload via shared `openhound-collector-common` uploader — **recorded `open`** (shared uploader + SCCM `collect`/`convert` wiring implemented and offline-tested 2026-07-24; live-lab validation vs `bloodhound.mayyhem.com` pending; not re-started via `gtk start`)
 - [Ope-f3di](.tickets/Ope-f3di.md) ⚠️ — Logging audit — **recorded `closed`** (superseded by ope-1f0f, left as-is)
 - [Ope-scp1](.tickets/Ope-scp1.md) ⚠️ — Variable-scope audit — **recorded `closed`** (superseded by ope-1f0f, left as-is)
 
 ---
 
-## Open (26 code-verified)
+## Open (25 code-verified)
 
 Tickets with no meaningful implementation found — genuinely not started. All recorded `open`.
 
@@ -225,8 +235,7 @@ Tickets with no meaningful implementation found — genuinely not started. All r
 - [ope-e10b](.tickets/ope-e10b.md) — Emit `SCCM_HasNetworkAccessAccount` from Local collection (NAA from client WMI); schema.json placeholder with no emitter yet *(created 2026-07-22)*
 - [Ope-0t3h](.tickets/Ope-0t3h.md) — Client Push Installation Issues (CRED-1 / ELEVATE-1)
 - [Ope-4tdt](.tickets/Ope-4tdt.md) — DCOnly Mode (`--dc-only` flag)
-- [Ope-8wi2](.tickets/Ope-8wi2.md) — Upload Directly to BloodHound *(design pivoted 2026-07-24; implementation planned under linked [ope-8c44](.tickets/ope-8c44.md))*
-- [ope-8c44](.tickets/ope-8c44.md) — Direct BloodHound CE upload (schema + results) via shared `openhound-collector-common` uploader *(planned 2026-07-24; links Ope-8wi2)*
+- [Ope-8wi2](.tickets/Ope-8wi2.md) — Upload Directly to BloodHound *(design pivoted 2026-07-24; implementation now in_progress under linked [ope-8c44](.tickets/ope-8c44.md), see In Progress above)*
 - [Ope-emhc](.tickets/Ope-emhc.md) — Implement `--enable-bad-opsec` gating (flag defined but never gates)
 - [Ope-ew5k](.tickets/Ope-ew5k.md) — WMI Collection (client-side CIM tables)
 - [Ope-exvi](.tickets/Ope-exvi.md) — Findings / Remediations layer

@@ -66,11 +66,20 @@ EXPECTED_PANEL = {
     "verbose": "Logging",
     "silent": "Logging",
     "debug": "Logging",
+    # BloodHound Upload — direct-to-BloodHound-CE schema/results push.
+    "bloodhound": "BloodHound Upload",
+    "bloodhound_url": "BloodHound Upload",
+    "token_id": "BloodHound Upload",
+    "token_key": "BloodHound Upload",
+    "upload_schema_only": "BloodHound Upload",
+    "upload_results_only": "BloodHound Upload",
+    "skip_collection": "BloodHound Upload",
+    "upload_dir": "BloodHound Upload",
 }
 
 # Panel display order in --help follows the order each panel first appears in the
 # parameter list, so this is also the intended source ordering.
-PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Testing", "Logging"]
+PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Testing", "Logging", "BloodHound Upload"]
 
 
 def _option_params():
