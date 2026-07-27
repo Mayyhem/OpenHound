@@ -851,9 +851,7 @@ class AdClient:
             logger.warning("LDAP search failed (filter=%s, base=%s): %s", search_filter, base_dn, exc)
         finally:
             logger.verbose(
-                "LDAP search complete: base=%s filter=%s entries=%d pages=%d",
-                base_dn, search_filter, total, page,
-            )
+                "LDAP search complete: entries=%d pages=%d", total, page,)
 
     # Map wire-protocol (lowercased) attribute names to clean output keys.
     _ATTR_KEY_MAP: dict[str, str] = {

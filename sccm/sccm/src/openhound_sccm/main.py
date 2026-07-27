@@ -319,6 +319,36 @@ def _apply_env_overrides(flag_kwargs: dict) -> None:
             os.environ[env_name] = str(value)
 
 
+def _resolve_dc_only_methods(dc_only: bool, collection_methods: Optional[str]) -> Optional[str]:
+    """Resolve the effective --collection-methods for a run, honoring --dc-only.
+
+    --dc-only is a recon mode: collect only LDAP + DNS from the domain controller
+    and skip every per-host phase. It forces the method set to "LDAP,DNS". Because
+    both flags decide *what* gets collected, passing them together is a
+    contradiction we reject up front rather than silently pick a winner.
+    """
+    if not dc_only:
+        # Normal run: leave the operator's -m (or None -> "All" later) untouched.
+        return collection_methods
+    if collection_methods is not None:
+        # Explicit -m alongside --dc-only: the operator asked for two different scopes.
+        raise typer.BadParameter(
+            "--dc-only and -m/--collection-methods are mutually exclusive; "
+            "--dc-only already restricts collection to LDAP + DNS."
+        )
+    return "LDAP,DNS"
+
+
+def _should_run_per_host(ctx, phases, dc_only: bool) -> bool:
+    """Whether Stage 2 (per-host probing) runs this collect.
+
+    It runs only when discovery produced a usable context and there are phases to
+    run — and never in --dc-only recon mode, which stops after LDAP + DNS discovery
+    against the domain controller.
+    """
+    return bool(ctx is not None and phases) and not dc_only
+
+
 # ---------------------------------------------------------------------------
 # Direct BloodHound CE upload (`-B`/`--bloodhound-url` + friends)
 # ---------------------------------------------------------------------------
@@ -1023,26 +1053,41 @@ def _run_per_host_stage(pipeline, work_queue, ctx, threads, maxsize: int = 1000,
     # was even called) plus every per-host phase above — pool_thread is only
     # not alive once run_pipeline's ThreadPoolExecutor has joined all its
     # workers, so every resolve_principal() call any phase made has already
-    # happened. It isn't produced by a Phase, so it has no stream of its own
-    # among the per-host tables; emit it here, in its own tiny pipeline.run,
-    # now that the whole run's resolutions are guaranteed to be in. Skipped
-    # (with a debug log) only when this function is exercised without a real
-    # context, e.g. collect_summary_test's row-count test — never in a real
-    # collect run, where collect_sccm only calls this with a live context.
-    if ctx is not None:
-        try:
-            pipeline.run(
-                [_source.ldap_resolved_principals(ctx)],
-                write_disposition="append",
-                loader_file_format="jsonl",
-            )
-        except Exception as exc:
-            # Both stages above already succeeded and are on disk — losing this
-            # last, separate pipeline.run shouldn't take collect_sccm down with it.
-            logger.warning("Failed to persist ldap_resolved_principals: %s", exc)
-    else:
-        logger.debug("Skipping ldap_resolved_principals emission: no context supplied")
+    # happened.
+    _emit_resolved_principals(pipeline, ctx)
     return per_host_counts
+
+
+def _emit_resolved_principals(pipeline, ctx) -> None:
+    """Flush the in-memory resolved-principal buffer (ctx.resolved_principals) to
+    the ldap_resolved_principals raw table in one final pipeline.run.
+
+    Populated by resolve_principal() across BOTH discovery and the per-host stage,
+    it isn't produced by a Phase, so it has no per-host stream of its own — it is
+    emitted once, after all resolutions for the run are guaranteed in. Called at the
+    tail of _run_per_host_stage for a normal collect, and directly after discovery
+    for a --dc-only run (which skips the per-host stage). A failure here is logged,
+    not fatal: the discovery/per-host tables are already on disk.
+
+    Skipped (with a debug log) only when this is exercised without a real context,
+    e.g. collect_summary_test's row-count test — never in a real collect run, where
+    collect_sccm only calls this with a live context.
+    """
+    from . import source as _source
+
+    if ctx is None:
+        logger.debug("Skipping ldap_resolved_principals emission: no context supplied")
+        return
+    try:
+        pipeline.run(
+            [_source.ldap_resolved_principals(ctx)],
+            write_disposition="append",
+            loader_file_format="jsonl",
+        )
+    except Exception as exc:
+        # Both stages above already succeeded and are on disk — losing this
+        # last, separate pipeline.run shouldn't take collect_sccm down with it.
+        logger.warning("Failed to persist ldap_resolved_principals: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1124,13 @@ def collect_sccm(
     computers: Optional[str] = typer.Option(None, "-c", "--computers", rich_help_panel="Collection", help="Comma-separated computer targets."),
     computer_file: Optional[pathlib.Path] = typer.Option(None, "--cf", "--computer-file", rich_help_panel="Collection", help="File with computer targets (one per line)."),
     site_codes: Optional[str] = typer.Option(None, "--sc", "--site-codes", rich_help_panel="Collection", help="Site codes for DNS collection (CSV or file path)."),
+    dc_only: bool = typer.Option(
+        False, "--dc-only", rich_help_panel="Collection",
+        help="Recon mode: collect only LDAP + DNS from the domain controller and "
+             "skip all per-host probing (RemoteRegistry/MSSQL/AdminService/WMI/HTTP/SMB). "
+             "Maps the SCCM attack surface from AD without touching any site system or "
+             "client. Mutually exclusive with -m/--collection-methods.",
+    ),
     # --proxy and --dns steer how collection reaches its targets, so they live
     # with the other Collection controls rather than in a separate network group.
     socks_proxy: Optional[str] = typer.Option(
@@ -1138,6 +1190,10 @@ def collect_sccm(
     skip_collection: bool = typer.Option(False, "--skip-collection", rich_help_panel="BloodHound Upload", help="Skip collection; with -B, push the schema only (or upload --upload-dir results)."),
     upload_dir: Optional[pathlib.Path] = typer.Option(None, "--upload-dir", rich_help_panel="BloodHound Upload", help="Upload existing OpenGraph files from this directory instead of collecting/converting."),
 ) -> Optional[LoadInfo]:
+    # --dc-only forces LDAP+DNS and skips per-host probing. Resolve it first so a
+    # conflict with -m fails fast, and so the forced method set is picked up by the
+    # locals()->flag_kwargs->env bridge below (it maps to SOURCES__SCCM__COLLECTION_METHODS).
+    collection_methods = _resolve_dc_only_methods(dc_only, collection_methods)
     _apply_log_level(verbose, debug, silent)
 
     # Resolve BloodHound creds up front so both the skip-collection and the
@@ -1257,6 +1313,12 @@ def collect_sccm(
             # its target accumulator, allow-list, caches, and work queue.
             per_host_ctx = get_last_ctx()
 
+            if dc_only:
+                logger.info(
+                    "DC-only mode: collecting LDAP + DNS from the domain controller; "
+                    "per-host collection skipped."
+                )
+
             # Stage 1 — discovery (once-phases): run only the discovery resources.
             # They seed the work queue via register_target (allow-list applied).
             load_info = collector.run(src.with_resources(*DISCOVERY_RESOURCE_NAMES))
@@ -1274,9 +1336,19 @@ def collect_sccm(
             # in order while emit resources stream the tables to disk, looping
             # recursively until the work queue drains.
             per_host_counts: dict[str, int] = {}
-            per_host_expected = bool(per_host_ctx is not None and PER_HOST_PHASES)
+            per_host_expected = _should_run_per_host(per_host_ctx, PER_HOST_PHASES, dc_only)
             if per_host_expected:
                 per_host_counts = _run_per_host_stage(collector.pipeline, work_queue, per_host_ctx, threads)
+            elif per_host_ctx is not None:
+                # --dc-only: the per-host stage (which normally flushes resolved
+                # principals) is skipped, but discovery already resolved principals
+                # whose AD attributes enrich Computer/User/Group nodes. Flush them so a
+                # recon graph carries the same AD props a full run would (decision 4).
+                logger.info(
+                    "DC-only mode: persisting %d discovery-resolved principals for AD node properties.",
+                    len(per_host_ctx.resolved_principals),
+                )
+                _emit_resolved_principals(collector.pipeline, per_host_ctx)
 
         set_shared_queue(None)
         set_shared_ad_cache(None)

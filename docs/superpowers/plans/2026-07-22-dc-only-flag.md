@@ -37,7 +37,9 @@
 ### Task 1: Add `--dc-only` flag and wire the two behaviors
 
 **Files:**
-- Modify: `sccm/sccm/src/openhound_sccm/main.py` (add helpers near `_apply_env_overrides` ~L227; add option to `collect_sccm` signature ~L964; add resolve call at top of body ~L995; add info log ~L1128; change `per_host_expected` ~L1145)
+- Modify: `sccm/sccm/src/openhound_sccm/main.py` (add helpers near `_apply_env_overrides`; add option to `collect_sccm` signature after `site_codes` ~L1081; add resolve call as first body statement, just before `_apply_log_level(verbose, debug, silent)` ~L1141; add info log before the Stage 1 discovery run; change `per_host_expected` ~L1277)
+
+> **Current-code note (verified 2026-07-24, code drifted since planning):** `collect_sccm` is now at ~L1055 (all earlier line refs shifted ~+210). `_apply_log_level` now takes **three** args `(verbose, debug, silent)` — there is a new `--silent` flag. CLI options now carry a `rich_help_panel="..."` argument grouping them in `--help` (`Authentication`/`Collection`/`Performance`/`Output`/`BloodHound Upload`); `--dc-only` MUST use `rich_help_panel="Collection"`. There is also new BloodHound-upload machinery (`-B`, `--skip-collection`, `--upload-dir`, `resolve_credentials`, `upload_mode`) — it does not conflict with `--dc-only` (skip-collection skips collection entirely; dc-only only scopes collection when it runs). **Find every edit site by content, not by the line numbers above.**
 - Test: `sccm/sccm/tests/dc_only_flag_test.py`
 
 **Interfaces:**
@@ -139,11 +141,11 @@ def _should_run_per_host(ctx, phases, dc_only: bool) -> bool:
 
 - [ ] **Step 4: Add the `--dc-only` option to the `collect_sccm` signature**
 
-In `collect_sccm`, in the `# ---- Collection ----` group, immediately after the `site_codes` option (~L964), add:
+In `collect_sccm`, in the `# ---- Collection ----` group, immediately after the `site_codes` option (~L1081), add (note `rich_help_panel="Collection"` to match the sibling options):
 
 ```python
     dc_only: bool = typer.Option(
-        False, "--dc-only",
+        False, "--dc-only", rich_help_panel="Collection",
         help="Recon mode: collect only LDAP + DNS from the domain controller and "
              "skip all per-host probing (RemoteRegistry/MSSQL/AdminService/WMI/HTTP/SMB). "
              "Maps the SCCM attack surface from AD without touching any site system or "
@@ -153,21 +155,21 @@ In `collect_sccm`, in the `# ---- Collection ----` group, immediately after the 
 
 - [ ] **Step 5: Resolve `--dc-only` at the very top of the body (fail-fast + force methods)**
 
-Make the resolve the **first statement** of `collect_sccm`, before `_apply_log_level(...)` (~L995), so a conflict fails before any log file is opened and the forced value flows through the later `flag_kwargs = locals()`:
+Make the resolve the **first statement** of `collect_sccm`, before `_apply_log_level(verbose, debug, silent)` (~L1141), so a conflict fails before any log file is opened and the forced value flows through the later `flag_kwargs = locals()`:
 
 ```python
     # --dc-only forces LDAP+DNS and skips per-host probing. Resolve it first so a
     # conflict with -m fails fast, and so the forced method set is picked up by the
     # locals()->flag_kwargs->env bridge below (it maps to SOURCES__SCCM__COLLECTION_METHODS).
     collection_methods = _resolve_dc_only_methods(dc_only, collection_methods)
-    _apply_log_level(verbose, debug)
+    _apply_log_level(verbose, debug, silent)
 ```
 
 (No `_FLAG_TO_ENV` entry is needed for `dc_only` — it is pure CLI orchestration, consumed only here.)
 
 - [ ] **Step 6: Announce the mode and skip Stage 2**
 
-(a) Just before the `# Stage 1 — discovery` comment (~L1128), add:
+(a) Just before the `# Stage 1 — discovery` comment (inside the `with socks_proxy_installed(...)` block, after `_require_domain_or_explain`), add:
 
 ```python
             if dc_only:
@@ -177,7 +179,7 @@ Make the resolve the **first statement** of `collect_sccm`, before `_apply_log_l
                 )
 ```
 
-(b) Replace the `per_host_expected` assignment (~L1145) with the helper:
+(b) Replace the `per_host_expected` assignment (~L1277) with the helper:
 
 ```python
             per_host_expected = _should_run_per_host(per_host_ctx, PER_HOST_PHASES, dc_only)

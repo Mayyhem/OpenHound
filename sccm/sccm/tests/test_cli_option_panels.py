@@ -46,6 +46,7 @@ EXPECTED_PANEL = {
     "computers": "Collection",
     "computer_file": "Collection",
     "site_codes": "Collection",
+    "dc_only": "Collection",
     "socks_proxy": "Collection",
     "dns_resolver": "Collection",
     "enable_bad_opsec": "Collection",

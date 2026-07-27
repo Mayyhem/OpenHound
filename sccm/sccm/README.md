@@ -154,6 +154,17 @@ uv run openhound convert sccm .\out\sccm .\out\graph --lookup-file .\out\lookup.
 If preprocess or convert fails, your raw collected data in `.\out` is left intact
 and the exact resume commands are logged, so you never have to recollect.
 
+**DC-only recon (map SCCM from AD without touching any host):**
+
+```powershell
+uv run openhound collect sccm .\out -d mayyhem.com --dc-only --run-all
+```
+
+Collects only LDAP + DNS from the domain controller, then preprocesses and converts
+the discovery data into an OpenGraph (sites, management points, discovered computers,
+and LDAP-sourced edges such as GenericAll on the System Management container) — with
+no connection to any SCCM site system or client.
+
 ### 5. Upload to BloodHound
 
 The collector can push the graph straight into BloodHound CE itself — no manual File Ingest step. Create an API token in BloodHound CE (**Administration → API Keys**), then pass it with `-B`:
@@ -217,7 +228,7 @@ If you'd rather upload by hand instead, the OpenGraph files convert writes can a
 
 ## Stage 1 — Discovery (once-phases)
 
-These resources run a single time per collection and seed the per-host work queue. They are not gated by `--collection-methods` in the current build.
+These resources run a single time per collection and seed the per-host work queue. Each is gated by `--collection-methods` (`LDAP`, `DNS`, `Local`), so `--dc-only` (which forces `LDAP,DNS`) runs LDAP and DNS discovery while skipping local collection and every per-host phase.
 
 | Discovery resource | What it does | Status |
 |---|---|---|
@@ -371,6 +382,7 @@ uv run openhound collect sccm ./out -d mayyhem.com --dc dc.mayyhem.com \
 | Option | Description |
 |---|---|
 | `-m`, `--collection-methods` | Comma-separated methods (see the table below). Default `All`. |
+| `--dc-only` | Recon mode: collect only LDAP + DNS from the domain controller and skip all per-host probing. Mutually exclusive with `-m`/`--collection-methods`. |
 | `-c`, `--computers` | Comma-separated computer targets. |
 | `--cf`, `--computer-file` | Path to a file of computer targets, one per line. |
 | `--sc`, `--site-codes` | Site codes for DNS collection (CSV or file path). |
