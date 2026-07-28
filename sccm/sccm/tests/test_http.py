@@ -320,6 +320,10 @@ def test_sitesigncert_detects_site_server(monkeypatch):
     assert len(ss) == 1
     assert "SMS Site Server" in ss[0]["sccm_site_system_roles"]
     assert ss[0]["source"] == "HTTP-sitesigncert"
+    # mp_host is the breadcrumb naming which MP the cert was read from, so
+    # transforms._node_computer can recover the site code the probe ran too
+    # early (ps1:8611 ordering) to know itself.
+    assert ss[0]["mp_host"] == "mp.mayyhem.com"
     assert ("siteserver.mayyhem.com", "HTTP-sitesigncert", None) in ctx.registered
 
 

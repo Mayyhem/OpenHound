@@ -18,6 +18,11 @@ SCCM_HAS_STORED_ACCOUNT = "SCCM_HasStoredAccount"
 MEMBER_OF = "MemberOf"
 HAS_SESSION = "HasSession"
 
+# Standard BloodHound base kind (Task 11, Tier A+): each Full-Control principal on
+# the System Management container gets one of these edges to it. NOT part of
+# schema_SCCM.json -- composes with SharpHound's own GenericAll edges.
+GENERIC_ALL = "GenericAll"
+
 # Stage 3 edge kinds (containment + RBAC fan-out)
 SCCM_CONTAINS = "SCCM_Contains"
 SCCM_FULL_ADMINISTRATOR = "SCCM_FullAdministrator"
@@ -63,6 +68,10 @@ SCCM_COERCE_AND_RELAY_TO_SMB = "SCCM_CoerceAndRelayToSMB"
 # (Stage 3-6) kinds so later stages reuse this one source of truth.
 TRAVERSABLE_EDGE_KINDS = frozenset({
     "AdminTo", "SCCM_LocalAdminRequired",
+    # Base BloodHound kinds (Task 11/12, Tier A+): control of the System
+    # Management container and its group memberships are real, pathfinding-usable
+    # relationships, same as SharpHound's own GenericAll/MemberOf edges.
+    "GenericAll", "MemberOf",
     # CMBP's allow-list (ps1:2221) named "CoerceAndRelayNTLMtoSMB", but the function
     # (ps1:6775) emits an SMB relay edge — the mismatch left the SMB relay
     # non-traversable. The port emits SCCM_CoerceAndRelayToSMB and marks it traversable.

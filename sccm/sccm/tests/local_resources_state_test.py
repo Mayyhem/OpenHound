@@ -96,7 +96,10 @@ def test_sms_authority_populates_ctx_and_yields(monkeypatch):
 
     rows = list(_raw(local.local_wmi_sms_authority)(ctx))
 
-    assert rows == [ad]
+    # The yielded row now also carries the site code parsed from SMS_Authority.Name
+    # (orphaned-role-sources task) -- on a Local-only run this is the sole
+    # site-code source, so it must reach the row, not just ctx.
+    assert rows == [{**ad, "site_code": "PS1"}]
     assert ctx.current_site_code == "PS1"
     assert ctx.site_codes == {"PS1"}  # lazily created from None
     assert ctx.current_mp_ad_object == ad
@@ -131,7 +134,9 @@ def test_sms_lookupmp_yields_resolved_and_uses_current_site_code(monkeypatch):
 
     rows = list(_raw(local.local_wmi_sms_lookupmp)(ctx))
 
-    assert rows == [ad]
+    # Stamped with ctx.current_site_code for the same reason as SMS_Authority
+    # above (orphaned-role-sources task).
+    assert rows == [{**ad, "site_code": "PS1"}]
     assert ctx.register_calls == [("mp2.mayyhem.com", "Local-SMS_LookupMP", "PS1")]
 
 

@@ -1,6 +1,6 @@
 import duckdb
 
-from openhound_sccm.transforms import _graph_edges_init, _edge_coerce_relay_adminservice
+from openhound_sccm.transforms import COERCE_RELAY_SOURCE, _graph_edges_init, _edge_coerce_relay_adminservice
 
 
 def _seed(con, provider_ntlm):
@@ -23,10 +23,15 @@ def _seed(con, provider_ntlm):
     _graph_edges_init(con, "sccm")
 
 
-def test_adminservice_relay_default_emits_with_null_ntlm():
+def test_adminservice_relay_emits_with_null_ntlm():
+    # An unset RestrictReceivingNTLMTraffic is the Windows default (0 = allow all inbound
+    # NTLM) = genuinely vulnerable, so this edge is emitted regardless of
+    # --disable-possible-edges. The builder deliberately takes no flag: its NTLM gate is
+    # flag-independent and the confirmed gate is the provider's SMS Provider role. Matches
+    # CMBP, which also emits this confirmed edge under its own flag.
     con = duckdb.connect()
-    _seed(con, None)  # provider NTLM unknown -> assume vulnerable (default)
-    _edge_coerce_relay_adminservice(con, "sccm", disable_possible=False)
+    _seed(con, None)  # provider NTLM unknown -> assume vulnerable
+    _edge_coerce_relay_adminservice(con, "sccm")
     rows = con.execute(
         "SELECT start_id, end_id, kind, collection_source, "
         "coercion_victim_and_relay_target_pairs FROM sccm.graph_edges"
@@ -36,18 +41,10 @@ def test_adminservice_relay_default_emits_with_null_ntlm():
     assert start == "MAYYHEM.COM-S-1-5-11"
     assert end == "PS1"          # non-secondary site code (raw case)
     assert kind == "SCCM_CoerceAndRelayToAdminService"
-    assert csrc == ["Post-processing"]
+    # Task 5/D3: unconditionally assumed -- the existing 'Post-processing' tag is
+    # preserved (Task 3's append semantics), not replaced.
+    assert csrc == ["Post-processing", COERCE_RELAY_SOURCE]
     assert pairs == ["Coerce SS01.mayyhem.com, relay to PROV01.mayyhem.com"]
-
-
-def test_adminservice_relay_flag_keeps_null_ntlm():
-    # New semantics: provider NTLM unset = Windows default (allow all inbound NTLM) = vulnerable,
-    # so the edge survives --disable-possible-edges. NTLM is flag-independent; the confirmed gate is
-    # the provider's SMS Provider role. Matches CMBP, which emits this confirmed edge under its flag.
-    con = duckdb.connect()
-    _seed(con, None)
-    _edge_coerce_relay_adminservice(con, "sccm", disable_possible=True)
-    assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1
 
 
 def test_adminservice_relay_drops_explicit_ntlm_restricted():
@@ -55,12 +52,12 @@ def test_adminservice_relay_drops_explicit_ntlm_restricted():
     # without the flag.
     con = duckdb.connect()
     _seed(con, "DenyAll")
-    _edge_coerce_relay_adminservice(con, "sccm", disable_possible=False)
+    _edge_coerce_relay_adminservice(con, "sccm")
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 0
 
 
-def test_adminservice_relay_flag_keeps_confirmed_off():
+def test_adminservice_relay_emits_with_confirmed_ntlm_off():
     con = duckdb.connect()
     _seed(con, "Off")  # explicitly confirmed not-restricting NTLM
-    _edge_coerce_relay_adminservice(con, "sccm", disable_possible=True)
+    _edge_coerce_relay_adminservice(con, "sccm")
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1

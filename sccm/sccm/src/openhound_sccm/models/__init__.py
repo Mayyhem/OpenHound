@@ -5,6 +5,7 @@ OpenGraph nodes/edges. Models are imported here so the convert pipeline can reso
 them by name and so callers can do `from openhound_sccm.models import ComputerNode`.
 """
 from .computer import ComputerNode
+from .container import ContainerNode
 from .group import GroupNode
 from .graph_edge import GraphEdge
 from .mssql_database import MSSQLDatabase
@@ -21,4 +22,4 @@ from .sccm_site import SCCMSite
 from .stub_node import StubNode
 from .user import UserNode
 
-__all__ = ["ComputerNode", "GraphEdge", "GroupNode", "MSSQLDatabase", "MSSQLDatabaseRole", "MSSQLDatabaseUser", "MSSQLLogin", "MSSQLServer", "MSSQLServerRole", "SCCMAdminUser", "SCCMClientDevice", "SCCMCollection", "SCCMSecurityRole", "SCCMSite", "StubNode", "UserNode"]
+__all__ = ["ComputerNode", "ContainerNode", "GraphEdge", "GroupNode", "MSSQLDatabase", "MSSQLDatabaseRole", "MSSQLDatabaseUser", "MSSQLLogin", "MSSQLServer", "MSSQLServerRole", "SCCMAdminUser", "SCCMClientDevice", "SCCMCollection", "SCCMSecurityRole", "SCCMSite", "StubNode", "UserNode"]

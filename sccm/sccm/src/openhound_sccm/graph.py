@@ -72,6 +72,13 @@ class SCCMEdgeProperties(EdgeProperties):
         SCCMInfra: True when this edge flags its start-node principal as SCCM
             infrastructure (CMBP ps1:7807, SCCM_IsMappedTo only) — or None for every
             other edge kind, which convert prunes so their panels stay uncluttered.
+        assumed: True when this edge is templated/inferred rather than built from
+            observed data (D3) — the MSSQL site-DB scaffolding edges that rest on the
+            SPN+SCCM inference (Task 4), and the SCCM permission/coerce/local-admin
+            edges that assume RBAC/relay feasibility from role topology (Task 5) —
+            or None for every confirmed edge, which convert prunes.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     general: str | None = field(default=None, kw_only=True)
@@ -80,6 +87,8 @@ class SCCMEdgeProperties(EdgeProperties):
     opsec: str | None = field(default=None, kw_only=True)
     references: list[str] | None = field(default=None, kw_only=True)
     SCCMInfra: bool | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -290,6 +299,13 @@ class GroupProperties(NodeProperties):
             carry SPNs, but the field is present for schema symmetry).
         CN: The AD `cn` (Common Name) attribute for this group, or null if never
             resolved against AD.
+        SamAccountName: The group's pre-Windows-2000 name (its AD "SAM account name"),
+            or null if never resolved against AD. PascalCase to match CMBP's Group
+            output verbatim -- unlike Computer/User, CMBP does not camelCase this key
+            for Group.
+        distinguishedName: The group's Active Directory distinguished name (its full
+            path in the AD tree, e.g. ``CN=Domain Admins,CN=Users,DC=corp,DC=local``),
+            or null if never resolved against AD.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SCCMInfra: bool = field(default=False, kw_only=True)
@@ -301,6 +317,8 @@ class GroupProperties(NodeProperties):
     objectClass: list[str] | None = field(default=None, kw_only=True)
     servicePrincipalName: list[str] | None = field(default=None, kw_only=True)
     CN: str | None = field(default=None, kw_only=True)
+    SamAccountName: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -617,6 +635,22 @@ class SCCMClientDeviceProperties(NodeProperties):
             attributes show most recently signed in to this device. Mirrors `ADLastLogonUser`
             -- CMBP emits the same collected value under both output keys.
         userDomainName: The AD domain of the user in `userName`. Mirrors `ADLastLogonUserDomain`.
+        CN: The AD `cn` (Common Name) attribute of the underlying AD computer (joined
+            via `ADDomainSID`), or null if that computer was never resolved against AD.
+        DNSHostName: The fully-qualified DNS name of the underlying AD computer, as
+            recorded in Active Directory, or null if never resolved.
+        distinguishedName: The Active Directory distinguished name of the underlying
+            computer (its full path in the AD tree), or null if never resolved.
+        domain: The AD domain of the underlying computer, or null if never resolved.
+            Lowercase `domain` (not `Domain`) to match CMBP's SCCM_ClientDevice output
+            verbatim -- unlike Computer/User/Group, CMBP does not capitalize this key
+            here.
+        objectClass: The AD `objectClass` attribute values of the underlying computer,
+            or null if never resolved.
+        samAccountName: The pre-Windows-2000 logon name of the underlying computer
+            (e.g. ``COMPUTER1$``), or null if never resolved.
+        servicePrincipalName: The Kerberos Service Principal Names published on the
+            underlying computer's AD account, or null if never resolved.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     SMSID: str | None = field(default=None, kw_only=True)
@@ -658,6 +692,14 @@ class SCCMClientDeviceProperties(NodeProperties):
     previousSMSIDChangeDate: str | None = field(default=None, kw_only=True)
     userName: str | None = field(default=None, kw_only=True)
     userDomainName: str | None = field(default=None, kw_only=True)
+    # AD attributes of the underlying computer, joined in via ADDomainSID (ope-fb99).
+    CN: str | None = field(default=None, kw_only=True)
+    DNSHostName: str | None = field(default=None, kw_only=True)
+    distinguishedName: str | None = field(default=None, kw_only=True)
+    domain: str | None = field(default=None, kw_only=True)
+    objectClass: list[str] | None = field(default=None, kw_only=True)
+    samAccountName: str | None = field(default=None, kw_only=True)
+    servicePrincipalName: list[str] | None = field(default=None, kw_only=True)
 
 
 # ----------------------------------------------------------------------------
@@ -697,6 +739,11 @@ class MSSQLServerProperties(NodeProperties):
         instanceNames: A port-added field (no CMBP output key) listing every named SQL
             Server instance found on this host (a single computer can run more than
             one SQL Server instance side by side).
+        assumed: True when this server was only ever resolved as an SCCM site
+            database through the SPN+SCCM inference (D2b/D3), never confirmed by
+            RemoteRegistry/AdminService/WMI; omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     dnsHostName: str | None = field(default=None, kw_only=True)
@@ -711,6 +758,8 @@ class MSSQLServerProperties(NodeProperties):
     # port-added (no CMBP key)
     strictEncryption: bool | None = field(default=None, kw_only=True)
     instanceNames: list[str] = field(default_factory=list, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -730,12 +779,18 @@ class MSSQLDatabaseProperties(NodeProperties):
             database itself or one reached via an SCCM-managed sysadmin path).
         SCCMSite: The site code of the SCCM site this database belongs to, if any.
         SQLServer: The node ID of the `MSSQL_Server` this database is hosted on.
+        assumed: True when this database rests on the SPN+SCCM inference rather than
+            a confirmed site database (D2b/D3); omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     isTrustworthy: bool = field(default=True, kw_only=True)
     SCCMInfra: bool = field(default=True, kw_only=True)
     SCCMSite: str | None = field(default=None, kw_only=True)
     SQLServer: str | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -751,12 +806,18 @@ class MSSQLServerRoleProperties(NodeProperties):
         members: The node IDs of every `MSSQL_Login` that is a member of this role.
         SCCMSite: The site code of the SCCM site this role's server belongs to, if any.
         SQLServer: The node ID of the `MSSQL_Server` this role is defined on.
+        assumed: True when this role's server rests on the SPN+SCCM inference (D2b/D3);
+            omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     isFixedRole: bool = field(default=True, kw_only=True)
     members: list[str] = field(default_factory=list, kw_only=True)
     SCCMSite: str | None = field(default=None, kw_only=True)
     SQLServer: str | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -775,6 +836,10 @@ class MSSQLDatabaseRoleProperties(NodeProperties):
         SCCMSite: The site code of the SCCM site this role's database belongs to,
             if any.
         SQLServer: The node ID of the `MSSQL_Server` hosting this role's database.
+        assumed: True when this role's database rests on the SPN+SCCM inference
+            (D2b/D3); omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     database: str | None = field(default=None, kw_only=True)
@@ -782,6 +847,8 @@ class MSSQLDatabaseRoleProperties(NodeProperties):
     members: list[str] = field(default_factory=list, kw_only=True)
     SCCMSite: str | None = field(default=None, kw_only=True)
     SQLServer: str | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -801,6 +868,10 @@ class MSSQLLoginProperties(NodeProperties):
             the SCCM infrastructure.
         SCCMSite: The site code of the SCCM site this login's server belongs to, if any.
         SQLServer: The node ID of the `MSSQL_Server` this login can authenticate to.
+        assumed: True when this login's server rests on the SPN+SCCM inference
+            (D2b/D3); omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     loginType: str | None = field(default=None, kw_only=True)
@@ -808,6 +879,8 @@ class MSSQLLoginProperties(NodeProperties):
     SCCMInfra: bool = field(default=True, kw_only=True)
     SCCMSite: str | None = field(default=None, kw_only=True)
     SQLServer: str | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)
 
 
 @dataclass
@@ -829,6 +902,10 @@ class MSSQLDatabaseUserProperties(NodeProperties):
             belongs to, if any.
         SQLServer: The node ID of the `MSSQL_Server` hosting this database user's
             database.
+        assumed: True when this database user's database rests on the SPN+SCCM
+            inference (D2b/D3); omitted (null, pruned) otherwise.
+        assumptionBasis: Human-readable explanation of the inference, present only
+            when `assumed` is true.
     """
     collectionSource: list[str] = field(default_factory=list, kw_only=True)
     database: str | None = field(default=None, kw_only=True)
@@ -837,3 +914,5 @@ class MSSQLDatabaseUserProperties(NodeProperties):
     SCCMInfra: bool = field(default=True, kw_only=True)
     SCCMSite: str | None = field(default=None, kw_only=True)
     SQLServer: str | None = field(default=None, kw_only=True)
+    assumed: bool | None = field(default=None, kw_only=True)
+    assumptionBasis: str | None = field(default=None, kw_only=True)

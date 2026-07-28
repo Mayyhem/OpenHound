@@ -1,0 +1,48 @@
+﻿uv.exe : --- Logging error ---
+At line:13 char:3
++   & uv @a *> (Join-Path $base "openhound-clean\console_$($t.tag).txt" ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (--- Logging error ---:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Traceback (most recent call last):
+  File "C:\Users\domainadmin\AppData\Local\Programs\Python\Python314\Lib\logging\handlers.py", line 80, in emit
+    self.doRollover()
+    ~~~~~~~~~~~~~~~^^
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Lib\site-packages\openhound\core\logging.py", line 118, 
+in doRollover
+    super().doRollover()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\domainadmin\AppData\Local\Programs\Python\Python314\Lib\logging\handlers.py", line 456, in doRollover
+    self.rotate(self.baseFilename, dfn)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\domainadmin\AppData\Local\Programs\Python\Python314\Lib\logging\handlers.py", line 121, in rotate
+    os.rename(source, dest)
+    ~~~~~~~~~^^^^^^^^^^^^^^
+PermissionError: [WinError 32] The process cannot access the file because it is being used by another process: 
+'C:\\Users\\domainadmin\\AppData\\Local\\openhound\\logs\\openhound.log' -> 
+'C:\\Users\\domainadmin\\AppData\\Local\\openhound\\logs\\openhound.log.2026-07-23'
+Call stack:
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Scripts\openhound.exe\__main__.py", line 4, in <module>
+    from openhound.main import app
+  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1342, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 938, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 759, in exec_module
+  File "<frozen importlib._bootstrap>", line 491, in _call_with_frames_removed
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Lib\site-packages\openhound\main.py", line 29, in 
+<module>
+    app = TyperOverride(sources_path=BASE_SOUCE_PATH, pretty_exceptions_enable=True)
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Lib\site-packages\openhound\cli\override.py", line 22, 
+in __init__
+    self.addon_manager = CollectorManager.from_entrypoint(group="openhound.sources")
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Lib\site-packages\openhound\core\manager.py", line 144, 
+in from_entrypoint
+    is_valid_metadata, metadata = cls.validate_metadata(extension)
+  File "C:\Users\domainadmin\Desktop\OpenHound\sccm\sccm\.venv\Lib\site-packages\openhound\core\manager.py", line 119, 
+in validate_metadata
+    logger.info(
+Message: "Extension 'sccm' has valid metadata"
+Arguments: ()

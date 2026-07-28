@@ -21,8 +21,8 @@
 |---|---:|---:|---:|
 | Closed | 51 | **76** | 74 |
 | In&nbsp;Progress | 6 | **5** | 8 |
-| Open | 34 | **26** | 25 |
-| **Total** | **91** | **107** | **107** |
+| Open | 34 | **27** | 26 |
+| **Total** | **91** | **108** | **108** |
 
 > **2026-07-22 additions (not part of the 2026-07-21 audit):** [ope-76f1](.tickets/ope-76f1.md)
 > (`-v`=VERBOSE + `--silent`) and [ope-54be](.tickets/ope-54be.md) (ordered-log per-host grouping fix +
@@ -217,16 +217,18 @@ in `gtk`.
 - [Ope-liu7](.tickets/Ope-liu7.md) — System Management Container abuse (GenericAll only, no takeover edges) *(reconciled → in_progress)*
 - [ope-1f0f](.tickets/ope-1f0f.md) — Code-quality pass (1 of 5 areas done; umbrella for f3di + scp1) *(reconciled → in_progress)*
 - [ope-e512](.tickets/ope-e512.md) — Per-domain collector rerun (resolution done, rerun not) *(reconciled → in_progress)*
-- [ope-8c44](.tickets/ope-8c44.md) ⚠️ — Direct BloodHound CE upload via shared `openhound-collector-common` uploader — **recorded `open`** (shared uploader + SCCM `collect`/`convert` wiring implemented and offline-tested 2026-07-24; live-lab validation vs `bloodhound.mayyhem.com` pending; not re-started via `gtk start`)
+- [ope-8c44](.tickets/ope-8c44.md) ⚠️ — Direct BloodHound CE upload via shared `openhound-collector-common` uploader — **recorded `open`** (shared uploader + SCCM `collect`/`convert` wiring implemented and offline-tested 2026-07-24; **live-verified 2026-07-28** vs BloodHound CE at 127.0.0.1:8080 — HMAC auth, schema `PUT /api/v2/extensions` ×2, results `file-upload` job, and kind registration all succeed; the one gap found is CLI feedback/exit-code, split out to [ope-feb0](.tickets/ope-feb0.md); not re-started via `gtk start`)
 - [Ope-f3di](.tickets/Ope-f3di.md) ⚠️ — Logging audit — **recorded `closed`** (superseded by ope-1f0f, left as-is)
 - [Ope-scp1](.tickets/Ope-scp1.md) ⚠️ — Variable-scope audit — **recorded `closed`** (superseded by ope-1f0f, left as-is)
 
 ---
 
-## Open (25 code-verified)
+## Open (27 code-verified)
 
 Tickets with no meaningful implementation found — genuinely not started. All recorded `open`.
 
+- [ope-0947](.tickets/ope-0947.md) — Wire collected-but-unread site-code and role sources into preprocess: `site_hierarchy` from all 14 site-code tables (D5), `node_computer` from `http_site_servers` / FSP / `dns_management_points` (spec §4.1), and the discarded `MSSQLSvc` SPN + dangling `HostFor`/`ExecuteOnHost` edges (spec §4.2); links ope-6b93 *(created 2026-07-27)*
+- [ope-feb0](.tickets/ope-feb0.md) — **BUG:** BloodHound upload-only CLI path (`collect sccm --skip-collection` / `--upload-dir`) is silent — no console output at any verbosity and a failed upload still exits 0. Upload logic is live-verified working; fix is CLI feedback + non-zero exit in `_dispatch_bloodhound_upload`. Links [ope-8c44](.tickets/ope-8c44.md). Plan: `sccm/sccm/docs/superpowers/plans/2026-07-28-bloodhound-upload-cli-feedback.md` *(created 2026-07-28)*
 - [ope-c141](.tickets/ope-c141.md) — Populate all AD node properties (Computer/User/Group) to CMBP parity instead of relying on SharpHound (links ope-fb99, ope-961c) *(created 2026-07-23)*
 - [ope-fb99](.tickets/ope-fb99.md) — Emit missing SCCM node/edge properties (ClientDevice extras, Site.siteSystemRoles, IsMappedTo.SCCMInfra) to CMBP parity *(created 2026-07-23)*
 - [ope-961c](.tickets/ope-961c.md) — Flesh out `disableLoopbackCheck` + add an NTLM-reflection relay edge (deferred from the cypher-query ideation session) *(created 2026-07-23)*

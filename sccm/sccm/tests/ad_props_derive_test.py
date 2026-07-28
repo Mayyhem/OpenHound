@@ -32,8 +32,10 @@ def test_enabled_and_type_derivation():
 
 
 def test_carries_object_class_spn_cn_domain():
-    """The passthrough columns (object_class, service_principal_name, cn, domain)
-    must survive unchanged so later tasks can surface them on the AD nodes."""
+    """The passthrough columns (object_class, service_principal_name, cn, domain,
+    sam_account_name, distinguished_name) must survive unchanged so later tasks can
+    surface them on the AD nodes -- sam_account_name/distinguished_name (ope-c141)
+    exist for node types with no other AD-object source of their own, e.g. Group."""
     con = duckdb.connect()
     con.execute("CREATE SCHEMA sccm")
     con.execute("CREATE TABLE sccm.ldap_resolved_principals (sid VARCHAR, object_class VARCHAR[], "
@@ -44,10 +46,10 @@ def test_carries_object_class_spn_cn_domain():
                 "('S-1-2', ['top','computer'], 4098, ['HOST/x'], 'PC1', 'pc1.c', 'PC1$', NULL, 'CN=PC1', 'corp.local')")
     _derive_ad_props(con, "sccm")
     row = con.execute(
-        "SELECT object_class, service_principal_name, cn, domain FROM sccm.ad_props "
-        "WHERE sid = 'S-1-2'"
+        "SELECT object_class, service_principal_name, cn, domain, sam_account_name, "
+        "distinguished_name FROM sccm.ad_props WHERE sid = 'S-1-2'"
     ).fetchone()
-    assert row == (['top', 'computer'], ['HOST/x'], 'PC1', 'corp.local')
+    assert row == (['top', 'computer'], ['HOST/x'], 'PC1', 'corp.local', 'PC1$', 'CN=PC1')
 
 
 def test_null_uac_and_empty_object_class_yield_null():
@@ -82,7 +84,8 @@ def test_missing_source_table_leaves_ad_props_empty_not_raising():
         "WHERE table_schema = 'sccm' AND table_name = 'ad_props'"
     ).fetchall()}
     assert cols == {"sid", "enabled", "type", "is_domain_principal", "object_class",
-                     "service_principal_name", "cn", "domain"}
+                     "service_principal_name", "cn", "domain",
+                     "sam_account_name", "distinguished_name"}
 
 
 def test_sid_is_uppercased():

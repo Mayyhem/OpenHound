@@ -119,7 +119,11 @@ def local_wmi_sms_authority(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 if target and target.ad_object:
                     logger.info(f"Found current management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                     ctx.current_mp_ad_object = target.ad_object
-                    yield target.ad_object
+                    # Stamp the site code parsed from SMS_Authority.Name above -- on
+                    # a Local-only run this is the sole site-code source, and without
+                    # it site_hierarchy/_node_computer can never attribute this MP to
+                    # a site (same defect class as dns_management_points).
+                    yield {**target.ad_object, "site_code": ctx.current_site_code}
 
     except Exception as ex:
         logger.error("Error querying SMS_Authority: %s", ex)
@@ -155,7 +159,9 @@ def local_wmi_sms_lookupmp(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                 # logged filtered/empty skips.
                 if target and target.ad_object:
                     logger.info(f"Found management point: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
-                    yield target.ad_object
+                    # Same site-code stamp as local_wmi_sms_authority above --
+                    # ctx.current_site_code is already cached from SMS_Authority.
+                    yield {**target.ad_object, "site_code": ctx.current_site_code}
 
     except Exception as ex:
         logger.error("Error querying SMS_LookupMP: %s", ex)

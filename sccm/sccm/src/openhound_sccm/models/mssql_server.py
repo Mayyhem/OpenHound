@@ -28,6 +28,8 @@ class MSSQLServer(BaseAsset):
     service_account_name: str | None = None
     service_account_domain_sid: str | None = None
     collection_source: list[str] = Field(default_factory=list)
+    assumed: bool | None = None
+    assumption_basis: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -51,6 +53,9 @@ class MSSQLServer(BaseAsset):
                 SQLServiceAccountDomainSID=self.service_account_domain_sid,
                 strictEncryption=self.strict_encryption,
                 instanceNames=list(self.instance_names),
+                # or None: prune the false a confirmed (or non-site-DB) row carries;
+                # NULL (arms 2/3 only) already falls through unchanged.
+                assumed=self.assumed or None, assumptionBasis=self.assumption_basis,
             ),
         )
 

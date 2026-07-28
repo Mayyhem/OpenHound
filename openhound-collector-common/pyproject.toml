@@ -1,17 +1,31 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "openhound-collector-common"
-version = "0.0.1"
+# Version comes from the git tag via hatch-vcs (see [tool.hatch.version] below), so
+# `git tag v0.1.0 && git push origin v0.1.0` is the whole release. Nothing to bump by hand.
+dynamic = ["version"]
 description = "Shared pure-Python infrastructure for OpenHound on-prem/Windows-auth collectors (TDS/NTLM/Kerberos/EPA, LDAP/AD, WMI, DNS discovery, SOCKS5, DLT bridges, logging, graph stubs)"
 readme = "README.md"
 requires-python = ">=3.13,<3.15"
 authors = [
   {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
 ]
-license = "MIT"
+# Apache-2.0, not MIT: this library was factored out of the SCCM collector, which is a
+# port of the Apache-2.0 ConfigManBearPig.ps1. Apache-2.0 derivative work keeps its terms.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["bloodhound", "opengraph", "openhound", "ntlm", "kerberos", "epa", "ldap", "impacket"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Information Technology",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+]
+
 dependencies = [
     # TDS, NTLMv2 (+ EPA channel-binding / SPN AV pairs), Kerberos, SPNEGO, pass-the-hash,
     # pass-the-ticket — all pure Python, in-process. The basis of clients/mssql.py + clients/auth.py.
@@ -35,5 +49,21 @@ dependencies = [
     "winkerberos>=0.10.0; sys_platform == 'win32'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Mayyhem/openhound-collector-common"
+Repository = "https://github.com/Mayyhem/openhound-collector-common"
+Issues = "https://github.com/Mayyhem/openhound-collector-common/issues"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/openhound_collector_common"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# PyPI rejects any version carrying a local segment (+g1a2b3c), which is exactly what
+# setuptools-scm produces by default on a non-tag commit — strip it.
+local_scheme = "no-local-version"
+# Keeps `uv build` working in a tagless or shallow checkout instead of hard-failing.
+# CI checks the built version against the tag, so a stray 0.0.0 can never be published.
+fallback_version = "0.0.0"

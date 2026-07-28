@@ -11,7 +11,8 @@ Where the PowerShell tool is a single self-contained script, this version runs o
 > This port is **mid-migration**. The collection side is broad, and Stages 1–6 of the graph pipeline are now shipping. As of today:
 >
 > - **`collect`** runs LDAP / Local / DNS **discovery** plus six real **per-host** phases — **RemoteRegistry**, **MSSQL** EPA detection, **AdminService**, **WMI** (the AdminService fallback), **HTTP** (unauthenticated site-system role probing), and **SMB** (signing check + SCCM share-role enumeration). AdminService, WMI, HTTP, and SMB are **collect-only** (raw `adminservice_*` / `wmi_*` / `http_*` / `smb_*` tables; graph conversion is a later phase). **DHCP** is accepted on the command line but not yet ported.
-> - **`convert`** emits fourteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-seven edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasCurrentUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasADLastLogonUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SCCM_SameHostAs`](#sccm_samehostas), [`SCCM_LocalAdminRequired`](#sccm_localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`SCCM_CoerceAndRelayToAdminService`](#sccm_coerceandrelaytoadminservice), [`MSSQL_CoerceAndRelayToMSSQL`](#mssql_coerceandrelaytomssql), [`SCCM_CoerceAndRelayToSMB`](#sccm_coerceandrelaytosmb)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
+> - **`convert`** emits fifteen node kinds — [`Computer`](#computer), [`User`](#user), [`Group`](#group), [`Container`](#container), [`SCCM_Site`](#sccm_site), [`SCCM_ClientDevice`](#sccm_clientdevice), [`SCCM_Collection`](#sccm_collection), [`SCCM_AdminUser`](#sccm_adminuser), [`SCCM_SecurityRole`](#sccm_securityrole), [`MSSQL_Server`](#mssql_server), [`MSSQL_Database`](#mssql_database), [`MSSQL_ServerRole`](#mssql_serverrole), [`MSSQL_DatabaseRole`](#mssql_databaserole), [`MSSQL_Login`](#mssql_login), and [`MSSQL_DatabaseUser`](#mssql_databaseuser) — and thirty-eight edge kinds: the eleven from Stages 1–2 ([`SCCM_AdminsReplicatedTo`](#sccm_adminsreplicatedto), [`SCCM_HasClient`](#sccm_hasclient), [`SCCM_HasMember`](#sccm_hasmember), [`SCCM_IsMappedTo`](#sccm_ismappedto), [`SCCM_IsAssigned`](#sccm_isassigned), [`SCCM_HasPrimaryUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasCurrentUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasADLastLogonUser`](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser), [`SCCM_HasStoredAccount`](#sccm_hasstoredaccount), [`MemberOf`](#memberof), [`HasSession`](#hassession)) plus ten new from Stage 3 ([`SCCM_Contains`](#sccm_contains), [`SCCM_FullAdministrator`](#sccm_fulladministrator), [`SCCM_ApplicationAuthor`](#sccm_applicationauthor), [`SCCM_ApplicationAdministrator`](#sccm_applicationadministrator), [`SCCM_ComplianceSettingsManager`](#sccm_compliancesettingsmanager), [`SCCM_OSDManager`](#sccm_osdmanager), [`SCCM_OperationsAdministrator`](#sccm_operationsadministrator), [`SCCM_SecurityAdministrator`](#sccm_securityadministrator), [`SCCM_AllPermissions`](#sccm_allpermissions), [`SCCM_AssignAllPermissions`](#sccm_assignallpermissions)) plus two new from Stage 4 ([`SCCM_SameHostAs`](#sccm_samehostas), [`SCCM_LocalAdminRequired`](#sccm_localadminrequired)) plus eleven new from Stage 5 ([`MSSQL_Contains`](#mssql_contains), [`MSSQL_ControlServer`](#mssql_controlserver), [`MSSQL_ControlDB`](#mssql_controldb), [`MSSQL_HostFor`](#mssql_hostfor), [`MSSQL_ExecuteOnHost`](#mssql_executeonhost), [`MSSQL_HasLogin`](#mssql_haslogin), [`MSSQL_IsMappedTo`](#mssql_ismappedto), [`MSSQL_MemberOf`](#mssql_memberof), [`MSSQL_ServiceAccountFor`](#mssql_serviceaccountfor), [`MSSQL_GetTGS`](#mssql_gettgs), [`MSSQL_GetAdminTGS`](#mssql_getadmintgs)) plus three new from Stage 6 ([`SCCM_CoerceAndRelayToAdminService`](#sccm_coerceandrelaytoadminservice), [`MSSQL_CoerceAndRelayToMSSQL`](#mssql_coerceandrelaytomssql), [`SCCM_CoerceAndRelayToSMB`](#sccm_coerceandrelaytosmb)) plus one new base-kind edge from the low-privilege work below ([`GenericAll`](#genericall)); `SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.
+> - **Low-privilege graph (no AdminService needed).** A non-privileged domain user — or even an anonymous/credential-free HTTP+DNS probe — now builds a real attack graph, not just a handful of nodes: `site_hierarchy` is fed from every site-code source the collector has (LDAP, RemoteRegistry, HTTP, SMB, DNS, local WMI), not just AdminService/WMI, and the site-signing-certificate probe, the Fallback Status Point, and DNS-discovered management points are wired into the graph for the first time. See [Collection privilege tiers](#collection-privilege-tiers) and [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content) under [Assumptions](#assumptions).
 >
 > This README documents **what the code actually does today**, not the finished design. For the full intended model, see the PowerShell tool's reference doc, [README-CMBP.md](README-CMBP.md).
 
@@ -25,6 +26,8 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
 - [Collection Overview](#collection-overview)
 - [System Requirements](#system-requirements)
 - [Assumptions](#assumptions)
+  - [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content)
+  - [Collection privilege tiers](#collection-privilege-tiers)
 - [Limitations](#limitations)
 - [Command Line Options](#command-line-options)
 - [Graph Model](#graph-model)
@@ -32,6 +35,7 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [Computer](#computer)
   - [User](#user)
   - [Group](#group)
+  - [Container](#container)
   - [SCCM_Site](#sccm_site)
   - [SCCM_ClientDevice](#sccm_clientdevice)
   - [SCCM_Collection](#sccm_collection)
@@ -52,6 +56,7 @@ Questions? Reach out on the [BloodHound Slack](http://ghst.ly/BHSlack) (@Mayyhem
   - [SCCM_IsAssigned](#sccm_isassigned)
   - [SCCM_HasPrimaryUser / SCCM_HasCurrentUser / SCCM_HasADLastLogonUser](#sccm_hasprimaryuser--sccm_hascurrentuser--sccm_hasadlastlogonuser)
   - [MemberOf](#memberof)
+  - [GenericAll](#genericall)
   - [HasSession](#hassession)
   - [SCCM_HasStoredAccount](#sccm_hasstoredaccount)
   - [SCCM_Contains](#sccm_contains)
@@ -117,6 +122,18 @@ Limit which per-host phases run, and which hosts they target:
 # Only check the PS1 site database server for Extended Protection for Authentication
 uv run openhound collect sccm .\out -d mayyhem.com -m RemoteRegistry,MSSQL -c ps1-db.mayyhem.com -v
 ```
+
+> **Re-running into the same output directory silently merges two collections.** `collect` (via the
+> underlying `dlt` framework) **appends** a new load package beside any already in `.\out` rather than
+> overwriting; `preprocess` then reads every package and **UNIONs** their rows into one graph. Nothing
+> looks wrong when this happens — the command exits 0 and `graph\` gets fresh timestamps — but a table
+> this run finds empty silently **keeps the old run's rows**, so a decommissioned site system, stale
+> role, or removed client can linger in the graph indefinitely. Pass `--clean` on `collect` to remove
+> `.\out\sccm`, `.\out\graph`, and `.\out\lookup.duckdb` before collecting (timestamped logs and
+> integration/compare reports are always kept). See [`--clean`](#--clean-and-re-running-into-a-used-output-directory) under Command Line Options.
+> If you forget the flag against a used directory, the console (and `collect_issues_*.log`) still
+> **warns loudly** — naming how many prior load packages are sitting there and when the oldest one was
+> written — but it does not stop the collection or clean anything up for you.
 
 `collect` writes raw JSONL tables under `.\out\sccm\<table>\` and prints a per-resource row-count summary plus the next commands to run.
 
@@ -268,10 +285,14 @@ Each discovered (or `--computers`-supplied) host runs through the ordered per-ho
 
 | Phase | Minimum privilege |
 |---|---|
-| LDAP / DNS discovery | Any authenticated domain user |
+| LDAP discovery | Any authenticated domain user |
+| DNS discovery | **None** — a plain SRV query, no AD authentication at all |
+| HTTP | **None** — every SCCM web-endpoint probe (including the site-signing-certificate probe) runs anonymous; no domain credentials are ever presented |
 | RemoteRegistry | **Local administrator** on the target |
 | MSSQL (EPA detection) | Any domain user can probe a reachable SQL Server; reading the setting via RemoteRegistry instead needs local admin on the DB host |
 | SMB | The signing-required check is **unauthenticated** (anyone with TCP/445 line of sight); share enumeration needs an **authenticated** SMB session (any domain user — current Windows user via SSPI, or `-u`/`-p`, `--nt-hash`, `--ticket`) |
+
+> See [Collection privilege tiers](#collection-privilege-tiers) under [Assumptions](#assumptions) for what a given combination of these phases actually builds in the graph.
 
 **BloodHound side:**
 
@@ -291,11 +312,76 @@ The collector relies on these assumptions about the target environment and how i
 
 > AD-native nodes (`Computer`, `User`, `Group`) are unaffected by the above: they use their AD **domain SID** as `environmentid`, so they merge with existing SharpHound data by SID rather than by site code.
 
+## Assumed vs. confirmed graph content
+
+Everything the collector emits falls into one of two buckets: **confirmed** (built straight from observed
+data — a probed setting, an ACL, a resource table) or **assumed** (templated/inferred, the way
+ConfigManBearPig's own post-processing fills gaps it can't directly observe). Assumed nodes and edges stay
+**traversable** — BloodHound's attack-path engine still follows them — but they carry a machine-readable
+provenance stamp so an operator can tell the two apart: `assumed = true`, a human-readable
+`assumptionBasis` string, and an `Assumed-<Family>` tag folded into `collectionSource`. A confirmed
+node/edge simply omits all three (they show as absent/null in BloodHound's entity panel, not `false`).
+
+The table below is the full catalog — one row per assumed family — with its inference rule, the data it's
+built from, whether `--disable-possible-edges` removes it, and the caveat that makes it a false-positive
+risk:
+
+| Family | Assumed because… | Built from | Removed by `--disable-possible-edges`? | False-positive caveat |
+|---|---|---|---|---|
+| `SCCM_ClientDevice` (possible, `is_confirmed_active_client = false`) + `SCCM_SameHostAs` + `SCCM_HasClient` to it | A `CmRcService` SPN in AD is treated as evidence of an enrolled client even with no confirmed SCCM enrollment record | LDAP (`ldap_cmrc_devices`) | **Yes** — not emitted at all | The SPN can linger in AD after a client was decommissioned, or belong to a device enrolled in a *different* hierarchy |
+| `site_hierarchy` root, when 2+ untyped sites exist and none was observed as a CAS / `RootSiteCode` / parentless Primary | Picking one of several untyped sites as the hierarchy root is a guess, made alphabetically | LDAP `ldap_sites`, RemoteRegistry, HTTP, SMB, DNS (every source that reports only a bare site code, no type) | **Yes** — the root is left unresolved instead of guessed (SCCM-native node ids lose their `@<root>` scope) | The wrong root anchors every SCCM-native node id minted in the run; a **single** untyped site is deduction, not a guess, and is unaffected by the flag |
+| MSSQL site-database identity via the `SPN+SCCM` basis — feeds `MSSQL_Server.SCCMSite`/`.SCCMInfra`/`.databases`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, `MSSQL_DatabaseUser`, their `Contains`/`MemberOf`/`HasLogin`/`IsMappedTo`/`Control*` edges, and `MSSQL_GetTGS`/`MSSQL_GetAdminTGS` off that login | A host with an `MSSQLSvc` SPN that is *also* SCCM-related (carries an SMS role, or `sccm_infra`) is treated as **the** site database, not merely a co-located SQL Server | AD (`MSSQLSvc` SPN, via `mssql_server_instances.has_mssql_spn`) + `node_computer` site-system role tags | **Yes** — the whole basis is dropped; a **confirmed** site database (RemoteRegistry / AdminService / WMI) keeps its full scaffolding in **both** modes with **no** stamp, since the schema SCCM requires there follows from the confirmed fact, not a guess | Nothing confirms this SQL Server is *this* site's database rather than an unrelated one that merely happens to sit on an SCCM-tagged host |
+| `SCCM_AssignAllPermissions` (`Computer` SMS Provider → `SCCM_Site`) | Hosting the SMS Provider role is templated as implying hierarchy-wide RBAC control, not read from an actual grant | RemoteRegistry / HTTP / LDAP role tag + site hierarchy | No — CMBP itself emits this family under its own `-DisablePossibleEdges` | A role tag attributed to the wrong site would overstate an admin's real reach |
+| `SCCM_LocalAdminRequired` | Co-location as site systems of the same site is templated as mutual local-administrator rights, not read from a local-group membership list | Role tags (RemoteRegistry/HTTP/LDAP) + site hierarchy | No | An admin who removed the default grant during a hardening pass, or a role tag attributed to the wrong site, makes this overstate real access |
+| `SCCM_CoerceAndRelayToAdminService` | An unset (`null`) inbound-NTLM restriction on the SMS Provider is treated as vulnerable — this **is** the Windows default (0 = allow all inbound NTLM), so it is a measured fact about the default rather than a guess | RemoteRegistry NTLM setting on the Provider + role/site topology | No — the "unset = vulnerable" reasoning holds in both modes | Suppressed on a site confirmed to run SCCM 2509+ (rejects NTLM); an unknown/unparseable version fails **open** and may false-positive |
+| `SCCM_CoerceAndRelayToSMB` | Same NTLM reasoning as above; SMB signing itself is never assumed — it must still be **confirmed** not required | RemoteRegistry/SMB-negotiate signing check + NTLM setting + role/site topology | No | Same NTLM caveat as above |
+| `MSSQL_CoerceAndRelayToMSSQL` | NTLM uses the same unconditional "unset = vulnerable" rule as the other two relay families. Extended Protection is different: a null/uncollected EPA setting is *also* treated as vulnerable by default (an actual assumption, not a Windows-default fact) | RemoteRegistry/MSSQL EPA probe (EPA) + RemoteRegistry NTLM (coerced host) | **Partially** — only the EPA half: with the flag, EPA must be **explicitly** `Off` | `assumed`/`assumptionBasis` are stamped **per row**, only when EPA was never measured — a measured `Off` is evidence, not an assumption, so those rows are unstamped even by default |
+
+> **Known gap:** the Database→Site configuration of `SCCM_AssignAllPermissions` (a site database asserting
+> control of its own site, see [Edge Reference](#sccm_assignallpermissions)) is built from the same
+> `node_mssql_database` row that carries the `SPN+SCCM`/confirmed basis, but the edge builder does not
+> currently copy that row's `assumed`/`assumptionBasis` onto the edge — so this specific edge shape never
+> carries the stamp today, unlike its sibling SMS-Provider→Site configuration above. The underlying node it
+> hangs off still reflects the correct confirmed/assumed status.
+
+## Collection privilege tiers
+
+Because `site_hierarchy` is now fed from every site-code source the collector has — not just
+AdminService/WMI — a real graph builds up incrementally as more privilege becomes available, rather than
+jumping from "almost nothing" to "everything" the moment AdminService is reachable:
+
+| Privilege level | What it adds | Example flags |
+|---|---|---|
+| **Anonymous** — no domain credentials at all (HTTP + DNS, both unauthenticated) | A site code; Management Point / Distribution Point / SMS Provider / Site Server role tags from the unauthenticated HTTP probes (including the site-signing-certificate probe, the *only* credential-free way to identify the Site Server); DNS-discovered Management Points; the relay-feasibility edges those roles and the site hierarchy alone support (`SCCM_LocalAdminRequired`, `SCCM_CoerceAndRelayToAdminService`). Adding the SMB phase's signing-required check (also unauthenticated — `-m HTTP,DNS,SMB`) additionally **confirms** which of those site systems don't require SMB signing, which is what `SCCM_CoerceAndRelayToSMB` needs (that check is the only thing this edge never assumes). | `-m HTTP,DNS --sc <site_code> -c <known_mp_or_site_server>` |
+| **+ domain user** — any authenticated account, no local-admin/AdminService rights | The LDAP-derived hierarchy with real type/parent/true root (LDAP management-point capabilities); the Fallback Status Point role; SMB share-based role/site discovery; RemoteRegistry-confirmed roles plus the current-user `HasSession` edge on any host the account happens to be a local admin on; the System Management container's `Container`/`GenericAll`/nested `MemberOf` graph; `MSSQLSvc`-SPN-based `MSSQL_Server`/`Computer` nodes (confirmed the moment the SPN exists, even with 1433 filtered) and the low-priv `MSSQL_ServiceAccountFor`/`HasSession`/`MSSQL_GetTGS`/`MSSQL_GetAdminTGS` edges off the SPN holder | `-m LDAP,RemoteRegistry,SMB,MSSQL,HTTP,DNS` (or `All`) |
+| **+ AdminService/WMI** — SMS Provider or SCCM RBAC read access | Everything above, **plus** the Tier D families below that no lower privilege level can produce at all | `-m All` (the default) |
+
+> **Tier D — requires privileged collection.** `SCCM_FullAdministrator`, `SCCM_ApplicationAuthor`,
+> `SCCM_ApplicationAdministrator`, `SCCM_ComplianceSettingsManager`, `SCCM_OSDManager`,
+> `SCCM_OperationsAdministrator`, `SCCM_SecurityAdministrator`, `SCCM_AllPermissions`, `SCCM_IsAssigned`,
+> `SCCM_IsMappedTo`, `SCCM_HasMember`, and the `SCCM_AdminUser` / `SCCM_SecurityRole` / `SCCM_Collection`
+> nodes themselves have no AD/LDAP representation, and RemoteRegistry does not expose them either — neither
+> this collector nor a non-privileged attacker can derive them without AdminService or WMI access. Their
+> absence from a low-privilege run is **correct behavior, not a bug**: do not expect them until you collect
+> with AdminService/WMI reachable.
+
+Credential-free example against the `mayyhem.com` lab (no `-u`/`-p` at all — just HTTP and DNS against a
+known management point):
+
+```powershell
+uv run openhound collect sccm .\out-anon -d mayyhem.com --dc dc01.mayyhem.com `
+  -m HTTP,DNS --sc PS1 -c ps1-sms.mayyhem.com --run-all --clean
+```
+
+This alone yields a `PS1` site code, an `SMS Site Server@PS1` role on `ps1-sms`, and the
+`SCCM_LocalAdminRequired` / `SCCM_CoerceAndRelayToAdminService` edges built off that role and site — with
+zero domain credentials presented anywhere in the run.
+
 ---
 
 # Limitations
 
-- **Graph output covers Stages 1–6.** `convert` now emits fourteen node kinds and thirty-seven edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (NAA secrets) are planned for later stages.
+- **Graph output covers Stages 1–6 plus the low-privilege additions.** `convert` now emits fifteen node kinds and thirty-eight edge kinds (see the [Node Reference](#node-reference) and [Edge Reference](#edge-reference)). Richer edges (NAA secrets) are planned for later stages.
 - **MSSQL logins, database users, and roles are inferred from SCCM topology, not enumerated from SQL.** The `MSSQL_Login` and `MSSQL_DatabaseUser` nodes (and the `sysadmin` / `db_owner` role nodes) are built from SCCM's knowledge of which computers are Primary Site Servers or SMS Providers for a given site — the same inference CMBP makes. No live SQL connection is opened during `preprocess` or `convert`; the collector's MSSQL phase only probes EPA. This means logins/users/roles are only created for SCCM-linked SQL servers, and only for the machine accounts SCCM architecturally grants `sysadmin` access.
 - **Non-SCCM SQL servers appear as bare `MSSQL_Server` nodes.** SQL servers discovered by the EPA scan or RemoteRegistry that are not referenced by any SCCM site produce an `MSSQL_Server` node (with `MSSQL_HostFor` / `MSSQL_ExecuteOnHost` edges) but no `MSSQL_Database`, `MSSQL_Login`, or role nodes — CMBP likewise skips these and the collector follows suit.
 - **MSSQL nodes land in the SCCM payload; AD-touching MSSQL edges land in the AD payload.** The six MSSQL node kinds are written to `sccm_nodes-*.json` / `sccm_edges-*.json` (tagged `source_kind = "SCCM"`). Edges that touch an AD node — `MSSQL_HostFor`, `MSSQL_ExecuteOnHost`, `MSSQL_HasLogin`, `MSSQL_GetTGS`, `MSSQL_ServiceAccountFor`, and `MSSQL_GetAdminTGS` — are routed into `ad_edges-*.json` by the split step. Upload both file sets together.
@@ -303,10 +389,12 @@ The collector relies on these assumptions about the target environment and how i
   - **DHCP/PXE fields on `Computer`** (`pxe_vendor_class`, `pxe_next_server`, `pxe_boot_file`, `tftp_reachable`, `is_dhcp_server`) — blocked on a DHCP/PXE collector (gtk tickets `Ope-o6bh` / `Ope-gqwo`). The collector can detect *whether* a host is PXE-enabled (SMB `REMINST` share → `SCCMIsPXESupportEnabled`) but not the DHCP/PXE configuration parameters.
   - **NAA flag on `User`** (`is_sccm_network_access_account`) — requires NAA secret decryption (`--enable-bad-opsec`) and a dedicated NAA collector, neither of which is implemented yet.
   - **Group DN / SAM account name** (`distinguishedName`, `samAccountName` on `Group`) — groups are built from name-only lists resolved to SIDs; no LDAP group-object lookup is performed.
-  - **Several `SCCM_ClientDevice` fields** (`distinguishedName`, `dNSHostName`, `domain`) — not present in the AdminService/WMI device columns collected; would require a collection-phase change. (`currentManagementPoint` and `previousSMSID` were in this list previously but are now emitted — see the [`SCCM_ClientDevice`](#sccm_clientdevice) node reference.)
+  - (`currentManagementPoint` and `previousSMSID` were in this list previously but are now emitted — see the [`SCCM_ClientDevice`](#sccm_clientdevice) node reference. `distinguishedName`, `dNSHostName`, and `domain` were also in this list previously; they are now emitted too, joined in from the device's underlying `Computer` node — see below.)
 - **Some per-host phases are not yet ported.** RemoteRegistry, MSSQL, AdminService, WMI, HTTP, and SMB collect real data (AdminService/WMI/HTTP/SMB are collect-only — raw tables, some graph now); DHCP is a placeholder.
-- **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `is_confirmed_active_client = false`. They will **not** appear in the ConfigMgr console Devices tab (they were never enrolled — the SPN can linger in AD after a client is removed, or belong to a machine reporting to another hierarchy). Their `SCCM_HasClient` edge starts from a Primary site (never the CAS). Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess).
-- **`MemberOf` covers direct memberships only.** SCCM's `security_group_name` field carries the direct groups a principal belongs to; group-to-group nesting is not captured. Merge with a SharpHound collection for full nested-group paths (the Group nodes key on AD SID, so the two datasets join cleanly).
+- **Possible-client nodes are inferred, not confirmed.** Devices with a `CmRcService` SPN in AD but no confirmed SCCM enrollment are emitted as `SCCM_ClientDevice` nodes with `is_confirmed_active_client = false`. They will **not** appear in the ConfigMgr console Devices tab (they were never enrolled — the SPN can linger in AD after a client is removed, or belong to a machine reporting to another hierarchy). Their `SCCM_HasClient` edge starts from a Primary site (never the CAS). Pass `--disable-possible-edges` at collection time to suppress them (the flag is persisted in the `collection_settings` table and gated in preprocess). See [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content) for the full catalog of assumed families, not just this one.
+- **`SCCM_ClientDevice`'s AD-attribute properties (`CN`, `DNSHostName`, `distinguishedName`, `domain`, `objectClass`, `samAccountName`, `servicePrincipalName`) mirror the underlying `Computer` node, not a second lookup.** They're joined in from `node_computer` by `ADDomainSID` during preprocess, so they're only populated when that computer independently resolved those attributes (see the AD-resolution caveat under [`Computer`](#computer)) — a client device whose underlying computer was never itself AD-resolved during the run stays `null` in all seven, exactly as it did before this join existed.
+- **`MemberOf` covers direct memberships only**, except for the System Management container's own DACL groups, whose full nested membership chain **is** captured (see [`MemberOf`](#memberof) below). Everywhere else, SCCM's `security_group_name` field carries only direct groups; merge with a SharpHound collection for full nested-group paths elsewhere (the Group nodes key on AD SID, so the two datasets join cleanly).
+- **`SCCM_AdminsReplicatedTo` needs a *typed* CAS, and a CAS has no management point of its own.** Only LDAP management-point capabilities and AdminService/WMI ever report a site's type directly, and a Central Administration Site has no MP to report capabilities *from* — so the collector infers a CAS from being the parent of a site otherwise typed Primary (and, symmetrically, a Secondary from being the child of a Primary). This is a deduction, not a guess, and applies in both flag modes. It still has a blind spot: a `SEC`-style site (a Secondary with no parent ever recorded in this run) stays untyped rather than being misclassified, which means it also stays outside `SCCM_AdminsReplicatedTo`'s Primary↔Secondary edge until a source reports its parent.
 - **Site code is used as the site identity.** A `SCCM_Site` node's id (and `environmentid`) is the **site code** ([models/sccm_site.py](src/openhound_sccm/models/sccm_site.py)). SCCM hierarchies have no globally unique id, so two distinct hierarchies that happen to reuse the same site code will **merge** in the graph, producing false positives. Microsoft recommends against reusing site codes within a forest: https://learn.microsoft.com/en-us/intune/configmgr/core/servers/deploy/install/prepare-to-install-sites#bkmk_sitecodes
 - **EPA "Allowed" vs "Required" is indistinguishable under integrated auth.** When EPA is detected using the current Windows user (SSPI), Windows always emits the channel-binding and target-name AV pairs, so the collector cannot tell `Allowed` from `Required` and reports the literal `Allowed/Required`. Explicit-credential and pass-the-hash paths (via impacket) *can* distinguish them. See [clients/mssql_epa.py](src/openhound_sccm/clients/mssql_epa.py) and the EPA matrix harness described under [Understanding the Codebase](#understanding-the-codebase).
 - **`extension.yaml` is boilerplate.** The `credentials`/`parameters` blocks in [extension.yaml](extension.yaml) are framework placeholders and are not yet wired to the collector's actual options — pass configuration via CLI flags or `SOURCES__SCCM__*` env vars instead.
@@ -413,32 +501,80 @@ Use `-c`/`--computers <host>` to scope a run to specific hosts (e.g. an SMS Prov
 
 | Option | Description |
 |---|---|
+| `--clean` | Discard a previous collection in `OUTPUT_PATH` before collecting: removes the `sccm/` dataset dir, `graph/`, and `lookup.duckdb`. Timestamped per-run logs and integration/compare reports are always kept. See [below](#--clean-and-re-running-into-a-used-output-directory). |
 | `--run-all` | After collecting, automatically run **preprocess** and **convert** in-process, producing the OpenGraph files in a single command. All paths are derived from `OUTPUT_PATH`: `lookup.duckdb`, the `sccm/` dataset dir, and `graph/`. On completion it logs a consolidated list of the run's output files — raw JSONL, the lookup DB, each OpenGraph JSON, and the collect logs (`collect_full_*`, and `collect_issues_*` when a warning/error occurred) — so you don't have to scroll back through the run. Omit it to run the three stages manually (the default; a "next steps" hint is printed). |
 | `--progress` | Progress backend. `off` (default) silences dlt's per-resource progress counters so only the collector's own `[target][phase]` logs print; pass `tqdm`, `log`, or `alive_progress` to re-enable a live tracker. |
-| `--disable-possible-edges` | Suppress inferred "possible" client nodes (devices with a `CmRcService` SPN but no confirmed SCCM enrollment) and tighten the Stage 6 coerce-and-relay edges (see below). The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
+| `--disable-possible-edges` | Remove or tighten the *assumed* node/edge families (see [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content) and [below](#--disable-possible-edges-and-the-coerce-and-relay-edges)); never removes confirmed data. The flag is persisted at collect time in the `collection_settings` table and read by preprocess — it has no effect if set after collection. |
 | `--show-cleartext-passwords` | Display cleartext passwords when discovered *(consumed by not-yet-ported phases)*. |
 | `--tables` / `--columns` / `--data-type` | DLT schema contracts for new tables / unknown columns / type mismatches. |
 
+#### `--clean` and re-running into a used output directory
+
+`collect` writes into `OUTPUT_PATH` through `dlt`, which **appends** a new load package beside whatever
+is already there rather than overwriting it — and `preprocess` reads every package in every table
+directory, so a second run's rows are **UNIONed** with the first run's. Measured on a real re-run: 11 of
+24 raw tables ended up holding rows from two different collection dates at once. The failure mode that
+matters most is silent: a table this run finds **empty** simply keeps the **old** rows, so a
+decommissioned site system, a role that no longer applies, or a client that was removed can linger in
+the graph indefinitely — and nothing about the exit code or `graph/`'s file timestamps gives it away.
+
+Pass `--clean` to remove the reusable artifacts (`sccm/`, `graph/`, `lookup.duckdb`) before collecting.
+It always keeps the timestamped `collect_full_*`/`collect_issues_*` logs and any
+`integration_results-*`/`compare-*` reports, since those are uniquely named per run and are often what
+you want to diff a fresh collection against. Without the flag, `collect` still warns (naming the load
+package count and the oldest package's date) rather than staying silent — but it does not stop or clean
+up anything for you. If `--clean` can't remove something (e.g. `lookup.duckdb` open in another tool), it
+aborts rather than collecting onto stale data.
+
+```powershell
+# Discard whatever was in .\out before this run
+uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --clean --run-all
+```
+
 #### `--disable-possible-edges` and the coerce-and-relay edges
 
-Without this flag (the default), the three Stage 6 coerce-and-relay edges treat an **uncollected** NTLM-restriction or EPA setting as *assumed vulnerable* — matching ConfigManBearPig's behaviour. This produces the most complete picture of speculative attack paths.
+`--disable-possible-edges` is **tightening-only**: every family it affects is an *assumed* one (see the
+full catalog under [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content)); it never
+removes anything the collector actually confirmed. Of the three Stage 6 coerce-and-relay edges, only one
+is actually gated by this flag today:
 
-With `--disable-possible-edges`, each relay edge applies stricter gating: a relay path is only emitted when the relevant security setting is **explicitly confirmed off** in the collected data. Specifically:
+- **`MSSQL_CoerceAndRelayToMSSQL`** — its two conditions are treated differently. The **NTLM**-restriction
+  check on the coerced computer is *not* gated by the flag at all: an unset `restrictReceivingNtlmTraffic`
+  **is** Windows's default (0 = allow all inbound NTLM), so it counts as vulnerable in **both** modes —
+  that is a measured fact about the default, not a guess. The **Extended Protection** check on the SQL
+  Server *is* gated: by default a null/uncollected EPA setting is treated as vulnerable (matching
+  ConfigManBearPig); with `--disable-possible-edges`, EPA must be **explicitly** `Off`.
+- **`SCCM_CoerceAndRelayToAdminService`** and **`SCCM_CoerceAndRelayToSMB`** are **not affected by this flag
+  at all**. Their NTLM-restriction check uses the same "unset = Windows default = vulnerable" reasoning as
+  above in both modes, and `SCCM_CoerceAndRelayToSMB`'s SMB-signing check has always required a
+  **confirmed** `false` (no assumed-vulnerable case for signing itself) regardless of the flag. An earlier
+  draft of this README claimed the flag tightened these two — that was wrong, the code never gated them,
+  and it shouldn't: ConfigManBearPig itself emits these same families under its own `-DisablePossibleEdges`
+  switch.
 
-- A `SCCM_CoerceAndRelayToAdminService` relay is only emitted when the SMS Provider's `restrictReceivingNtlmTraffic` is explicitly `Off` (not merely absent or uncollected).
-- A `MSSQL_CoerceAndRelayToMSSQL` relay is only emitted when the SQL host's NTLM restriction is explicitly `Off` **and** the SQL Server's Extended Protection is explicitly `Off`.
-- A `SCCM_CoerceAndRelayToSMB` relay is only emitted when the target site system's SMB signing is confirmed not required **and** its NTLM restriction is explicitly `Off`.
+All three families are still tagged `assumed = true` with a human-readable `assumptionBasis` (see the
+catalog) regardless of whether the flag suppresses anything — they template a relay/permission conclusion
+from role topology rather than reading it out of an ACL or RBAC table, which is worth flagging to an
+operator even when it isn't removed.
 
-Use the default run for a full speculative-path view; use `--disable-possible-edges` when you want only confirmed-vulnerable paths:
+`--disable-possible-edges` also affects three other families that have nothing to do with relays: the
+inferred "possible" `SCCM_ClientDevice` nodes (+ their `SCCM_SameHostAs`/`SCCM_HasClient` edges); the
+MSSQL site-database scaffolding that rests on the `SPN+SCCM` inference rather than a
+RemoteRegistry/AdminService/WMI-confirmed site database; and — only in the rare case of 2+ untyped sites
+with no observed CAS/root — the `site_hierarchy` root guess, which the flag declines to make rather than
+guessing alphabetically (see the catalog for all three).
+
+Use the default run for a full speculative-path view; use `--disable-possible-edges` when you want only
+confirmed-vulnerable paths:
 
 ```bash
-# Default — collect WITHOUT the flag; speculative relays included (null NTLM/EPA counts as vulnerable)
-uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!"
+# Default — collect WITHOUT the flag; speculative relays and SPN+SCCM-inferred site DBs included
+uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --clean
 openhound preprocess sccm .\out .\out\lookup.duckdb
 openhound convert sccm .\out\sccm .\graph --lookup-file .\out\lookup.duckdb
 
-# High-confidence — collect WITH --disable-possible-edges; only confirmed relay paths (explicit Off required)
-uv run openhound collect sccm .\out-confirmed -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --disable-possible-edges
+# High-confidence — collect WITH --disable-possible-edges; only confirmed relay/site-DB evidence
+uv run openhound collect sccm .\out-confirmed -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --disable-possible-edges --clean
 openhound preprocess sccm .\out-confirmed .\out-confirmed\lookup.duckdb
 openhound convert sccm .\out-confirmed\sccm .\graph-confirmed --lookup-file .\out-confirmed\lookup.duckdb
 ```
@@ -553,9 +689,9 @@ The collector follows OpenHound's standard three-phase pipeline:
 
 **Node identity.** Every node carries a stable string id and an `environmentid` tying it to its collected environment. AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the id and the **AD domain SID** (the `S-1-5-21-X-Y-Z` prefix stripped of the trailing RID) as `environmentid`, so they merge with SharpHound data by SID. `SCCM_Site` uses the **site code** as both id and `environmentid` (scoped to the hierarchy root site code). The common node/property base classes live in [graph.py](src/openhound_sccm/graph.py) (`SCCMNode`, property dataclasses); node and edge kind strings live in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py) and [kinds/edges.py](src/openhound_sccm/kinds/edges.py).
 
-**Kinds emitted** (declared in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)). `convert` emits **14 node kinds**. Every AD-native node additionally carries the secondary `Base` label so BloodHound treats it as a first-class principal:
+**Kinds emitted** (declared in [kinds/nodes.py](src/openhound_sccm/kinds/nodes.py)). `convert` emits **15 node kinds**. Every AD-native node additionally carries the secondary `Base` label so BloodHound treats it as a first-class principal:
 
-- AD-native: `Computer`, `User`, `Group` (each also labeled `Base`)
+- AD-native: `Computer`, `User`, `Group`, `Container` (each also labeled `Base`) — `Container` is a standard BloodHound base kind (System Management container), not in `schema_SCCM.json`
 - SCCM: `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`
 - MSSQL: `MSSQL_Server`, `MSSQL_Login`, `MSSQL_Database`, `MSSQL_DatabaseUser`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`
 
@@ -568,7 +704,7 @@ The Stage 6 synthetic *Authenticated Users* node is an instance of the existing 
 | Files | `metadata.source_kind` | Contents |
 |---|---|---|
 | `sccm_nodes-*.json`, `sccm_edges-*.json` | `"SCCM"` | SCCM-specific nodes (`SCCM_Site`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `SCCM_ClientDevice`) and MSSQL nodes (`MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, `MSSQL_DatabaseUser`) and edges where **both** endpoints are SCCM/MSSQL nodes. |
-| `ad_nodes-*.json`, `ad_edges-*.json` | *(none — no `metadata` block)* | AD-native nodes (`Computer`, `User`, `Group`, and backfill stubs) and every edge where **either** endpoint is an AD node (AD↔AD, AD↔SCCM, and AD↔MSSQL). |
+| `ad_nodes-*.json`, `ad_edges-*.json` | *(none — no `metadata` block)* | AD-native nodes (`Computer`, `User`, `Group`, `Container`, and backfill stubs) and every edge where **either** endpoint is an AD node (AD↔AD, AD↔SCCM, and AD↔MSSQL). |
 
 The AD payload deliberately carries **no `source_kind`** so BloodHound merges those nodes into its **native AD graph** by SID — augmenting existing SharpHound data rather than registering a separate SCCM-owned copy. An AD↔SCCM edge lives in the AD payload but references an `SCCM_*` node defined in the SCCM payload; BloodHound resolves the reference by id across both files at ingest, so **upload both file sets** (the whole output directory) to File Ingest.
 
@@ -604,7 +740,7 @@ flowchart LR
 
 ### Graph model — clustered overview
 
-Representative cross-cluster edges only; the [Edge Reference](#edge-reference) section below carries the exhaustive, per-shape detail for all 37 edge kinds.
+Representative cross-cluster edges only; the [Edge Reference](#edge-reference) section below carries the exhaustive, per-shape detail for all 38 edge kinds.
 
 ```mermaid
 flowchart LR
@@ -612,6 +748,7 @@ flowchart LR
         Computer
         User
         Group
+        Container
     end
     subgraph SCCM["SCCM"]
         SCCM_Site
@@ -629,6 +766,7 @@ flowchart LR
         MSSQL_DatabaseUser
     end
     User -->|MemberOf| Group
+    Group -->|GenericAll| Container
     Computer -->|HasSession| User
     Group -->|SCCM_IsMappedTo| SCCM_AdminUser
     SCCM_AdminUser -->|SCCM_FullAdministrator| SCCM_ClientDevice
@@ -645,7 +783,7 @@ flowchart LR
     classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
     classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
     classDef mssql fill:#ffe6cc,stroke:#d79b00,color:#000;
-    class Computer,User,Group ad;
+    class Computer,User,Group,Container ad;
     class SCCM_Site,SCCM_ClientDevice,SCCM_Collection,SCCM_AdminUser,SCCM_SecurityRole sccm;
     class MSSQL_Server,MSSQL_Database,MSSQL_ServerRole,MSSQL_DatabaseRole,MSSQL_Login,MSSQL_DatabaseUser mssql;
 ```
@@ -659,7 +797,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     %% AD-native
-    Computer; User; Group
+    Computer; User; Group; Container
     %% SCCM
     SCCM_Site; SCCM_ClientDevice; SCCM_Collection; SCCM_AdminUser; SCCM_SecurityRole
     %% MSSQL
@@ -676,6 +814,7 @@ flowchart LR
     SCCM_ClientDevice -->|SCCM_HasADLastLogonUser| User
     SCCM_Site -->|SCCM_HasStoredAccount| User
     User -->|MemberOf| Group
+    Group -->|GenericAll| Container
     Computer -->|HasSession| User
     SCCM_Site -->|SCCM_Contains| SCCM_Collection
     SCCM_AdminUser -->|SCCM_FullAdministrator| SCCM_ClientDevice
@@ -709,7 +848,7 @@ flowchart LR
     classDef ad fill:#dae8fc,stroke:#6c8ebf,color:#000;
     classDef sccm fill:#d5e8d4,stroke:#82b366,color:#000;
     classDef mssql fill:#ffe6cc,stroke:#d79b00,color:#000;
-    class Computer,User,Group ad;
+    class Computer,User,Group,Container ad;
     class SCCM_Site,SCCM_ClientDevice,SCCM_Collection,SCCM_AdminUser,SCCM_SecurityRole sccm;
     class MSSQL_Server,MSSQL_Database,MSSQL_ServerRole,MSSQL_DatabaseRole,MSSQL_Login,MSSQL_DatabaseUser mssql;
 ```
@@ -718,9 +857,9 @@ flowchart LR
 
 # Node Reference
 
-> **Currently emitted: 14 node kinds** — `Computer`, `User`, `Group`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`. Stage 6 adds a synthetic **Authenticated Users** `Group` node for each domain that produces a coerce-and-relay edge (see the [`Group`](#group) section).
+> **Currently emitted: 15 node kinds** — `Computer`, `User`, `Group`, `Container`, `SCCM_Site`, `SCCM_ClientDevice`, `SCCM_Collection`, `SCCM_AdminUser`, `SCCM_SecurityRole`, `MSSQL_Server`, `MSSQL_Database`, `MSSQL_ServerRole`, `MSSQL_DatabaseRole`, `MSSQL_Login`, and `MSSQL_DatabaseUser`. Stage 6 adds a synthetic **Authenticated Users** `Group` node for each domain that produces a coerce-and-relay edge (see the [`Group`](#group) section).
 
-All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. Property keys use ConfigManBearPig's original casing (camelCase/PascalCase), not snake_case — see [graph.py](src/openhound_sccm/graph.py).
+All AD-native nodes (`Computer`, `User`, `Group`) use the **AD SID** as the node id and the **AD domain SID** (`S-1-5-21-X-Y-Z`) as `environmentid`. Builtin or well-known SIDs that have no domain part are qualified with a co-occurring domain SID where available; nodes that cannot be placed in a domain environment are dropped and logged. `Container` is also AD-native but is keyed by `objectGUID` rather than a SID (it has none) — see its own section below. Property keys use ConfigManBearPig's original casing (camelCase/PascalCase), not snake_case — see [graph.py](src/openhound_sccm/graph.py).
 
 ## Computer
 
@@ -818,6 +957,29 @@ An AD group observed in SCCM — either named in a device's or user's `security_
 
 > **Synthetic Authenticated Users nodes (Stage 6).** For each domain that produces a coerce-and-relay edge, `preprocess` synthesises one `Group` node representing the Windows **Authenticated Users** well-known group for that domain. The node id follows SharpHound's well-known-SID form so it merges with any SharpHound-collected node for the same domain: `UPPER(<FQDN>)-S-1-5-11` (e.g. `MAYYHEM.COM-S-1-5-11`). The node is created lazily — only domains that actually have at least one relay edge start node get a node — and it carries `collectionSource = []` (the Group model does not populate a collection source for this synthetic node). Because the SID `S-1-5-11` has no domain part of its own, the `environmentid` is resolved from a co-occurring domain computer's AD domain SID. These nodes are the `start` of all three coerce-and-relay edge kinds (`SCCM_CoerceAndRelayToAdminService`, `MSSQL_CoerceAndRelayToMSSQL`, `SCCM_CoerceAndRelayToSMB`).
 
+## Container
+
+The AD **System Management** container — the object under which SCCM publishes its site/management-point
+objects and whose DACL is the "who can control SCCM via AD" attack surface. Sourced from
+`ldap_system_management_dacl`, which the collector always read for its DACL but (before the low-privilege
+work) fed no node at all — only the [`GenericAll`](#genericall) edges pointing at it existed. Model:
+[models/container.py](src/openhound_sccm/models/container.py).
+
+`Container` is a **standard BloodHound base kind**, not an SCCM-specific one — it is deliberately **not**
+listed in `schema_SCCM.json` so it composes with a SharpHound collection's own `Container` node for the
+same AD object rather than registering a competing SCCM-owned copy.
+
+- **Node id:** the container's own `objectGUID`, uppercased to match SharpHound's own id form for the same object (so the two merge).
+- **`environmentid`:** the AD domain SID, derived from any co-occurring `GenericAll` principal's domain-relative SID (the container itself has no SID of its own to derive a domain from) — the same "co-occurring domain SID" fallback `Group` uses for well-known SIDs above.
+- **Kinds:** `["Container", "Base"]`.
+- **`name` / `displayname`:** the container's AD distinguished name, or its id if the DN wasn't captured.
+
+The container carries no SCCM-specific properties beyond the base `name`/`displayname`/`environmentid` —
+it's a plain BloodHound `Container`, and its `distinguishedName` is used only to build the display name,
+not exposed as a separate property key.
+
+> **Confirmed, both flag modes.** This node is built directly from an ACL read off AD, not a template, so it is emitted identically regardless of `--disable-possible-edges`.
+
 ## SCCM_Site
 
 A Configuration Manager **site**, coalesced from AdminService/WMI site tables, site-definition tables, and LDAP `mSSMSSite` objects. Model: [models/sccm_site.py](src/openhound_sccm/models/sccm_site.py).
@@ -903,8 +1065,15 @@ An SCCM-managed client device, sourced from the AdminService or WMI `SMS_R_Syste
 | `previousSMSIDChangeDate` | string | Timestamp SCCM recorded when `previousSMSID` changed to the current `SMSID` (Local-only; `CCM_Client`'s `ClientIdChangeDate`). |
 | `userName` | string | Name of the user Active Directory's `lastLogon`/`lastLogonTimestamp` attributes show most recently signed in to this device. Mirrors `ADLastLogonUser` — CMBP emits the same collected value under both output keys. |
 | `userDomainName` | string | AD domain of the user in `userName`. Mirrors `ADLastLogonUserDomain`. |
+| `CN` | string | AD `cn` of the *underlying computer* this device runs on (joined by `ADDomainSID`); `null` if that computer was never itself AD-resolved during the run. |
+| `DNSHostName` | string | FQDN of the underlying computer, as recorded in AD; `null` under the same condition as `CN`. |
+| `distinguishedName` | string | AD distinguished name of the underlying computer; `null` under the same condition as `CN`. |
+| `domain` | string | AD domain of the underlying computer. Lowercase `domain` (not `Domain`) — unlike `Computer`/`User`/`Group`, CMBP does not capitalize this key on `SCCM_ClientDevice`. `null` under the same condition as `CN`. |
+| `objectClass` | list\<string\> | AD `objectClass` values of the underlying computer; `null` under the same condition as `CN`. |
+| `samAccountName` | string | Pre-Windows-2000 logon name of the underlying computer (e.g. `COMPUTER1$`); `null` under the same condition as `CN`. |
+| `servicePrincipalName` | list\<string\> | Kerberos SPNs published on the underlying computer's AD account; `null` under the same condition as `CN`. |
 
-> **Properties not yet emitted:** `distinguishedName` (client), `dNSHostName` (client), `domain` — these fields are absent from the AdminService/WMI device columns; see [Limitations](#limitations).
+> **The seven properties above mirror the device's underlying `Computer` node, not a second AD lookup.** They're joined in from `node_computer` by `ADDomainSID` during preprocess (a device whose `ADDomainSID` never resolves to a `Computer` node — e.g. a possible/inferred client with no matching AD computer, see [Limitations](#limitations)) stays `null` in all seven.
 
 ## SCCM_Collection
 
@@ -1004,18 +1173,20 @@ A SQL Server instance discovered by the MSSQL EPA scan, RemoteRegistry, or SCCM 
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Collection sources that contributed to this node (e.g. `MSSQL_EPA`, `RemoteRegistry`, `SCCM_Add-MSSQLServerNodesAndEdges`). |
+| `collectionSource` | list\<string\> | Every source that contributed to this node, unioned across its (up to three) discovery arms: `MSSQL-ScanForEPA` (the EPA scan actually reached the port) or `MSSQL-SPN` (an `MSSQLSvc` SPN exists but the port was filtered, D2a), `RemoteRegistry-MSSQL`, and — only when this server is also characterized as an SCCM site database — either `Assumed-SiteDB` or `SCCM-SiteDBDefaultSchema` (see `assumed` below). |
 | `dnsHostName` | string | DNS hostname of the SQL Server host. |
 | `SQLServicePort` | string | TCP port the SQL Server listens on. |
 | `SCCMInfra` | bool | `true` if this SQL Server hosts an SCCM site database. |
 | `SCCMSite` | string | Site code of the SCCM site whose database this server hosts; `null` for non-SCCM servers. |
 | `databases` | list\<string\> | Database names on this server (e.g. `CM_PS1`). |
 | `forceEncryption` | bool | `true` if SQL Server has `ForceEncryption` enabled (from RemoteRegistry). |
-| `extendedProtection` | string | EPA enforcement value (e.g. `Off`, `Allowed`, `Allowed/Required`, `Required`) from the MSSQL EPA probe or RemoteRegistry. |
+| `extendedProtection` | string | EPA enforcement value (e.g. `Off`, `Allowed`, `Allowed/Required`, `Required`) from the MSSQL EPA probe or RemoteRegistry; `null` if the port was filtered and only an `MSSQLSvc` SPN was found (D2a). |
 | `SQLServiceAccountDomainSID` | string | Full SID of the domain account running the SQL Server service. |
 | `SQLServiceAccountName` | string | Domain account name running the SQL Server service (from SCCM site definitions). |
 | `strictEncryption` | bool | `true` if TDS 8.0 strict encryption is enforced (from the EPA scan). Port-added — no CMBP key. |
 | `instanceNames` | list\<string\> | Named SQL instance names from RemoteRegistry. Port-added — no CMBP key. |
+| `assumed` | bool | `true` when this server was only ever characterized as *the* SCCM site database (`SCCMSite`/`SCCMInfra = true`/`databases`) through the `SPN+SCCM` inference (an `MSSQLSvc` SPN plus SCCM-relatedness), never confirmed by RemoteRegistry/AdminService/WMI; omitted (`null`) otherwise — including for a bare non-SCCM server, which is never a site-database claim to begin with. See [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content). |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 ## MSSQL_Database
 
@@ -1028,11 +1199,13 @@ The SCCM site database on an MSSQL_Server (always named `CM_<siteCode>`). One no
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `collectionSource` | list\<string\> | Either `["Assumed-SiteDB"]` or `["SCCM-SiteDBDefaultSchema"]` (see `assumed` below), inherited from the site-DB row this database is templated from — not a live SQL read either way. |
 | `isTrustworthy` | bool | Always `true` — SCCM requires the `TRUSTWORTHY` database property for CLR execution. |
 | `SCCMInfra` | bool | Always `true` for an SCCM site database. |
 | `SCCMSite` | string | Site code of the SCCM site (e.g. `PS1`). |
 | `SQLServer` | string | DNS hostname of the SQL Server hosting this database. |
+| `assumed` | bool | `true` when this database rests on the `SPN+SCCM` inference rather than a confirmed site database; omitted (`null`) otherwise. |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 ## MSSQL_ServerRole
 
@@ -1045,11 +1218,13 @@ The fixed `sysadmin` server role on an SCCM-linked SQL Server. One node per SCCM
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `collectionSource` | list\<string\> | Either `["Assumed-SiteDB"]` or `["SCCM-SiteDBDefaultSchema"]` (see `assumed` below), inherited from the server this role is templated from. |
 | `isFixedRole` | bool | Always `true` — `sysadmin` is a SQL Server fixed server role. |
 | `members` | list\<string\> | Login node IDs that are members of this role (e.g. `MAYYHEM\PS1-SMS$@S-1-5-21-…:1433`). |
 | `SCCMSite` | string | Site code of the SCCM site. |
 | `SQLServer` | string | DNS hostname of the SQL Server. |
+| `assumed` | bool | `true` when this role's server rests on the `SPN+SCCM` inference; omitted (`null`) otherwise. |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 ## MSSQL_DatabaseRole
 
@@ -1062,12 +1237,14 @@ The fixed `db_owner` database role in an MSSQL_Database. One node per SCCM site 
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["SCCM_Add-MSSQLServerNodesAndEdges"]`. |
+| `collectionSource` | list\<string\> | Either `["Assumed-SiteDB"]` or `["SCCM-SiteDBDefaultSchema"]` (see `assumed` below), inherited from the database this role is templated from. |
 | `database` | string | Database name this role belongs to (e.g. `CM_PS1`). |
 | `isFixedRole` | bool | Always `true` — `db_owner` is a SQL Server fixed database role. |
 | `members` | list\<string\> | DatabaseUser node IDs that are members of this role. |
 | `SCCMSite` | string | Site code of the SCCM site. |
 | `SQLServer` | string | DNS hostname of the SQL Server. |
+| `assumed` | bool | `true` when this role's database rests on the `SPN+SCCM` inference; omitted (`null`) otherwise. |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 ## MSSQL_Login
 
@@ -1080,12 +1257,14 @@ A Windows machine-account login on the SCCM site database's SQL Server. **Inferr
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer"]`. |
+| `collectionSource` | list\<string\> | Either `["Assumed-SiteDB"]` or `["SCCM-SiteDBDefaultSchema"]` (see `assumed` below), inherited from the site database this login maps into. |
 | `loginType` | string | Always `"Windows"` — all inferred logins are Windows machine-account logins. |
 | `memberOfRoles` | list\<string\> | Server role node IDs this login belongs to (always `["sysadmin@<server_id>"]`). |
 | `SCCMInfra` | bool | Always `true`. |
 | `SCCMSite` | string | Site code of the SCCM site. |
 | `SQLServer` | string | DNS hostname of the SQL Server. |
+| `assumed` | bool | `true` when this login's server rests on the `SPN+SCCM` inference; omitted (`null`) otherwise. |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 > **Inferred, not enumerated.** These nodes are created from SCCM's architectural grants, not from a live SQL query. They represent the logins SCCM *must* have granted `sysadmin` for the site to function, not a live dump of SQL Server's `sys.server_principals`.
 
@@ -1100,13 +1279,15 @@ A database user mapped into the SCCM site database. **Inferred from SCCM topolog
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer"]`. |
+| `collectionSource` | list\<string\> | Either `["Assumed-SiteDB"]` or `["SCCM-SiteDBDefaultSchema"]` (see `assumed` below), inherited from the login this database user is mapped from. |
 | `database` | string | Database name this user belongs to (e.g. `CM_PS1`). |
 | `login` | string | Login name this database user is mapped from. |
 | `memberOfRoles` | list\<string\> | DatabaseRole node IDs this user belongs to (always `["db_owner@<database_id>"]`). |
 | `SCCMInfra` | bool | Always `true`. |
 | `SCCMSite` | string | Site code of the SCCM site. |
 | `SQLServer` | string | DNS hostname of the SQL Server. |
+| `assumed` | bool | `true` when this database user's login (and its server) rests on the `SPN+SCCM` inference; omitted (`null`) otherwise. |
+| `assumptionBasis` | string | Human-readable explanation of the inference; present only when `assumed` is `true`. |
 
 > **Inferred, not enumerated.** Same topology-inference caveat as `MSSQL_Login` above.
 
@@ -1114,12 +1295,13 @@ A database user mapped into the SCCM site database. **Inferred from SCCM topolog
 
 # Edge Reference
 
-> **Currently emitted: 37 edge kinds** — 11 from Stages 1–2, 10 new from Stage 3, 2 new from Stage 4, 11 new from Stage 5, and 3 new from Stage 6. (`SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.)
+> **Currently emitted: 38 edge kinds** — 11 from Stages 1–2, 10 new from Stage 3, 2 new from Stage 4, 11 new from Stage 5, 3 new from Stage 6, and 1 new base-kind edge (`GenericAll`) from the low-privilege work. (`SCCM_AssignAllPermissions` gains a new Database→Site configuration in Stage 5 but is not a new kind string.)
 
-Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Each edge carries two standard properties:
+Edges are emitted from the `graph_edges` preproc table by the generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. Every edge carries these standard properties:
 
 - **`traversable`** — set from the CMBP traversable allow-list (`TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/openhound_sccm/kinds/edges.py), transcribed from CMBP `ps1:2216-2249`). Only traversable edges are followed by BloodHound's attack-path engine.
 - **`collectionSource`** — a list of strings identifying which collectors contributed the data behind this edge (e.g. `["AdminService-SMS_Admin"]`, `["SCCM_Invoke-PostProcessing"]`). Matches the `collectionSource` provenance tags used by ConfigManBearPig.
+- **`assumed`** / **`assumptionBasis`** — present only on *assumed* (templated/inferred) edges, `null`/omitted on confirmed ones. See [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content) for the full catalog of which families these appear on and why.
 
 ## Entity-panel help properties
 
@@ -1211,21 +1393,42 @@ Link an `SCCM_ClientDevice` to a user based on SCCM's recorded affinity or logon
 
 ## MemberOf
 
-Links an AD principal directly to an AD group, representing a direct group membership recorded in SCCM's `security_group_name` field.
+Links an AD principal directly to an AD group. Emitted from **two independent sources**:
 
-- **Start:** `Computer` or `User`
+1. **SCCM's `security_group_name` field** — a device's or user's recorded **direct** membership in a group SCCM knows about.
+2. **The System Management container's DACL groups** — for each AD group that holds Full Control (`GenericAll`) on the container, the **full nested membership chain** (every member→containing-group hop, at every level of nesting), read directly from AD's `member` attribute by the same recursive walk the collector already performs to register scan targets (`collectors/ldap.py::_expand_group_targets`). Confirmed, both flag modes, no `assumed` stamp.
+
+- **Start:** `Computer` or `User` (source 1); any principal in the nested chain (source 2)
 - **End:** `Group`
 - **Traversable:** yes (BloodHound-native edge kind)
+- **`collectionSource`** (source 2 only): `["LDAP-GenericAllSystemManagement"]`.
 
-> **Assumption/Limitation:** SCCM's `security_group_name` carries only **direct** memberships — a device or user belongs to the named group. Group-to-group nesting is **not** captured. To see full nested-group attack paths, merge this dataset with a SharpHound collection. Because Group nodes are keyed by AD SID and use the AD domain SID as `environmentid`, SharpHound's `MemberOf` edges attach on the same SID keys.
+> **Assumption/Limitation (source 1 only):** SCCM's `security_group_name` carries only **direct** memberships — a device or user belongs to the named group. Group-to-group nesting is **not** captured there. To see full nested-group attack paths for groups SCCM doesn't otherwise reference, merge this dataset with a SharpHound collection. Because Group nodes are keyed by AD SID and use the AD domain SID as `environmentid`, SharpHound's `MemberOf` edges attach on the same SID keys — and BloodHound de-dupes any edge SharpHound also supplies for a DACL group's nested chain (source 2).
+
+## GenericAll
+
+Links each AD principal that holds Full Control over the System Management container to the [`Container`](#container) node for it. Wires up `ldap_system_management_dacl`, which the collector always parsed for its DACL but which fed no edge at all before the low-privilege work — this is "who can control SCCM via AD", the attack surface the container's ACL actually represents.
+
+- **Start:** the Full-Control principal (any AD SID — `Computer`, `User`, or `Group`)
+- **End:** [`Container`](#container) (the System Management container)
+- **Traversable:** yes — standard BloodHound base kind, in `TRAVERSABLE_EDGE_KINDS` alongside `GenericAll`'s usual SharpHound meaning
+- **`collectionSource`:** `["LDAP-GenericAllSystemManagement"]`
+- **Confirmed, both flag modes** — an ACL read directly off AD, not a template; no `assumed` stamp.
+
+> A principal with Full Control over this container can create/modify the SCCM site objects it holds — see the [`MemberOf`](#memberof) entry above for how a *group* holding this permission expands into its full nested membership.
 
 ## HasSession
 
-Links a computer to the user currently logged on, based on the current-user SID read from the remote registry.
+Links a computer to a user whose session it hosts. Confirmed evidence from **three** independent sources — never possible-gated, present in both `--disable-possible-edges` modes:
+
+1. **Current-logged-on user** — the current-user SID read from RemoteRegistry.
+2. **Privileged MSSQL service account** — the SQL Server service-logon account on an SCCM-linked site database server, resolved from `SMS_SCI_SysResUse` (AdminService/WMI).
+3. **Low-privilege `MSSQLSvc` SPN holder** — the AD account an `MSSQLSvc` service principal name is registered on (LDAP-readable at low privilege), skipped when that holder *is* the host computer itself (no distinct session to represent). Distinct from source 2 — when both independently resolve the same real account, the edges collapse into one.
 
 - **Start:** `Computer`
 - **End:** `User`
 - **Traversable:** yes (BloodHound-native edge kind)
+- **`collectionSource`:** `RemoteRegistry-CurrentUser` (source 1), `AdminService-SMS_SCI_SysResUse` / `WMI-SMS_SCI_SysResUse` (source 2), or `LDAP-MSSQLSvcSPN` (source 3).
 
 ## SCCM_HasStoredAccount
 
@@ -1325,7 +1528,11 @@ Links an SMS Provider computer to every non-secondary `SCCM_Site` in the hierarc
 - **Start:** `Computer` (SMS Provider host)
 - **End:** `SCCM_Site`
 - **Traversable:** yes
+- **`collectionSource`:** `["SCCM_Invoke-PostProcessing", "Assumed-AssignAllPermissions"]`
+- **`assumed`:** always `true` on this configuration — the SMS Provider role is templated as implying site control, not read from an actual RBAC grant. **Not** gated by `--disable-possible-edges` (see [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content)).
 - **Abuse note:** Compromise of an SMS Provider host (e.g. via relay to the AdminService REST API) gives an attacker administrative control equivalent to a Full Administrator over the whole hierarchy.
+
+> **Second configuration (Database → Site), added in Stage 5:** see the note after [`MSSQL_GetAdminTGS`](#mssql_getadmintgs) below. That configuration currently does **not** carry the `assumed`/`assumptionBasis` stamp even when built off an `SPN+SCCM`-inferred database — a known gap, see [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content).
 
 ## SCCM_SameHostAs
 
@@ -1343,7 +1550,8 @@ Links each site server (`Computer` hosting `SMS Site Server@<site>`) to every ot
 - **Start:** `Computer` (site server)
 - **End:** `Computer` (peer site system in the same non-secondary site)
 - **Traversable:** yes
-- **Source:** `SCCM_Invoke-PostProcessing`
+- **`collectionSource`:** `["SCCM_Invoke-PostProcessing", "Assumed-LocalAdminRequired"]`
+- **`assumed`:** always `true` — co-location as site systems of the same site is templated as mutual local-admin rights, not read from an actual local-group membership list. **Not** gated by `--disable-possible-edges`.
 
 ---
 
@@ -1425,35 +1633,39 @@ Links a login or database user to the role it belongs to. Emitted in two configu
 
 ## MSSQL_GetTGS
 
-Links the SQL service account (an AD principal) to each `MSSQL_Login` on the server it runs on. Any principal that can request a Kerberos service ticket for the SQL service SPN (because it knows the service account's credentials) can authenticate as any login on that SQL instance.
+Links the SQL service account (an AD principal) to each `MSSQL_Login` on the server it runs on. Any principal that can request a Kerberos service ticket for the SQL service SPN (because it knows the service account's credentials) can authenticate as any login on that SQL instance. Built from **two** sources: the privileged `SMS_SCI_SysResUse` service-account field (AdminService/WMI), and — at low privilege — the account that actually holds the `MSSQLSvc` SPN in AD (LDAP-readable, no local admin needed). When both independently resolve the same account on the same server, the resulting duplicate edge collapses into one.
 
 - **Start:** AD SID of the SQL service account (`User` or `Computer`)
 - **End:** `MSSQL_Login`
 - **Traversable:** yes
-- **Emitted only when** the service account SID resolves to an existing AD node.
+- **`assumed`/`assumptionBasis`/`collectionSource`:** copied straight from the `MSSQL_Login` row this edge targets — since every login exists precisely because a sysadmin computer maps into it, "a login exists" already means "a domain principal is sysadmin", so the edge is exactly as confirmed/assumed as that login (see [`MSSQL_Login`](#mssql_login)).
+- **Emitted only when** the service account SID resolves to an existing AD node (privileged arm) — the low-priv SPN-holder arm's identity is already a live AD lookup result, so it always resolves.
 - **Note:** Lands in the **AD payload** because the start node is an AD principal.
 
 ## MSSQL_ServiceAccountFor
 
-Links the SQL service account to the SQL Server it runs on, when the service account is *not* the SQL host itself (i.e. a dedicated service account, not a machine account running on the same host). Represents the trust relationship — the service account identity controls the SQL instance.
+Links the SQL service account to the SQL Server it runs on, when the service account is *not* the SQL host itself (i.e. a dedicated service account, not a machine account running on the same host). Represents the trust relationship — the service account identity controls the SQL instance. Built from the same two sources as `MSSQL_GetTGS` above: the privileged `SMS_SCI_SysResUse` field, and the low-privilege `MSSQLSvc` SPN holder (`collectionSource: ["LDAP-MSSQLSvcSPN"]` for the low-priv arm, with **no** "not the host itself" guard — the SPN holder is a live AD lookup, not a name pending resolution).
 
 - **Start:** AD SID of the SQL service account (`User` or `Computer`)
 - **End:** `MSSQL_Server`
 - **Traversable:** **no** — excluded from the BloodHound attack-path engine per CMBP's allow-list (`ps1:2233`, commented out).
-- **Emitted only when** the service account is not the SQL host's own computer SID, and it resolves to an existing AD node.
+- **Emitted only when** the service account is not the SQL host's own computer SID (privileged arm), and it resolves to an existing AD node.
 - **Note:** Lands in the **AD payload** because the start node is an AD principal.
 
 ## MSSQL_GetAdminTGS
 
-Links the SQL service account to the SQL Server it runs on, when the service account is not the SQL host itself. Represents the ability to forge a Kerberos service ticket for the SQL SPN (using the service account's key) and authenticate to the SQL instance with `sysadmin`-equivalent access.
+Links the SQL service account to the SQL Server it runs on. Represents the ability to forge a Kerberos service ticket for the SQL SPN (using the service account's key) and authenticate to the SQL instance with `sysadmin`-equivalent access. Built from **two** sources, the same idiom as `MSSQL_GetTGS`/`MSSQL_ServiceAccountFor` above:
+
+- The privileged `SMS_SCI_SysResUse` field, **only when** the service account is not the SQL host's own computer SID.
+- The low-privilege `MSSQLSvc` SPN holder — because every `MSSQL_Login` row is, by construction, a site-server/SMS-Provider machine account SCCM's own default schema grants `sysadmin`, "a login exists for this server" already means "a domain principal is sysadmin", so this arm fires for every server with at least one login, with no separate "not the host itself" check. `assumed`/`assumptionBasis`/`collectionSource` on this arm are copied straight from the `MSSQL_Login` row it targets (see [`MSSQL_Login`](#mssql_login)).
 
 - **Start:** AD SID of the SQL service account (`User` or `Computer`)
 - **End:** `MSSQL_Server`
 - **Traversable:** yes
-- **Emitted only when** the service account is not the SQL host's own computer SID, and it resolves to an existing AD node.
+- **Emitted only when** the service account resolves to an existing AD node (privileged arm additionally requires it differ from the SQL host's own SID; the low-priv SPN-holder arm's identity is already a live AD lookup result, so it always resolves).
 - **Note:** Lands in the **AD payload** because the start node is an AD principal.
 
-> **`SCCM_AssignAllPermissions` (Database → Site variant):** An additional set of `SCCM_AssignAllPermissions` edges is emitted from each `MSSQL_Database` to every non-secondary `SCCM_Site` in the hierarchy — beyond the existing Computer (SMS Provider) → Site edges described [above](#sccm_assignallpermissions). A database that hosts an SCCM site (with `TRUSTWORTHY` on and `db_owner` membership) can execute CLR code that writes SCCM administrative data, giving the same effective control as an SMS Provider. These edges are tagged `SCCM_Add-MSSQLServerNodesAndEdges` and are **traversable**. They land in the **SCCM payload** because both endpoints are SCCM-family nodes.
+> **`SCCM_AssignAllPermissions` (Database → Site variant):** An additional set of `SCCM_AssignAllPermissions` edges is emitted from each `MSSQL_Database` to every non-secondary `SCCM_Site` in the hierarchy — beyond the existing Computer (SMS Provider) → Site edges described [above](#sccm_assignallpermissions). A database that hosts an SCCM site (with `TRUSTWORTHY` on and `db_owner` membership) can execute CLR code that writes SCCM administrative data, giving the same effective control as an SMS Provider. These edges are tagged `["SCCM_Add-MSSQLServerNodesAndEdges"]` and are **traversable**. They land in the **SCCM payload** because both endpoints are SCCM-family nodes. Unlike the Computer variant above, this configuration does **not** currently carry the `assumed`/`assumptionBasis` stamp even when the database it's built from rests on the `SPN+SCCM` inference — see the known gap noted under [Assumed vs. confirmed graph content](#assumed-vs-confirmed-graph-content).
 
 ---
 
@@ -1466,14 +1678,17 @@ Links the **Authenticated Users** group of a site server's domain to the `SCCM_S
 - **Start:** `Group` (Authenticated Users for the site server's domain, e.g. `MAYYHEM.COM-S-1-5-11`)
 - **End:** `SCCM_Site`
 - **Traversable:** yes
-- **`collectionSource`:** `["Post-processing"]`
-- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null or uncollected `restrictReceivingNtlmTraffic` on the SMS Provider is treated as vulnerable (matching ConfigManBearPig). With the flag, only a confirmed `Off` value qualifies.
+- **`collectionSource`:** `["Post-processing", "Assumed-CoerceRelay"]`
+- **`assumed`:** always `true` — this templates relay feasibility from role topology rather than reading it from a live probe of the relay itself.
+- **NOT gated by `--disable-possible-edges`.** A null/uncollected `restrictReceivingNtlmTraffic` on the SMS Provider is treated as vulnerable in **both** modes: an unset value **is** the Windows default (0 = allow all inbound NTLM), so this is a measured fact about the default rather than a guess. (An earlier revision of this README claimed the flag tightened this to require an explicit `Off` — that was wrong; the code never gated it, and ConfigManBearPig itself emits this family under its own `-DisablePossibleEdges` switch.)
 - **Version gate:** suppressed for a site **confirmed** to be SCCM 2509+ (build ≥ 9141) — that AdminService version rejects NTLM. An unknown/unparseable site `version` keeps the edge (fail-open). See [Collection Overview](#collection-overview) for how the version is fingerprinted.
 - **Note:** Lands in the **AD payload** (`ad_edges-*.json`) because the start node is an AD `Group`.
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Always `["Post-processing"]`. |
+| `collectionSource` | list\<string\> | Always `["Post-processing", "Assumed-CoerceRelay"]`. |
+| `assumed` | bool | Always `true`. |
+| `assumptionBasis` | string | `"relay feasibility assumed from role topology + NTLM/SMB-signing state"`. |
 | `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per coercion victim / relay target pair in the form `"Coerce <victim_fqdn>, relay to <provider_fqdn>"`. Shows which site server is coerced and which SMS Provider receives the relayed credential. |
 
 ## MSSQL_CoerceAndRelayToMSSQL
@@ -1486,12 +1701,17 @@ Links the **Authenticated Users** group of a sysadmin computer's domain to an `M
 - **End:** `MSSQL_Login`
 - **Traversable:** yes
 - **`collectionSource`:** subset of `["MSSQL-ScanForEPA", "RemoteRegistry-MSSQL"]` — whichever sources determined the SQL Server's Extended Protection setting.
-- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, null NTLM restriction and null EPA are treated as vulnerable. With the flag, both must be explicitly `Off`.
+- **Two gates that behave differently under `--disable-possible-edges`:**
+  - **NTLM** restriction on the coerced sysadmin computer — **not** gated by the flag at all; a null value is treated as vulnerable in both modes (the same "unset = Windows default = vulnerable" reasoning as the other two relay kinds above).
+  - **Extended Protection** on the SQL Server — **is** gated: by default a null/uncollected EPA is treated as vulnerable; with `--disable-possible-edges`, EPA must be **explicitly** `Off`.
+- **`assumed`/`assumptionBasis` are stamped per row, not for the whole family:** `true` only when EPA was **never measured** (the host was unreachable on its SQL port) and default mode is assuming it `Off`; a row where EPA was actually measured `Off` is evidence, not an assumption, and carries no stamp — even in default mode.
 - **Note:** Lands in the **AD payload** because the start node is an AD `Group`.
 
 | Property | Type | Description |
 |---|---|---|
 | `collectionSource` | list\<string\> | Sources that determined the SQL Server's EPA setting (e.g. `["MSSQL-ScanForEPA"]`, `["RemoteRegistry-MSSQL"]`). |
+| `assumed` | bool | `true` only when Extended Protection was never measured and default mode is assuming it `Off`; omitted (`null`) when EPA was actually measured `Off`. |
+| `assumptionBasis` | string | `"Extended Protection never measured (host unreachable on its SQL port); default mode assumes EPA is Off"`, present only when `assumed` is `true`. |
 | `coercionVictimAndRelayTargetPairs` | list\<string\> | One entry per victim / target pair: `"Coerce <victim_fqdn>, relay to <sql_host>:<port>"`. Shows which sysadmin computer is coerced and which SQL Server endpoint receives the relay. |
 
 ## SCCM_CoerceAndRelayToSMB
@@ -1503,14 +1723,17 @@ Links the **Authenticated Users** group of a site server's domain to a site syst
 - **Start:** `Group` (Authenticated Users for the site server's domain)
 - **End:** `Computer` (site system with SMB signing not required)
 - **Traversable:** yes
-- **`collectionSource`:** subset of `["SMB-Negotiate", "RemoteRegistry-SMBSigningCheck"]` — whichever SMB-signing probes observed the target's signing setting.
-- **Possible edge:** yes — gated by `--disable-possible-edges`. Without the flag, a null `restrictReceivingNtlmTraffic` on the target is treated as vulnerable. With the flag, it must be explicitly `Off`. SMB signing must always be explicitly `false` (there is no assumed-vulnerable case for signing itself — it must be confirmed not required).
+- **`collectionSource`:** subset of `["SMB-Negotiate", "RemoteRegistry-SMBSigningCheck"]` plus `"Assumed-CoerceRelay"` — whichever SMB-signing probes observed the target's signing setting, plus the assumed-family tag.
+- **`assumed`:** always `true` — same "templated from role topology" reasoning as `SCCM_CoerceAndRelayToAdminService` above.
+- **NOT gated by `--disable-possible-edges`.** The target's NTLM restriction uses the same "unset = Windows default = vulnerable" rule in **both** modes; SMB signing itself was never assumed either way — it must always be **confirmed** not required. (An earlier revision of this README claimed the flag tightened the NTLM check here too — that was wrong; the code never gated it.)
 - **Note:** Lands in the **AD payload** because both endpoints are AD nodes (`Group` and `Computer`).
 - **Bug fix note:** ConfigManBearPig's traversable allow-list (`ps1:2221`) named this kind `CoerceAndRelayNTLMtoSMB`, but the function that emits it (`ps1:6775`) used `CoerceAndRelayToSMB` — the mismatch left the edge non-traversable in CMBP. This port emits `SCCM_CoerceAndRelayToSMB` and marks it traversable in `TRAVERSABLE_EDGE_KINDS`.
 
 | Property | Type | Description |
 |---|---|---|
-| `collectionSource` | list\<string\> | Sources that observed SMB signing on the target (e.g. `["SMB-Negotiate"]`, `["RemoteRegistry-SMBSigningCheck"]`, or both). |
+| `collectionSource` | list\<string\> | Sources that observed SMB signing on the target (e.g. `["SMB-Negotiate"]`, `["RemoteRegistry-SMBSigningCheck"]`, or both), plus `"Assumed-CoerceRelay"`. |
+| `assumed` | bool | Always `true`. |
+| `assumptionBasis` | string | `"relay feasibility assumed from role topology + NTLM/SMB-signing state"`. |
 | `coercionVictimHostnames` | list\<string\> | The FQDN(s) of the site server(s) that would be coerced. |
 
 ---

@@ -67,6 +67,15 @@ class SCCMClientDevice(BaseAsset):
     current_management_point_sid: str | None = None
     previous_smsid: str | None = None
     previous_smsid_change_date: str | None = None
+    # AD attributes of the underlying computer -- joined in from node_computer via
+    # ad_domain_sid by transforms._enrich_client_device_ad_attrs (ope-fb99).
+    cn: str | None = None
+    dnshostname: str | None = None
+    distinguished_name: str | None = None
+    domain: str | None = None
+    object_class: list[str] | None = None
+    sam_account_name: str | None = None
+    service_principal_name: list[str] | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -130,6 +139,14 @@ class SCCMClientDevice(BaseAsset):
                 # output keys (ps1:7225/7253 and 7226/7254), not a mismapping.
                 userName=self.ad_last_logon_user_name,
                 userDomainName=self.ad_last_logon_user_domain,
+                # AD attributes of the underlying computer (Task ope-fb99).
+                CN=self.cn,
+                DNSHostName=self.dnshostname,
+                distinguishedName=self.distinguished_name,
+                domain=self.domain,
+                objectClass=self.object_class,
+                samAccountName=self.sam_account_name,
+                servicePrincipalName=self.service_principal_name,
             ),
         )
 

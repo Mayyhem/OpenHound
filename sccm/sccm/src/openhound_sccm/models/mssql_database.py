@@ -21,6 +21,8 @@ class MSSQLDatabase(BaseAsset):
     sccm_site: str | None = None
     sql_server: str | None = None
     collection_source: list[str] = Field(default_factory=list)
+    assumed: bool = False
+    assumption_basis: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -37,6 +39,9 @@ class MSSQLDatabase(BaseAsset):
                 collectionSource=list(self.collection_source),
                 isTrustworthy=True, SCCMInfra=True,
                 SCCMSite=self.sccm_site, SQLServer=self.sql_server,
+                # or None: prune the false a confirmed row carries (Task 4's
+                # basis-derived CASE), matching the SCCMInfra convention.
+                assumed=self.assumed or None, assumptionBasis=self.assumption_basis,
             ),
         )
 

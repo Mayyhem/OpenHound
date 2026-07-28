@@ -96,7 +96,15 @@ EDGE_HELP: dict[str, EdgeHelp] = {
         general=(
             "Control of a client device via SCCM may allow deployment of an application "
             "or package, PowerShell execution, authentication coercion, or read access to "
-            "any data on the device."
+            "any data on the device.\n"
+            "This edge is itself evidence that SCCM manages the device: either an "
+            "AdminService/WMI-confirmed client record, or, without that privilege, a "
+            "device inferred solely from the CmRcService service-principal-name "
+            "registered on the computer's AD object (a possible client device). False "
+            "positive: CmRcService can remain registered on a computer that was "
+            "decommissioned as an SCCM client without the SPN being cleaned up, so a "
+            "possible client device is weaker evidence than a directly enumerated one, "
+            "and it is not produced when possible-edge collection is turned off."
         ),
         windowsAbuse=(
             "To execute an application on an SCCM client device from Windows, host an "
@@ -195,7 +203,21 @@ EDGE_HELP: dict[str, EdgeHelp] = {
     ek.SCCM_ASSIGN_ALL_PERMISSIONS: EdgeHelp(
         general=(
             "The source principal can grant all permissions in SCCM, allowing complete "
-            "control of the hierarchy and its managed client devices."
+            "control of the hierarchy and its managed client devices.\n"
+            "This edge is built for two different structural reasons, not one template: "
+            "a domain computer discovered hosting the SMS Provider role (confirmed from "
+            "the RemoteRegistry SMS Provider key, an anonymous HTTP AdminService probe, "
+            "or LDAP management-point capabilities) can grant all permissions in every "
+            "primary site it reaches, and the SCCM site database itself can grant all "
+            "permissions in its own site because the site's RBAC lives in that "
+            "database's tables. The SMS Provider variant is measured directly from the "
+            "observed role tag and site hierarchy, so it appears the same way at every "
+            "collection privilege level. The site-database variant is only as strong as "
+            "how that host was identified: solid when RemoteRegistry, AdminService, or "
+            "WMI directly confirmed it is the site database; an assumption, tagged as "
+            "such, when the host was instead inferred from an MSSQLSvc service "
+            "principal name plus its co-location with other SCCM roles, with nothing "
+            "confirming it is THIS site's database rather than an unrelated SQL Server."
         ),
         windowsAbuse=(
             "The abuse for this edge is dependent on the source principal type.\n"
@@ -229,7 +251,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "Creation of new SCCM admin users is a detectable event and will be visible to "
             "legitimate SCCM admins in the console. It is also possible to access the site "
             "database and swap the SID of an existing user with an attacker-controlled SID. "
-            "However, the legitimate user will lose access."
+            "However, the legitimate user will lose access. The site-database variant of "
+            "this edge may be wrong if the co-located SQL Server it was templated from "
+            "later turns out not to be the site database; verify with a direct connection "
+            "before acting on it."
         ),
         references=[
             "https://github.com/subat0mik/Misconfiguration-Manager/blob/main/attack-techniques/TAKEOVER/_takeover-techniques-list.md",
@@ -822,7 +847,17 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "This indicates that the source and target nodes represent the same physical "
             "host: an Active Directory computer object and its corresponding SCCM client "
             "device. SCCM identifies clients by a client GUID rather than a domain SID, so "
-            "this edge correlates the two identities for the same machine."
+            "this edge correlates the two identities for the same machine.\n"
+            "The pairing is made by an exact FQDN/hostname match, using either an "
+            "AdminService/WMI-enumerated client record (when that privilege is available) "
+            "or, without it, a client device inferred solely from the CmRcService "
+            "service-principal-name registered on the computer's AD object. When the "
+            "client device on this edge is one of those possible (uncorroborated) "
+            "devices, the pairing is itself only a possible one and is not produced when "
+            "possible-edge collection is turned off. False positive: a stale DNS record, "
+            "a decommissioned or renamed computer that kept its old SCCM client GUID, or "
+            "a duplicate hostname elsewhere in the forest can pair this edge with the "
+            "wrong AD computer."
         ),
         windowsAbuse=(
             "There is no specific abuse for this edge. It links a computer's Active Directory "
@@ -847,7 +882,18 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "administrator rights on the target computer (another site system in the same "
             "site). SCCM site servers are configured as local administrators on the site "
             "systems they manage, and multiple site servers in the same site are mutually "
-            "local administrators."
+            "local administrators.\n"
+            "OpenHound infers this edge from two computers tagged as site systems of the "
+            "SAME site, joining the site-system role tags (built from RemoteRegistry SMS "
+            "keys, the anonymous HTTP site-signing-certificate probe, and LDAP "
+            "management-point capabilities) through the site hierarchy those same sources "
+            "build -- it is not read from an actual local-group membership list. The role "
+            "tags and hierarchy are directly observed, not guessed, so this edge is "
+            "produced the same way at every collection privilege level. False positive: "
+            "an administrator who removed the default local-administrators grant during a "
+            "hardening pass, or a role tag attributed to the wrong site, will make this "
+            "edge overstate real access -- confirm actual local-group membership on the "
+            "target before relying on it."
         ),
         windowsAbuse=(
             "If you control the source site server, you already have local administrator "
@@ -883,7 +929,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "NTLM restriction is unset or 'Off'. The source is the Authenticated Users "
             "principal of the site server's domain, and the target is the SCCM site. Note: "
             "starting with Configuration Manager version 2509, the AdminService rejects NTLM "
-            "authentication, which breaks this relay path."
+            "authentication, which breaks this relay path. The relay target's NTLM-restriction "
+            "state is read directly from its registry when RemoteRegistry access is available, "
+            "rather than assumed off by default, so this edge only appears when that setting "
+            "was actually observed unset or 'Off'."
         ),
         windowsAbuse=(
             "Coerce and relay authentication to the SMS Provider's AdminService. AdminService "
@@ -952,7 +1001,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "all permissions in SCCM. This is a possible edge, emitted when the relay "
             "target's Extended Protection is unset or 'Off' and the sysadmin host's inbound "
             "NTLM restriction is unset or 'Off'. The source is the Authenticated Users "
-            "principal of the coerced computer's domain, and the target is the MSSQL login."
+            "principal of the coerced computer's domain, and the target is the MSSQL login. "
+            "Extended Protection is read directly from the target's registry (RemoteRegistry, "
+            "when reachable) or measured by the MSSQL EPA/encryption probe run during "
+            "collection; nothing about it is assumed off by default."
         ),
         windowsAbuse=(
             "Coerce and relay authentication to SQL Server:\n\n"
@@ -1011,7 +1063,10 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "administrators on their site systems). This is a possible edge, emitted when the "
             "target's SMB signing is not required and its inbound NTLM restriction is unset "
             "or 'Off'. The source is the Authenticated Users principal of the site server's "
-            "domain, and the target is the vulnerable site system computer."
+            "domain, and the target is the vulnerable site system computer. Signing is "
+            "measured directly by negotiating an SMB2 session with the target (no "
+            "credentials required); the NTLM-restriction state is read from the target's "
+            "registry when RemoteRegistry access is available."
         ),
         windowsAbuse=(
             "Coerce and relay authentication over SMB:\n\n"
@@ -1072,7 +1127,15 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "The source object contains the target object. This is a structural relationship "
             "showing that the target exists within the scope of the source (for example, a "
             "SQL Server containing a database, login, or server role, or a database "
-            "containing a database user, database role, or application role)."
+            "containing a database user, database role, or application role).\n"
+            "On the SCCM site database specifically, this structure (the database, the "
+            "sysadmin role, and the site-server/provider logins and users it contains) is "
+            "templated from SCCM's own default-schema requirements rather than read out "
+            "of the live instance. It is trustworthy in proportion to how the site "
+            "database was identified: fully so when RemoteRegistry, AdminService, or WMI "
+            "confirmed it, and only an assumption when the server was instead inferred "
+            "from an MSSQLSvc SPN plus its co-location with other SCCM roles, with "
+            "nothing confirming it is actually the site database."
         ),
         windowsAbuse=(
             "This is a structural relationship and cannot be directly abused. Control of the "
@@ -1091,7 +1154,14 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "The `CONTROL SERVER` permission on a server allows the source login or server "
             "role to conduct any action in the instance of SQL Server that is not explicitly "
             "denied. An exception is for members of the sysadmin server role, in which case "
-            "explicit denies are ignored."
+            "explicit denies are ignored.\n"
+            "On an SCCM site database server, this reflects the sysadmin membership SCCM "
+            "requires its site-system and provider machine accounts to hold, templated "
+            "rather than queried from `sys.server_role_members`. Trust it the same way as "
+            "the site-database identification behind it: solid when RemoteRegistry, "
+            "AdminService, or WMI confirmed the server; an assumption, weaker and "
+            "provenance-tagged, when the server was only inferred from an MSSQLSvc SPN "
+            "plus its co-location with other SCCM roles."
         ),
         windowsAbuse=(
             "Connect to the target SQL server (e.g., using sqlcmd, SQL Server Management "
@@ -1127,7 +1197,14 @@ EDGE_HELP: dict[str, EdgeHelp] = {
             "add members to any role, change ownership of objects, and execute any action "
             "within the database. WARNING: This includes the ability to change application "
             "role passwords, which will break applications using those roles and cause an "
-            "outage."
+            "outage.\n"
+            "When the target database is the SCCM site database, this permission is a "
+            "consequence of SCCM's mandatory default schema (db_owner over CM_<SiteCode>) "
+            "rather than a value read from the database's own permission tables. That "
+            "inference is only as strong as the site-database identification behind it: "
+            "solid when RemoteRegistry, AdminService, or WMI confirmed the database "
+            "server, an assumption when the server was only inferred from an MSSQLSvc SPN "
+            "plus its co-location with other SCCM roles."
         ),
         windowsAbuse=(
             "Connect to the target SQL server as the source principal (e.g., using sqlcmd, "
@@ -1234,7 +1311,14 @@ EDGE_HELP: dict[str, EdgeHelp] = {
         general=(
             "The domain account has a SQL Server login that is enabled and can connect to the "
             "SQL Server. This allows authentication to SQL Server using the account's "
-            "credentials."
+            "credentials.\n"
+            "For the SCCM site-server/provider machine accounts, this login is templated "
+            "from SCCM's mandatory setup (every site system gets a login on the site "
+            "database) rather than enumerated from `sys.server_principals`. False "
+            "positive: if the host that appears to be the site database was only "
+            "inferred from an MSSQLSvc SPN and general SCCM-relatedness rather than "
+            "confirmed by RemoteRegistry/AdminService/WMI, the login this edge describes "
+            "may not actually exist."
         ),
         windowsAbuse=(
             "Connect to the target SQL server and authenticate as the target login (e.g., "
@@ -1259,7 +1343,14 @@ EDGE_HELP: dict[str, EdgeHelp] = {
     ek.MSSQL_IS_MAPPED_TO: EdgeHelp(
         general=(
             "The source server login is mapped to the target database user in the associated "
-            "database."
+            "database.\n"
+            "For the SCCM site-server/provider logins, this mapping is templated from "
+            "SCCM's install-time requirement that every site system's machine account "
+            "become a database user in the site database, not read from "
+            "`sys.database_principals`. Its reliability tracks the underlying "
+            "site-database identification: solid when RemoteRegistry, AdminService, or "
+            "WMI confirmed it, an assumption (and provenance-tagged) when an MSSQLSvc SPN "
+            "plus SCCM-relatedness stood in for confirmation."
         ),
         windowsAbuse="Connect as the source login and use the associated database: `USE database_name;`",
         linuxAbuse="Connect as the source login and use the associated database: `USE database_name;`",
@@ -1271,7 +1362,15 @@ EDGE_HELP: dict[str, EdgeHelp] = {
     ek.MSSQL_MEMBER_OF: EdgeHelp(
         general=(
             "The source principal is a member of the target role. This membership grants all "
-            "permissions associated with the target role to the source principal."
+            "permissions associated with the target role to the source principal.\n"
+            "On the SCCM site database, the db_owner and sysadmin memberships this edge "
+            "describes for site-server/provider accounts are templated from SCCM's "
+            "mandatory permission model, not queried from `sys.database_role_members` / "
+            "`sys.server_role_members`. Treat it with the same confidence as the "
+            "site-database identification it rests on: solid when RemoteRegistry, "
+            "AdminService, or WMI confirmed the database server, an assumption that can "
+            "be wrong when the server was only inferred from an MSSQLSvc SPN plus its "
+            "co-location with other SCCM roles."
         ),
         windowsAbuse=(
             "When connected to the server/database as the source principal, you have all "

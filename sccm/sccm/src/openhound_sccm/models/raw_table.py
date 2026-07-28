@@ -38,11 +38,20 @@ def raw_table_asset(name: str, description: str = "") -> type[BaseAsset]:
     error messages stay informative). ``description`` defaults to a
     formulaic string when the caller doesn't supply one.
 
-    The placeholder pre-declares the union of fields that any raw resource
-    might yield. DLT only emits columns it sees in ``model_fields`` — extras
-    pass through pydantic ``extra="allow"`` but never reach disk. Adding a
-    field here is safe: it's ``Optional`` and defaults to ``None`` for
-    resources that don't yield it.
+    The placeholder pre-declares a couple of fields every raw resource may want
+    (see below), but that is a convenience, not a requirement: with
+    ``extra="allow"``, dlt maps a pydantic model to ``column_mode="evolve"`` for
+    keys outside ``model_fields``, so any key a resource yields — declared here
+    or not — still reaches its own column on disk (verified empirically against
+    a live dlt pipeline + DuckDB destination during the orphaned-role-sources
+    task; a source table's undeclared columns get created and populated exactly
+    like declared ones). ``extra="allow"`` exists so a row with extra keys
+    doesn't fail pydantic validation, not to gate what dlt persists. The real
+    reason a column can still go missing is unrelated: dlt drops a column that
+    is all-NULL across an entire load (see ``_ensure_columns`` in
+    ``transforms.py``, which backfills exactly that case). Adding a field here
+    is still safe: it's ``Optional`` and defaults to ``None`` for resources that
+    don't yield it.
     """
 
     @app.asset(

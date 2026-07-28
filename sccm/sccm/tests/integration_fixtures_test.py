@@ -61,7 +61,7 @@ def test_prefixed_fixture_kinds_exist_in_a_schema():
     # SCCM_/MSSQL_-prefixed kinds are checked here.
     import json
     import pathlib
-    base = pathlib.Path(__file__).resolve().parents[1]  # sccm/sccm/
+    base = pathlib.Path(__file__).resolve().parents[1] / "src" / "openhound_sccm"  # schemas ship inside the wheel
     schema_kinds: set[str] = set()
     for name in ("schema_SCCM.json", "schema_MSSQL.json"):
         d = json.loads((base / name).read_text(encoding="utf-8"))

@@ -1,0 +1,3 @@
+﻿[Run-AsNetOnly] launching as MAYYHEM\lowpriv (netonly): powershell.exe -NoProfile -ExecutionPolicy Bypass -File 
+"C:\Users\domainadmin\Desktop\OpenHound\sccm\tests\live-comparison\lowpriv_check\timing-20260728\_cmbp_pe-on.ps1"
+[Run-AsNetOnly] child exit code: 0

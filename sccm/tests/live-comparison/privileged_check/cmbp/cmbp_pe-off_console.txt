@@ -1,0 +1,965 @@
+﻿================================================================================
+ConfigManBearPig - SCCM Data Collector for BloodHound
+Version: 1.2
+Collection Method: All
+================================================================================
+
+[2026-07-28 16:22:53] [Success]   Prerequisites check passed
+[2026-07-28 16:22:53] [Success]   Using ActiveDirectory module for name resolution
+[2026-07-28 16:22:53] [Info]      Using specified domain controller: dc.mayyhem.com
+[2026-07-28 16:22:53] [Success]   DNS resolution successful
+[2026-07-28 16:22:53] [Info]      Initializing SCCM collection...
+[2026-07-28 16:22:53] [Info]      Selected phases: LDAP, Local, DNS, RemoteRegistry, MSSQL, AdminService, HTTP, SMB
+[2026-07-28 16:22:53] [Info]      Starting LDAP collection...
+[2026-07-28 16:22:53] [Info]      Searching System Management container: CN=System 
+Management,CN=System,DC=mayyhem,DC=com
+[2026-07-28 16:22:53] [Info]      Collecting mSSMSSite objects...
+[2026-07-28 16:22:53] [Success]   Found site: PS1
+[2026-07-28 16:22:53] [Success]   Found site: CAS
+[2026-07-28 16:22:53] [Info]      Collecting mSSMSManagementPoint objects...
+[2026-07-28 16:22:53] [Success]   Found management point: ps1-mp.mayyhem.com (site: PS1)
+[2026-07-28 16:22:53] [Success]   Found central administration site: CAS
+[2026-07-28 16:22:53] [Info]      Collecting computers with Remote Control SPN...
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: cas-db.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: cas-scp.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: hi2-pss.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-db.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-dev.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-dev2.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-dp.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-lib.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-mp.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-pss.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-psv.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-sec.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps1-sms.mayyhem.com
+[2026-07-28 16:22:53] [Success]   Found computer with Remote Control SPN: ps2-pss.mayyhem.com
+[2026-07-28 16:22:53] [Info]      Collecting network boot servers...
+[2026-07-28 16:22:53] [Success]   Found network boot server: ps1-dp.mayyhem.com 
+(S-1-5-21-3242052782-1287495003-4091326449-1117)
+[2026-07-28 16:22:53] [Info]      Searching for computers with SCCM naming patterns...
+[2026-07-28 16:22:53] [Success]   Found system with SCCM naming pattern: ps1-sms.mayyhem.com 
+(S-1-5-21-3242052782-1287495003-4091326449-1123)
+[2026-07-28 16:22:53] [Info]      Checking permissions on System Management container...
+[2026-07-28 16:22:53] [Success]   Found principal with GenericAll on System Management container: mayyhem\Domain Admins
+[2026-07-28 16:22:53] [Success]   Found principal with GenericAll on System Management container: mayyhem\CAS-PSS$
+[2026-07-28 16:22:54] [Success]   Found principal with GenericAll on System Management container: mayyhem\PS1-PSS$
+[2026-07-28 16:22:54] [Success]   Found principal with GenericAll on System Management container: mayyhem\PS2-PSS$
+[2026-07-28 16:22:54] [Success]   Found principal with GenericAll on System Management container: mayyhem\Enterprise 
+Admins
+[2026-07-28 16:22:54] [Success]   LDAP collection completed
+[2026-07-28 16:22:54] [Info]      Starting Local collection...
+[2026-07-28 16:22:54] [Success]   SCCM client detected on local machine
+[2026-07-28 16:22:54] [Info]      Querying SMS_Authority for current management point and site code...
+[2026-07-28 16:22:54] [Info]      Querying SMS_LookupMP for additional management points...
+[2026-07-28 16:22:54] [Info]      Querying CCM_Client for client information...
+[2026-07-28 16:22:54] [Success]   Found local client device: PS1-DEV2.MAYYHEM.COM (SMSID: 
+GUID:32E75DAA-BE2F-44CA-920B-79A2152F6638)
+[2026-07-28 16:22:54] [Info]      Searching SCCM client logs for additional SCCM components...
+[2026-07-28 16:22:54] [Error]     Local phase failed: The process cannot access the file 
+'C:\Windows\CCM\Logs\BitlockerManagementHandler.log' because it is being used by another process.
+[2026-07-28 16:22:54] [Info]      Starting DNS collection...
+[2026-07-28 16:22:54] [Info]      Performing DNS collection for site codes: PS1, CAS
+[2026-07-28 16:22:54] [Info]      Attempting ADIDNS SRV record enumeration...
+[2026-07-28 16:22:54] [Success]   Found management point ps1-mp.mayyhem.com for site PS1
+[2026-07-28 16:22:54] [Info]      Querying DNS for: _mssms_mp_ps1._tcp.mayyhem.com
+[2026-07-28 16:22:54] [Info]      Querying DNS for: _mssms_mp_cas._tcp.mayyhem.com
+[2026-07-28 16:22:54] [Success]   DNS collection completed
+[2026-07-28 16:22:54] [Info]      Attempting Remote Registry collection on: ps1-dp.mayyhem.com
+[2026-07-28 16:22:54] [Success]   Remote Registry connection successful: ps1-dp.mayyhem.com
+[2026-07-28 16:22:54] [Info]      Checking SMB signing requirement on ps1-dp.mayyhem.com
+[2026-07-28 16:22:54] [Info]      Querying Triggers registry key on ps1-dp.mayyhem.com for site code
+[2026-07-28 16:22:54] [Info]      Querying Components registry key on ps1-dp.mayyhem.com for SCCM component servers
+[2026-07-28 16:22:55] [Info]      Querying Multisite Component Servers registry key on ps1-dp.mayyhem.com for site 
+database servers
+[2026-07-28 16:22:55] [Info]      Querying CurrentUser registry key on ps1-dp.mayyhem.com for logged-in user SID
+[2026-07-28 16:22:55] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:22:55] [Success]   Remote Registry collection completed for ps1-dp.mayyhem.com
+[2026-07-28 16:22:55] [Info]      Attempting Remote Registry collection on: ps1-pss.mayyhem.com
+[2026-07-28 16:22:55] [Success]   Remote Registry connection successful: ps1-pss.mayyhem.com
+[2026-07-28 16:22:55] [Info]      Checking SMB signing requirement on ps1-pss.mayyhem.com
+[2026-07-28 16:22:55] [Info]      Querying Triggers registry key on ps1-pss.mayyhem.com for site code
+[2026-07-28 16:22:57] [Info]      Querying Components registry key on ps1-pss.mayyhem.com for SCCM component servers
+[2026-07-28 16:22:58] [Success]   Found component server: PS1-PSV.MAYYHEM.COM
+[2026-07-28 16:22:58] [Info]      Querying Multisite Component Servers registry key on ps1-pss.mayyhem.com for site 
+database servers
+[2026-07-28 16:22:58] [Success]   Found site database server: PS1-DB.MAYYHEM.COM
+[2026-07-28 16:22:58] [Warning]   No SQL database name provided, inferring from site code PS1
+[2026-07-28 16:22:58] [Info]      Collecting MSSQL EPA settings from PS1-DB.MAYYHEM.COM via Remote Registry
+[2026-07-28 16:22:58] [Success]   Collected EPA settings from PS1-DB.MAYYHEM.COM: ForceEncryption=Yes, 
+ExtendedProtection=Off (Path: SOFTWARE\Microsoft\Microsoft SQL 
+Server\MSSQL16.MSSQLSERVER\MSSQLServer\SuperSocketNetLib)
+[2026-07-28 16:22:58] [Info]      Querying CurrentUser registry key on ps1-pss.mayyhem.com for logged-in user SID
+[2026-07-28 16:22:59] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:22:59] [Success]   Remote Registry collection completed for ps1-pss.mayyhem.com
+[2026-07-28 16:22:59] [Info]      Attempting Remote Registry collection on: cas-pss.mayyhem.com
+[2026-07-28 16:22:59] [Success]   Remote Registry connection successful: cas-pss.mayyhem.com
+[2026-07-28 16:22:59] [Info]      Checking SMB signing requirement on cas-pss.mayyhem.com
+[2026-07-28 16:22:59] [Info]      Querying Triggers registry key on cas-pss.mayyhem.com for site code
+[2026-07-28 16:22:59] [Info]      Querying Components registry key on cas-pss.mayyhem.com for SCCM component servers
+[2026-07-28 16:23:00] [Success]   Found component server: CAS-SCP.MAYYHEM.COM
+[2026-07-28 16:23:00] [Info]      Querying Multisite Component Servers registry key on cas-pss.mayyhem.com for site 
+database servers
+[2026-07-28 16:23:00] [Success]   Found site database server: CAS-DB.MAYYHEM.COM
+[2026-07-28 16:23:00] [Warning]   No SQL database name provided, inferring from site code CAS
+[2026-07-28 16:23:00] [Info]      Collecting MSSQL EPA settings from CAS-DB.MAYYHEM.COM via Remote Registry
+[2026-07-28 16:23:00] [Success]   Collected EPA settings from CAS-DB.MAYYHEM.COM: ForceEncryption=No, 
+ExtendedProtection=Off (Path: SOFTWARE\Microsoft\Microsoft SQL 
+Server\MSSQL16.MSSQLSERVER\MSSQLServer\SuperSocketNetLib)
+[2026-07-28 16:23:00] [Info]      Querying CurrentUser registry key on cas-pss.mayyhem.com for logged-in user SID
+[2026-07-28 16:23:00] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:23:00] [Success]   Remote Registry collection completed for cas-pss.mayyhem.com
+[2026-07-28 16:23:00] [Info]      Attempting Remote Registry collection on: ps1-dev2.mayyhem.com
+[2026-07-28 16:23:00] [Warning]   Remote Registry connection failed for ps1-dev2.mayyhem.com
+[2026-07-28 16:23:00] [Info]      Attempting Remote Registry collection on: ps1-sms.mayyhem.com
+[2026-07-28 16:23:00] [Success]   Remote Registry connection successful: ps1-sms.mayyhem.com
+[2026-07-28 16:23:01] [Info]      Checking SMB signing requirement on ps1-sms.mayyhem.com
+[2026-07-28 16:23:01] [Info]      Querying Triggers registry key on ps1-sms.mayyhem.com for site code
+[2026-07-28 16:23:01] [Info]      Querying Components registry key on ps1-sms.mayyhem.com for SCCM component servers
+[2026-07-28 16:23:01] [Info]      Querying Multisite Component Servers registry key on ps1-sms.mayyhem.com for site 
+database servers
+[2026-07-28 16:23:01] [Info]      Querying CurrentUser registry key on ps1-sms.mayyhem.com for logged-in user SID
+[2026-07-28 16:23:01] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:23:01] [Success]   Remote Registry collection completed for ps1-sms.mayyhem.com
+[2026-07-28 16:23:01] [Info]      Attempting Remote Registry collection on: ps1-mp.mayyhem.com
+[2026-07-28 16:23:01] [Success]   Remote Registry connection successful: ps1-mp.mayyhem.com
+[2026-07-28 16:23:01] [Info]      Checking SMB signing requirement on ps1-mp.mayyhem.com
+[2026-07-28 16:23:01] [Warning]   SMB signing is REQUIRED on ps1-mp.mayyhem.com (detected via Registry)
+[2026-07-28 16:23:01] [Info]      Querying Triggers registry key on ps1-mp.mayyhem.com for site code
+[2026-07-28 16:23:02] [Info]      Querying Components registry key on ps1-mp.mayyhem.com for SCCM component servers
+[2026-07-28 16:23:02] [Info]      Querying Multisite Component Servers registry key on ps1-mp.mayyhem.com for site 
+database servers
+[2026-07-28 16:23:02] [Info]      Querying CurrentUser registry key on ps1-mp.mayyhem.com for logged-in user SID
+[2026-07-28 16:23:02] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:23:02] [Success]   Remote Registry collection completed for ps1-mp.mayyhem.com
+[2026-07-28 16:23:02] [Info]      Attempting Remote Registry collection on: ps2-pss.mayyhem.com
+[2026-07-28 16:23:07] [Warning]   Remote Registry connection timed out for ps2-pss.mayyhem.com after 5 seconds
+[2026-07-28 16:23:07] [Warning]   Remote Registry connection failed for ps2-pss.mayyhem.com
+[2026-07-28 16:23:07] [Info]      Memory usage: 96.25% (11.54GB / 11.99GB)
+[2026-07-28 16:23:08] [Info]      Attempting MSSQL collection on: ps1-dp.mayyhem.com
+[2026-07-28 16:23:10] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.11.56:1433"
+[2026-07-28 16:23:10] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:10] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:10] [Info]      Attempting MSSQL collection on: ps1-psv.mayyhem.com
+[2026-07-28 16:23:31] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "A connection 
+attempt failed because the connected party did not properly respond after a period of time, or established connection 
+failed because connected host has failed to respond 10.2.11.52:1433"
+[2026-07-28 16:23:31] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:31] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:31] [Info]      Memory usage: 96.14% (11.53GB / 11.99GB)
+[2026-07-28 16:23:32] [Info]      Attempting MSSQL collection on: ps1-pss.mayyhem.com
+[2026-07-28 16:23:34] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.11.50:1433"
+[2026-07-28 16:23:34] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:34] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:34] [Info]      Attempting MSSQL collection on: cas-pss.mayyhem.com
+[2026-07-28 16:23:36] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.10.50:1433"
+[2026-07-28 16:23:36] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:36] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:36] [Info]      Attempting MSSQL collection on: cas-db.mayyhem.com
+[2026-07-28 16:23:36] [Info]      Force Encryption: No
+[2026-07-28 16:23:36] [Info]      Testing EPA settings for cas-db.mayyhem.com
+[2026-07-28 16:23:36] [Info]        Extended Protection: Off
+[2026-07-28 16:23:36] [Warning]   No SQL database name provided, inferring from site code CAS
+[2026-07-28 16:23:37] [Success]   Successfully collected EPA settings via MSSQL
+[2026-07-28 16:23:37] [Info]      Attempting MSSQL collection on: ps1-dev2.mayyhem.com
+[2026-07-28 16:23:39] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.11.11:1433"
+[2026-07-28 16:23:39] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:39] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:39] [Info]      Attempting MSSQL collection on: ps1-sms.mayyhem.com
+[2026-07-28 16:23:41] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.11.54:1433"
+[2026-07-28 16:23:41] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:41] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:41] [Info]      Attempting MSSQL collection on: ps1-db.mayyhem.com
+[2026-07-28 16:23:41] [Info]      Force Encryption: Yes
+[2026-07-28 16:23:41] [Info]      Testing EPA settings for ps1-db.mayyhem.com
+[2026-07-28 16:23:42] [Info]        Extended Protection: Off
+[2026-07-28 16:23:42] [Warning]   No SQL database name provided, inferring from site code PS1
+[2026-07-28 16:23:42] [Success]   Successfully collected EPA settings via MSSQL
+[2026-07-28 16:23:42] [Info]      Memory usage: 96.02% (11.52GB / 11.99GB)
+[2026-07-28 16:23:42] [Info]      Attempting MSSQL collection on: ps1-mp.mayyhem.com
+[2026-07-28 16:23:44] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "No connection 
+could be made because the target machine actively refused it 10.2.11.55:1433"
+[2026-07-28 16:23:44] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:23:44] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:23:44] [Info]      Attempting MSSQL collection on: cas-scp.mayyhem.com
+[2026-07-28 16:24:06] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "A connection 
+attempt failed because the connected party did not properly respond after a period of time, or established connection 
+failed because connected host has failed to respond 10.2.10.57:1433"
+[2026-07-28 16:24:06] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:24:06] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:24:06] [Info]      Memory usage: 96.88% (11.62GB / 11.99GB)
+[2026-07-28 16:24:06] [Info]      Attempting MSSQL collection on: ps2-pss.mayyhem.com
+[2026-07-28 16:24:27] [Error]     Error in TDS check: Exception calling "Connect" with "2" argument(s): "A connection 
+attempt failed because the connected party did not properly respond after a period of time, or established connection 
+failed because connected host has failed to respond 10.2.12.50:1433"
+[2026-07-28 16:24:27] [Warning]   PRELOGIN was not successful
+[2026-07-28 16:24:27] [Warning]   Failed to collect EPA settings via MSSQL
+[2026-07-28 16:24:28] [Info]      Memory usage: 96.76% (11.61GB / 11.99GB)
+[2026-07-28 16:24:28] [Info]      Attempting AdminService collection on: ps1-dp.mayyhem.com
+[2026-07-28 16:24:28] [Info]      Collecting this SMS Provider's site via AdminService from ps1-dp.mayyhem.com
+[2026-07-28 16:24:28] [Error]     Failed to collect this site via AdminService from ps1-dp.mayyhem.com: 
+
+
+
+404 - File or directory not found.
+
+
+
+
+
+Server Error
+
+ 
+  404 - File or directory not found.
+  The resource you are looking for might have been removed, had its name changed, or is temporarily unavailable.
+ 
+
+
+
+
+[2026-07-28 16:24:28] [Info]      Attempting AdminService collection on: ps1-psv.mayyhem.com
+[2026-07-28 16:24:28] [Info]      Collecting this SMS Provider's site via AdminService from ps1-psv.mayyhem.com
+[2026-07-28 16:24:38] [Error]     Failed to collect this site via AdminService from ps1-psv.mayyhem.com: The operation 
+has timed out.
+[2026-07-28 16:24:38] [Info]      Memory usage: 95.99% (11.51GB / 11.99GB)
+[2026-07-28 16:24:39] [Info]      Attempting AdminService collection on: ps1-pss.mayyhem.com
+[2026-07-28 16:24:39] [Info]      Collecting this SMS Provider's site via AdminService from ps1-pss.mayyhem.com
+[2026-07-28 16:24:39] [Success]   Identified this SMS Provider's site via AdminService: PS1 (Primary Site One)
+[2026-07-28 16:24:39] [Info]      Collecting sites via AdminService from ps1-pss.mayyhem.com
+[2026-07-28 16:24:39] [Info]      Collected 3 sites via AdminService
+[2026-07-28 16:24:40] [Success]   Found site server for site CAS: cas-pss.mayyhem.com
+[2026-07-28 16:24:40] [Success]   Found SQL Server for site CAS: cas-db.mayyhem.com
+[2026-07-28 16:24:41] [Success]   Found site server for site PS1: ps1-pss.mayyhem.com
+[2026-07-28 16:24:41] [Success]   Found SQL Server for site PS1: ps1-db.mayyhem.com
+[2026-07-28 16:24:42] [Success]   Found site server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:24:42] [Success]   Found SQL Server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:24:42] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:24:42] [Success]   Successfully collected sites via AdminService (detected site: PS1)
+[2026-07-28 16:24:42] [Info]      Collecting stored accounts via AdminService from ps1-pss.mayyhem.com
+[2026-07-28 16:24:42] [Info]      Collected 2 stored accounts via SMS_SCI_Reserved
+[2026-07-28 16:24:42] [Success]   Successfully collected stored accounts via AdminService
+[2026-07-28 16:24:42] [Info]      Collecting combined device resources via AdminService from ps1-pss.mayyhem.com for 
+site PS1
+[2026-07-28 16:24:49] [Success]   Successfully processed 19 combined device resources via SMS_CombinedDeviceResources
+[2026-07-28 16:24:49] [Success]   Successfully collected combined device resources via AdminService
+[2026-07-28 16:24:49] [Info]      Collecting systems and groups via SMS_R_System from ps1-pss.mayyhem.com for site PS1
+[2026-07-28 16:24:53] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:24:53] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:24:53] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:24:54] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:24:54] [Success]   Successfully processed 34 systems and 30 groups via SMS_R_System
+[2026-07-28 16:24:54] [Success]   Successfully collected client devices and site systems via AdminService
+[2026-07-28 16:24:54] [Info]      Collecting users and groups via SMS_R_User from ps1-pss.mayyhem.com for site PS1
+[2026-07-28 16:24:58] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser1 (EdgeTestDomainUser1)
+[2026-07-28 16:24:59] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser2 (EdgeTestDomainUser2)
+[2026-07-28 16:24:59] [Warning]   No domain SID found for user mayyhem\EdgeTestSysadmin (EdgeTestSysadmin)
+[2026-07-28 16:24:59] [Warning]   No domain SID found for user mayyhem\EdgeTestNoConnect (EdgeTestNoConnect)
+[2026-07-28 16:25:00] [Warning]   No domain SID found for user mayyhem\EdgeTestServiceAcct (EdgeTestServiceAcct)
+[2026-07-28 16:25:00] [Warning]   No domain SID found for user mayyhem\EdgeTestCoerce (EdgeTestCoerce)
+[2026-07-28 16:25:01] [Warning]   No domain SID found for user mayyhem\EdgeTestDisabledUser (EdgeTestDisabledUser)
+[2026-07-28 16:25:01] [Success]   Successfully processed 16 users and 35 groups via SMS_R_User
+[2026-07-28 16:25:01] [Success]   Successfully collected users via AdminService
+[2026-07-28 16:25:01] [Info]      Collecting device/user collections via SMS_Collection from ps1-pss.mayyhem.com for 
+site PS1
+[2026-07-28 16:25:02] [Success]   Collected 10 collections via AdminService
+[2026-07-28 16:25:02] [Success]   Successfully collected device/user collections via AdminService
+[2026-07-28 16:25:02] [Info]      Collecting collection members via SMS_FullCollectionMembership from 
+ps1-pss.mayyhem.com
+[2026-07-28 16:25:02] [Success]   Collected 155 collection members for 8 collections via AdminService (page)
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152004 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152015 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152016 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152037 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152038 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152039 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152040 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152041 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152042 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152043 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152045 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152046 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152047 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152048 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2097152049 in SMS00001
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597568 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597569 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597570 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597571 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597572 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597573 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597574 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597575 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597647 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597716 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597717 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597718 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597719 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597720 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597721 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597722 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597723 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597724 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597725 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597726 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597727 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597728 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2063597729 in SMS00002
+[2026-07-28 16:25:04] [Warning]   No node found for member 2080374784 in SMS00003
+[2026-07-28 16:25:04] [Warning]   No node found for member 2080374785 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374786 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374787 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374788 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374789 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374790 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374791 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374792 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374793 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374794 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374795 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374796 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374797 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374798 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374799 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374800 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374801 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374802 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374803 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374804 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374806 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374807 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2080374825 in SMS00003
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597568 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597569 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597570 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597571 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597572 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597573 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597574 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597575 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597647 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597716 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597717 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597718 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597719 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597720 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597721 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597722 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597723 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597724 in SMS00004
+[2026-07-28 16:25:05] [Warning]   No node found for member 2063597725 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2063597726 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2063597727 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2063597728 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2063597729 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374784 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374785 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374786 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374787 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374788 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374789 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374790 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374791 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374792 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374793 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374794 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374795 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374796 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374797 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374798 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374799 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374800 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374801 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374802 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374803 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374804 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374806 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374807 in SMS00004
+[2026-07-28 16:25:06] [Warning]   No node found for member 2080374825 in SMS00004
+[2026-07-28 16:25:08] [Success]   Collected 155 collection members via AdminService
+[2026-07-28 16:25:08] [Success]   Successfully collected collection members via AdminService
+[2026-07-28 16:25:08] [Info]      Collecting security roles via SMS_Role from ps1-pss.mayyhem.com for site PS1
+[2026-07-28 16:25:09] [Success]   Collected 17 security roles via AdminService
+[2026-07-28 16:25:09] [Success]   Successfully collected security roles via AdminService
+[2026-07-28 16:25:09] [Info]      Collecting admin users via SMS_Admin from ps1-pss.mayyhem.com for site PS1
+[2026-07-28 16:25:10] [Success]   Collected 4 admin users via SMS_Admin
+[2026-07-28 16:25:10] [Success]   Successfully collected admin users via AdminService
+[2026-07-28 16:25:10] [Info]      Collecting site system roles via SMS_SCI_SysResUse from ps1-pss.mayyhem.com for site 
+PS1
+[2026-07-28 16:25:13] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:25:13] [Success]   Collected 10 site system roles via SMS_SCI_SysResUse
+[2026-07-28 16:25:13] [Success]   Successfully collected site system roles via AdminService
+[2026-07-28 16:25:13] [Info]      AdminService collection completed: / successful
+[2026-07-28 16:25:13] [Success]   AdminService collection successful on ps1-pss.mayyhem.com ( successful collections)
+[2026-07-28 16:25:14] [Info]      Memory usage: 95.47% (11.45GB / 11.99GB)
+[2026-07-28 16:25:14] [Info]      Attempting AdminService collection on: cas-pss.mayyhem.com
+[2026-07-28 16:25:14] [Info]      Collecting this SMS Provider's site via AdminService from cas-pss.mayyhem.com
+[2026-07-28 16:25:14] [Success]   Identified this SMS Provider's site via AdminService: CAS (Central Administration 
+Site)
+[2026-07-28 16:25:14] [Info]      Collecting sites via AdminService from cas-pss.mayyhem.com
+[2026-07-28 16:25:15] [Info]      Collected 3 sites via AdminService
+[2026-07-28 16:25:15] [Success]   Found site server for site CAS: cas-pss.mayyhem.com
+[2026-07-28 16:25:15] [Success]   Found SQL Server for site CAS: cas-db.mayyhem.com
+[2026-07-28 16:25:16] [Success]   Found site server for site PS1: ps1-pss.mayyhem.com
+[2026-07-28 16:25:16] [Success]   Found SQL Server for site PS1: ps1-db.mayyhem.com
+[2026-07-28 16:25:16] [Success]   Found site server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:25:16] [Success]   Found SQL Server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:25:16] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:25:16] [Success]   Successfully collected sites via AdminService (detected site: CAS)
+[2026-07-28 16:25:16] [Info]      Collecting stored accounts via AdminService from cas-pss.mayyhem.com
+[2026-07-28 16:25:17] [Info]      Collected 2 stored accounts via SMS_SCI_Reserved
+[2026-07-28 16:25:17] [Success]   Successfully collected stored accounts via AdminService
+[2026-07-28 16:25:17] [Info]      Collecting combined device resources via AdminService from cas-pss.mayyhem.com for 
+site CAS
+[2026-07-28 16:25:21] [Success]   Successfully processed 19 combined device resources via SMS_CombinedDeviceResources
+[2026-07-28 16:25:21] [Success]   Successfully collected combined device resources via AdminService
+[2026-07-28 16:25:21] [Info]      Collecting systems and groups via SMS_R_System from cas-pss.mayyhem.com for site CAS
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:25:24] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:25:24] [Success]   Successfully processed 34 systems and 30 groups via SMS_R_System
+[2026-07-28 16:25:24] [Success]   Successfully collected client devices and site systems via AdminService
+[2026-07-28 16:25:24] [Info]      Collecting users and groups via SMS_R_User from cas-pss.mayyhem.com for site CAS
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser1 (EdgeTestDomainUser1)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser2 (EdgeTestDomainUser2)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestSysadmin (EdgeTestSysadmin)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestNoConnect (EdgeTestNoConnect)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestServiceAcct (EdgeTestServiceAcct)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestCoerce (EdgeTestCoerce)
+[2026-07-28 16:25:27] [Warning]   No domain SID found for user mayyhem\EdgeTestDisabledUser (EdgeTestDisabledUser)
+[2026-07-28 16:25:27] [Success]   Successfully processed 16 users and 35 groups via SMS_R_User
+[2026-07-28 16:25:27] [Success]   Successfully collected users via AdminService
+[2026-07-28 16:25:27] [Info]      Collecting device/user collections via SMS_Collection from cas-pss.mayyhem.com for 
+site CAS
+[2026-07-28 16:25:27] [Success]   Collected 10 collections via AdminService
+[2026-07-28 16:25:27] [Success]   Successfully collected device/user collections via AdminService
+[2026-07-28 16:25:27] [Info]      Collecting collection members via SMS_FullCollectionMembership from 
+cas-pss.mayyhem.com
+[2026-07-28 16:25:28] [Success]   Collected 155 collection members for 8 collections via AdminService (page)
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152004 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152015 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152016 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152037 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152038 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152039 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152040 in SMS00001
+[2026-07-28 16:25:29] [Warning]   No node found for member 2097152041 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152042 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152043 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152045 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152046 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152047 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152048 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2097152049 in SMS00001
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597568 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597569 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597570 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597571 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597572 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597573 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597574 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597575 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597647 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597716 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597717 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597718 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597719 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597720 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597721 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597722 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597723 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597724 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597725 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597726 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597727 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597728 in SMS00002
+[2026-07-28 16:25:30] [Warning]   No node found for member 2063597729 in SMS00002
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374784 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374785 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374786 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374787 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374788 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374789 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374790 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374791 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374792 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374793 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374794 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374795 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374796 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374797 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374798 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374799 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374800 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374801 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374802 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374803 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374804 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374806 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374807 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2080374825 in SMS00003
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597568 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597569 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597570 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597571 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597572 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597573 in SMS00004
+[2026-07-28 16:25:31] [Warning]   No node found for member 2063597574 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597575 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597647 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597716 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597717 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597718 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597719 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597720 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597721 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597722 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597723 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597724 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597725 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597726 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597727 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597728 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2063597729 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374784 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374785 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374786 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374787 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374788 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374789 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374790 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374791 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374792 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374793 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374794 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374795 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374796 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374797 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374798 in SMS00004
+[2026-07-28 16:25:32] [Warning]   No node found for member 2080374799 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374800 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374801 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374802 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374803 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374804 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374806 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374807 in SMS00004
+[2026-07-28 16:25:33] [Warning]   No node found for member 2080374825 in SMS00004
+[2026-07-28 16:25:34] [Success]   Collected 155 collection members via AdminService
+[2026-07-28 16:25:34] [Success]   Successfully collected collection members via AdminService
+[2026-07-28 16:25:34] [Info]      Collecting security roles via SMS_Role from cas-pss.mayyhem.com for site CAS
+[2026-07-28 16:25:35] [Success]   Collected 17 security roles via AdminService
+[2026-07-28 16:25:35] [Success]   Successfully collected security roles via AdminService
+[2026-07-28 16:25:35] [Info]      Collecting admin users via SMS_Admin from cas-pss.mayyhem.com for site CAS
+[2026-07-28 16:25:37] [Success]   Collected 4 admin users via SMS_Admin
+[2026-07-28 16:25:37] [Success]   Successfully collected admin users via AdminService
+[2026-07-28 16:25:37] [Info]      Collecting site system roles via SMS_SCI_SysResUse from cas-pss.mayyhem.com for site 
+CAS
+[2026-07-28 16:25:40] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:25:40] [Success]   Collected 10 site system roles via SMS_SCI_SysResUse
+[2026-07-28 16:25:40] [Success]   Successfully collected site system roles via AdminService
+[2026-07-28 16:25:40] [Info]      AdminService collection completed: / successful
+[2026-07-28 16:25:40] [Success]   AdminService collection successful on cas-pss.mayyhem.com ( successful collections)
+[2026-07-28 16:25:41] [Info]      Memory usage: 95.6% (11.47GB / 11.99GB)
+[2026-07-28 16:25:41] [Info]      Attempting AdminService collection on: cas-db.mayyhem.com
+[2026-07-28 16:25:41] [Info]      Collecting this SMS Provider's site via AdminService from cas-db.mayyhem.com
+[2026-07-28 16:25:43] [Error]     Failed to collect this site via AdminService from cas-db.mayyhem.com: Unable to 
+connect to the remote server
+[2026-07-28 16:25:43] [Info]      Attempting AdminService collection on: ps1-dev2.mayyhem.com
+[2026-07-28 16:25:43] [Info]      Collecting this SMS Provider's site via AdminService from ps1-dev2.mayyhem.com
+[2026-07-28 16:25:48] [Error]     Failed to collect this site via AdminService from ps1-dev2.mayyhem.com: Unable to 
+connect to the remote server
+[2026-07-28 16:25:48] [Info]      Attempting AdminService collection on: ps1-sms.mayyhem.com
+[2026-07-28 16:25:48] [Info]      Collecting this SMS Provider's site via AdminService from ps1-sms.mayyhem.com
+[2026-07-28 16:25:48] [Success]   Identified this SMS Provider's site via AdminService: PS1 (Primary Site One)
+[2026-07-28 16:25:48] [Info]      Collecting sites via AdminService from ps1-sms.mayyhem.com
+[2026-07-28 16:25:48] [Info]      Collected 3 sites via AdminService
+[2026-07-28 16:25:49] [Success]   Found site server for site CAS: cas-pss.mayyhem.com
+[2026-07-28 16:25:49] [Success]   Found SQL Server for site CAS: cas-db.mayyhem.com
+[2026-07-28 16:25:49] [Success]   Found site server for site PS1: ps1-pss.mayyhem.com
+[2026-07-28 16:25:49] [Success]   Found SQL Server for site PS1: ps1-db.mayyhem.com
+[2026-07-28 16:25:50] [Success]   Found site server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:25:50] [Success]   Found SQL Server for site SEC: ps1-sec.mayyhem.com
+[2026-07-28 16:25:50] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:25:50] [Success]   Successfully collected sites via AdminService (detected site: PS1)
+[2026-07-28 16:25:50] [Info]      Collecting stored accounts via AdminService from ps1-sms.mayyhem.com
+[2026-07-28 16:25:51] [Info]      Collected 2 stored accounts via SMS_SCI_Reserved
+[2026-07-28 16:25:51] [Success]   Successfully collected stored accounts via AdminService
+[2026-07-28 16:25:51] [Info]      Collecting combined device resources via AdminService from ps1-sms.mayyhem.com for 
+site PS1
+[2026-07-28 16:25:55] [Success]   Successfully processed 19 combined device resources via SMS_CombinedDeviceResources
+[2026-07-28 16:25:55] [Success]   Successfully collected combined device resources via AdminService
+[2026-07-28 16:25:55] [Info]      Collecting systems and groups via SMS_R_System from ps1-sms.mayyhem.com for site PS1
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestEnabled1
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestDisabled
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system TestComputer
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestNoConnect
+[2026-07-28 16:25:59] [Warning]   No domain SID found for system CoerceTestEnabled2
+[2026-07-28 16:25:59] [Success]   Successfully processed 34 systems and 30 groups via SMS_R_System
+[2026-07-28 16:25:59] [Success]   Successfully collected client devices and site systems via AdminService
+[2026-07-28 16:25:59] [Info]      Collecting users and groups via SMS_R_User from ps1-sms.mayyhem.com for site PS1
+[2026-07-28 16:26:03] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser1 (EdgeTestDomainUser1)
+[2026-07-28 16:26:03] [Warning]   No domain SID found for user mayyhem\EdgeTestDomainUser2 (EdgeTestDomainUser2)
+[2026-07-28 16:26:03] [Warning]   No domain SID found for user mayyhem\EdgeTestSysadmin (EdgeTestSysadmin)
+[2026-07-28 16:26:03] [Warning]   No domain SID found for user mayyhem\EdgeTestNoConnect (EdgeTestNoConnect)
+[2026-07-28 16:26:03] [Warning]   No domain SID found for user mayyhem\EdgeTestServiceAcct (EdgeTestServiceAcct)
+[2026-07-28 16:26:04] [Warning]   No domain SID found for user mayyhem\EdgeTestCoerce (EdgeTestCoerce)
+[2026-07-28 16:26:04] [Warning]   No domain SID found for user mayyhem\EdgeTestDisabledUser (EdgeTestDisabledUser)
+[2026-07-28 16:26:04] [Success]   Successfully processed 16 users and 35 groups via SMS_R_User
+[2026-07-28 16:26:04] [Success]   Successfully collected users via AdminService
+[2026-07-28 16:26:04] [Info]      Collecting device/user collections via SMS_Collection from ps1-sms.mayyhem.com for 
+site PS1
+[2026-07-28 16:26:05] [Success]   Collected 10 collections via AdminService
+[2026-07-28 16:26:05] [Success]   Successfully collected device/user collections via AdminService
+[2026-07-28 16:26:05] [Info]      Collecting collection members via SMS_FullCollectionMembership from 
+ps1-sms.mayyhem.com
+[2026-07-28 16:26:06] [Success]   Collected 155 collection members for 8 collections via AdminService (page)
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152004 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152015 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152016 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152037 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152038 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152039 in SMS00001
+[2026-07-28 16:26:08] [Warning]   No node found for member 2097152040 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152041 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152042 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152043 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152045 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152046 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152047 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152048 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2097152049 in SMS00001
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597568 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597569 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597570 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597571 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597572 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597573 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597574 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597575 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597647 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597716 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597717 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597718 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597719 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597720 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597721 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597722 in SMS00002
+[2026-07-28 16:26:09] [Warning]   No node found for member 2063597723 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597724 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597725 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597726 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597727 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597728 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2063597729 in SMS00002
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374784 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374785 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374786 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374787 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374788 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374789 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374790 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374791 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374792 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374793 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374794 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374795 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374796 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374797 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374798 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374799 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374800 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374801 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374802 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374803 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374804 in SMS00003
+[2026-07-28 16:26:10] [Warning]   No node found for member 2080374806 in SMS00003
+[2026-07-28 16:26:11] [Warning]   No node found for member 2080374807 in SMS00003
+[2026-07-28 16:26:11] [Warning]   No node found for member 2080374825 in SMS00003
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597568 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597569 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597570 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597571 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597572 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597573 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597574 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597575 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597647 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597716 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597717 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597718 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597719 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597720 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597721 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597722 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597723 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597724 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597725 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597726 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597727 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597728 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2063597729 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2080374784 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2080374785 in SMS00004
+[2026-07-28 16:26:11] [Warning]   No node found for member 2080374786 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374787 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374788 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374789 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374790 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374791 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374792 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374793 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374794 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374795 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374796 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374797 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374798 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374799 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374800 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374801 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374802 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374803 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374804 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374806 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374807 in SMS00004
+[2026-07-28 16:26:12] [Warning]   No node found for member 2080374825 in SMS00004
+[2026-07-28 16:26:14] [Success]   Collected 155 collection members via AdminService
+[2026-07-28 16:26:14] [Success]   Successfully collected collection members via AdminService
+[2026-07-28 16:26:14] [Info]      Collecting security roles via SMS_Role from ps1-sms.mayyhem.com for site PS1
+[2026-07-28 16:26:15] [Success]   Collected 17 security roles via AdminService
+[2026-07-28 16:26:15] [Success]   Successfully collected security roles via AdminService
+[2026-07-28 16:26:15] [Info]      Collecting admin users via SMS_Admin from ps1-sms.mayyhem.com for site PS1
+[2026-07-28 16:26:16] [Success]   Collected 4 admin users via SMS_Admin
+[2026-07-28 16:26:16] [Success]   Successfully collected admin users via AdminService
+[2026-07-28 16:26:16] [Info]      Collecting site system roles via SMS_SCI_SysResUse from ps1-sms.mayyhem.com for site 
+PS1
+[2026-07-28 16:26:19] [Warning]   Skipping MSSQL node/edge creation for unidentified or secondary site SEC
+[2026-07-28 16:26:19] [Success]   Collected 10 site system roles via SMS_SCI_SysResUse
+[2026-07-28 16:26:19] [Success]   Successfully collected site system roles via AdminService
+[2026-07-28 16:26:19] [Info]      AdminService collection completed: / successful
+[2026-07-28 16:26:19] [Success]   AdminService collection successful on ps1-sms.mayyhem.com ( successful collections)
+[2026-07-28 16:26:20] [Info]      Memory usage: 96.13% (11.53GB / 11.99GB)
+[2026-07-28 16:26:20] [Info]      Attempting AdminService collection on: ps1-db.mayyhem.com
+[2026-07-28 16:26:20] [Info]      Collecting this SMS Provider's site via AdminService from ps1-db.mayyhem.com
+[2026-07-28 16:26:22] [Error]     Failed to collect this site via AdminService from ps1-db.mayyhem.com: Unable to 
+connect to the remote server
+[2026-07-28 16:26:22] [Info]      Attempting AdminService collection on: ps1-mp.mayyhem.com
+[2026-07-28 16:26:22] [Info]      Collecting this SMS Provider's site via AdminService from ps1-mp.mayyhem.com
+[2026-07-28 16:26:22] [Error]     Failed to collect this site via AdminService from ps1-mp.mayyhem.com: 
+
+
+
+404 - File or directory not found.
+
+
+
+
+
+Server Error
+
+ 
+  404 - File or directory not found.
+  The resource you are looking for might have been removed, had its name changed, or is temporarily unavailable.
+ 
+
+
+
+
+[2026-07-28 16:26:22] [Info]      Attempting AdminService collection on: cas-scp.mayyhem.com
+[2026-07-28 16:26:22] [Info]      Collecting this SMS Provider's site via AdminService from cas-scp.mayyhem.com
+[2026-07-28 16:26:32] [Error]     Failed to collect this site via AdminService from cas-scp.mayyhem.com: The operation 
+has timed out.
+[2026-07-28 16:26:33] [Info]      Memory usage: 96.21% (11.54GB / 11.99GB)
+[2026-07-28 16:26:33] [Info]      Attempting AdminService collection on: ps2-pss.mayyhem.com
+[2026-07-28 16:26:33] [Info]      Collecting this SMS Provider's site via AdminService from ps2-pss.mayyhem.com
+[2026-07-28 16:26:43] [Error]     Failed to collect this site via AdminService from ps2-pss.mayyhem.com: The operation 
+has timed out.
+[2026-07-28 16:26:44] [Info]      Memory usage: 96.01% (11.52GB / 11.99GB)
+[2026-07-28 16:26:44] [Info]      Attempting HTTP collection on: ps1-dp.mayyhem.com
+[2026-07-28 16:26:44] [Success]   Found distribution point role on ps1-dp.mayyhem.com
+[2026-07-28 16:26:44] [Success]   HTTP collection completed
+[2026-07-28 16:26:44] [Info]      Attempting HTTP collection on: ps1-psv.mayyhem.com
+[2026-07-28 16:26:59] [Warning]   Unable to connect to ps1-psv.mayyhem.com via http - skipping remaining HTTP checks
+[2026-07-28 16:26:59] [Success]   HTTP collection completed
+[2026-07-28 16:27:00] [Info]      Memory usage: 96.11% (11.53GB / 11.99GB)
+[2026-07-28 16:27:00] [Info]      Attempting HTTP collection on: ps1-pss.mayyhem.com
+[2026-07-28 16:27:00] [Warning]   Target ps1-pss.mayyhem.com already collected, skipping HTTP
+[2026-07-28 16:27:00] [Info]      Attempting HTTP collection on: cas-pss.mayyhem.com
+[2026-07-28 16:27:00] [Warning]   Target cas-pss.mayyhem.com already collected, skipping HTTP
+[2026-07-28 16:27:00] [Info]      Attempting HTTP collection on: cas-db.mayyhem.com
+[2026-07-28 16:27:05] [Warning]   Unable to connect to cas-db.mayyhem.com via HTTPS - skipping remaining HTTP checks
+[2026-07-28 16:27:05] [Success]   HTTP collection completed
+[2026-07-28 16:27:05] [Info]      Attempting HTTP collection on: ps1-dev2.mayyhem.com
+[2026-07-28 16:27:18] [Warning]   Unable to connect to ps1-dev2.mayyhem.com via http - skipping remaining HTTP checks
+[2026-07-28 16:27:18] [Success]   HTTP collection completed
+[2026-07-28 16:27:19] [Info]      Memory usage: 95.7% (11.48GB / 11.99GB)
+[2026-07-28 16:27:19] [Info]      Attempting HTTP collection on: ps1-sms.mayyhem.com
+[2026-07-28 16:27:19] [Warning]   Target ps1-sms.mayyhem.com already collected, skipping HTTP
+[2026-07-28 16:27:19] [Info]      Attempting HTTP collection on: ps1-db.mayyhem.com
+[2026-07-28 16:27:23] [Warning]   Unable to connect to ps1-db.mayyhem.com via HTTPS - skipping remaining HTTP checks
+[2026-07-28 16:27:23] [Success]   HTTP collection completed
+[2026-07-28 16:27:23] [Info]      Attempting HTTP collection on: ps1-mp.mayyhem.com
+[2026-07-28 16:27:24] [Success]   Detected Site Server certificate issuer ps1-pss.mayyhem.com via sitesigncert
+[2026-07-28 16:27:24] [Success]   Found management point role on ps1-mp.mayyhem.com
+[2026-07-28 16:27:24] [Success]   Found site code for ps1-mp.mayyhem.com: PS1
+[2026-07-28 16:27:24] [Success]   HTTP collection completed
+[2026-07-28 16:27:24] [Info]      Attempting HTTP collection on: cas-scp.mayyhem.com
+[2026-07-28 16:27:39] [Warning]   Unable to connect to cas-scp.mayyhem.com via http - skipping remaining HTTP checks
+[2026-07-28 16:27:39] [Success]   HTTP collection completed
+[2026-07-28 16:27:39] [Info]      Memory usage: 95.68% (11.48GB / 11.99GB)
+[2026-07-28 16:27:40] [Info]      Attempting HTTP collection on: ps2-pss.mayyhem.com
+[2026-07-28 16:27:55] [Warning]   Unable to connect to ps2-pss.mayyhem.com via http - skipping remaining HTTP checks
+[2026-07-28 16:27:55] [Success]   HTTP collection completed
+[2026-07-28 16:27:55] [Info]      Memory usage: 95.69% (11.48GB / 11.99GB)
+[2026-07-28 16:27:55] [Info]      Checking SMB signing requirement on ps1-dp.mayyhem.com
+[2026-07-28 16:27:55] [Info]      Enumerating SMB shares on ps1-dp.mayyhem.com
+[2026-07-28 16:27:55] [Success]   Found distribution point role for site: PS1
+[2026-07-28 16:27:55] [Success]   SMB collection completed
+[2026-07-28 16:27:55] [Info]      Checking SMB signing requirement on ps1-psv.mayyhem.com
+[2026-07-28 16:27:58] [Success]   SMB collection completed
+[2026-07-28 16:27:58] [Info]      Target ps1-pss.mayyhem.com already collected, skipping SMB
+[2026-07-28 16:27:58] [Info]      Target cas-pss.mayyhem.com already collected, skipping SMB
+[2026-07-28 16:27:58] [Info]      Checking SMB signing requirement on cas-db.mayyhem.com
+[2026-07-28 16:27:58] [Info]      Enumerating SMB shares on cas-db.mayyhem.com
+[2026-07-28 16:27:58] [Success]   SMB collection completed
+[2026-07-28 16:27:58] [Info]      Checking SMB signing requirement on ps1-dev2.mayyhem.com
+[2026-07-28 16:27:58] [Info]      Enumerating SMB shares on ps1-dev2.mayyhem.com
+[2026-07-28 16:27:58] [Success]   SMB collection completed
+[2026-07-28 16:27:58] [Info]      Target ps1-sms.mayyhem.com already collected, skipping SMB
+[2026-07-28 16:27:58] [Info]      Checking SMB signing requirement on ps1-db.mayyhem.com
+[2026-07-28 16:27:58] [Info]      Enumerating SMB shares on ps1-db.mayyhem.com
+[2026-07-28 16:27:58] [Success]   SMB collection completed
+[2026-07-28 16:27:58] [Info]      Checking SMB signing requirement on ps1-mp.mayyhem.com
+[2026-07-28 16:27:58] [Info]      Enumerating SMB shares on ps1-mp.mayyhem.com
+[2026-07-28 16:27:58] [Success]   SMB collection completed
+[2026-07-28 16:27:58] [Info]      Checking SMB signing requirement on cas-scp.mayyhem.com
+[2026-07-28 16:28:00] [Success]   SMB collection completed
+[2026-07-28 16:28:00] [Info]      Checking SMB signing requirement on ps2-pss.mayyhem.com
+[2026-07-28 16:28:03] [Success]   SMB collection completed
+[2026-07-28 16:28:03] [Info]      Attempting Remote Registry collection on: ps1-psv.mayyhem.com
+[2026-07-28 16:28:08] [Warning]   Remote Registry connection timed out for ps1-psv.mayyhem.com after 5 seconds
+[2026-07-28 16:28:08] [Warning]   Remote Registry connection failed for ps1-psv.mayyhem.com
+[2026-07-28 16:28:09] [Info]      Memory usage: 95.95% (11.51GB / 11.99GB)
+[2026-07-28 16:28:09] [Info]      Attempting Remote Registry collection on: cas-db.mayyhem.com
+[2026-07-28 16:28:10] [Success]   Remote Registry connection successful: cas-db.mayyhem.com
+[2026-07-28 16:28:10] [Info]      Checking SMB signing requirement on cas-db.mayyhem.com
+[2026-07-28 16:28:10] [Info]      Querying Triggers registry key on cas-db.mayyhem.com for site code
+[2026-07-28 16:28:11] [Info]      Querying Components registry key on cas-db.mayyhem.com for SCCM component servers
+[2026-07-28 16:28:11] [Info]      Querying Multisite Component Servers registry key on cas-db.mayyhem.com for site 
+database servers
+[2026-07-28 16:28:12] [Info]      Querying CurrentUser registry key on cas-db.mayyhem.com for logged-in user SID
+[2026-07-28 16:28:13] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:28:13] [Success]   Remote Registry collection completed for cas-db.mayyhem.com
+[2026-07-28 16:28:13] [Info]      Attempting Remote Registry collection on: ps1-db.mayyhem.com
+[2026-07-28 16:28:14] [Success]   Remote Registry connection successful: ps1-db.mayyhem.com
+[2026-07-28 16:28:14] [Info]      Checking SMB signing requirement on ps1-db.mayyhem.com
+[2026-07-28 16:28:14] [Info]      Querying Triggers registry key on ps1-db.mayyhem.com for site code
+[2026-07-28 16:28:15] [Info]      Querying Components registry key on ps1-db.mayyhem.com for SCCM component servers
+[2026-07-28 16:28:15] [Info]      Querying Multisite Component Servers registry key on ps1-db.mayyhem.com for site 
+database servers
+[2026-07-28 16:28:16] [Info]      Querying CurrentUser registry key on ps1-db.mayyhem.com for logged-in user SID
+[2026-07-28 16:28:17] [Success]   Found current user: domainuser (S-1-5-21-3242052782-1287495003-4091326449-1104)
+[2026-07-28 16:28:17] [Success]   Remote Registry collection completed for ps1-db.mayyhem.com
+[2026-07-28 16:28:17] [Info]      Attempting Remote Registry collection on: cas-scp.mayyhem.com
+[2026-07-28 16:28:23] [Warning]   Remote Registry connection timed out for cas-scp.mayyhem.com after 5 seconds
+[2026-07-28 16:28:23] [Warning]   Remote Registry connection failed for cas-scp.mayyhem.com
+[2026-07-28 16:28:23] [Info]      Memory usage: 96.16% (11.53GB / 11.99GB)
+[2026-07-28 16:28:23] [Success]   All selected phases completed. Once phases ran once; per-host phases ran for every 
+discovered target.
+[2026-07-28 16:28:23] [Success]   SCCM collection completed.
+[2026-07-28 16:28:23] [Info]      Starting post-processing of nodes and edges
+[2026-07-28 16:28:52] [Info]      Collection Statistics:
+[2026-07-28 16:28:52] [Info]      Total targets identified: 11
+[2026-07-28 16:28:52] [Success]   Successfully collected: 3
+[2026-07-28 16:28:52] [Warning]   Failed to collect: 8
+[2026-07-28 16:28:52] [Info]      Total nodes created: 159
+[2026-07-28 16:28:52] [Info]      Total edges created: 452
+[2026-07-28 16:28:52] [Info]      Writing BloodHound data...
+[2026-07-28 16:28:52] [Info]      Created output file: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\computers.json
+[2026-07-28 16:28:52] [Info]      Writing 25 computers nodes to: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\computers.json
+[2026-07-28 16:28:52] [Info]      Current file size: 175 bytes
+Cumulative file size: 175 bytes across 1 files
+[2026-07-28 16:28:52] [Info]      Current file size: 175 bytes
+Cumulative file size: 175 bytes across 1 files (periodic update)
+[2026-07-28 16:28:53] [Success]   Output written to 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\computers.json
+[2026-07-28 16:28:53] [Info]      File size: 21.75 KB
+[2026-07-28 16:28:53] [Info]      Created output file: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\groups.json
+[2026-07-28 16:28:53] [Info]      Writing 13 groups nodes to: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\groups.json
+[2026-07-28 16:28:53] [Info]      Current file size: 175 bytes
+Cumulative file size: 21.92 KB across 2 files
+[2026-07-28 16:28:53] [Success]   Output written to 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\groups.json
+[2026-07-28 16:28:53] [Info]      File size: 6.13 KB
+[2026-07-28 16:28:53] [Info]      Created output file: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\users.json
+[2026-07-28 16:28:53] [Info]      Writing 16 users nodes to: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\users.json
+[2026-07-28 16:28:53] [Info]      Current file size: 175 bytes
+Cumulative file size: 28.04 KB across 3 files
+[2026-07-28 16:28:53] [Success]   Output written to 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\users.json
+[2026-07-28 16:28:53] [Info]      File size: 7.15 KB
+[2026-07-28 16:28:53] [Info]      Created output file: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\sccm.json
+[2026-07-28 16:28:53] [Info]      Writing to file: 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\sccm.json
+[2026-07-28 16:28:53] [Info]      Current file size: 230 bytes
+Cumulative file size: 35.25 KB across 4 files
+[2026-07-28 16:28:57] [Info]      Current file size: 115.95 KB
+Cumulative file size: 150.97 KB across 4 files (periodic update)
+[2026-07-28 16:29:02] [Success]   Wrote 105 SCCM nodes and 452 edges
+[2026-07-28 16:29:02] [Info]      Current file size: 173.06 KB
+Cumulative file size: 208.08 KB across 4 files (finalizing)
+[2026-07-28 16:29:02] [Success]   Output written to 
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\sccm.json
+[2026-07-28 16:29:02] [Info]      File size: 173.07 KB
+[2026-07-28 16:29:02] [Info]      Output files created:
+[2026-07-28 16:29:02] [Info]        
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\computers.json - 21.75 KB
+[2026-07-28 16:29:02] [Info]        
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\groups.json - 6.13 KB
+[2026-07-28 16:29:02] [Info]        
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\users.json - 7.15 KB
+[2026-07-28 16:29:02] [Info]        C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\sccm.json 
+- 173.07 KB
+[2026-07-28 16:29:02] [Info]        
+C:\Users\domainadmin\AppData\Local\Temp\ConfigManBearPig-20260728-162852\seed_data.json - 4.9 KB
+[2026-07-28 16:29:02] [Info]      Total size: 213 KB across 5 files
+[2026-07-28 16:29:02] [Success]   ZIP archive created successfully: bloodhound-sccm-20260728-162902.zip (17.76 KB)
+[2026-07-28 16:29:02] [Info]      Compression ratio: 91.7% reduction
+[2026-07-28 16:29:02] [Info]      Deleting original files...
+[2026-07-28 16:29:02] [Success]   Successfully deleted 5 original files
+[2026-07-28 16:29:02] [Success]   Final output: C:\Users\domainadmin\Desktop\OpenHound\sccm\tests\live-comparison\privi
+leged_check\cmbp\pe-off\bloodhound-sccm-20260728-162902.zip
+[2026-07-28 16:29:02] [Success]   ConfigManBearPig completed in 6m 9s
+
+================================================================================
+ConfigManBearPig execution completed
+================================================================================

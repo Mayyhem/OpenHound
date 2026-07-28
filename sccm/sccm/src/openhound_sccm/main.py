@@ -35,6 +35,7 @@ import dlt
 from .convert_pipeline import emit_graph_from_duckdb
 from .lookup import SCCMLookup
 from .models.computer import ComputerNode
+from .models.container import ContainerNode
 from .models.group import GroupNode
 from .models.graph_edge import GraphEdge
 from .models.mssql_database import MSSQLDatabase
@@ -384,17 +385,54 @@ def _dispatch_bloodhound_upload(
     upload_results: bool,
     logger: logging.Logger,
 ) -> None:
-    """Build the uploader and push schema/results. No-op if not configured."""
+    """Build the uploader and push schema/results, reporting the outcome to the
+    operator on stdout and failing the command (exit 1) on any upload error.
+
+    Feedback goes through ``typer.echo`` rather than the logging framework: the
+    upload-only paths (``--skip-collection`` / ``--upload-dir``) run before any
+    Collector/Converter finalizes OpenHound's console log handler, so logging
+    alone would be invisible (that handler defaults to ERROR). See ope-feb0.
+    """
+    if not url:
+        # No -B / --bloodhound-url supplied: upload was not requested. Stay silent.
+        logger.debug("BloodHound upload not configured (no URL); skipping")
+        return
+
     uploader = build_uploader(url, token_id, token_key, logger_=logger)
     if uploader is None:
-        logger.debug("BloodHound upload not configured; skipping")
-        return
+        # A URL was given but credentials are incomplete -- the operator asked to
+        # upload, so fail loudly instead of silently doing nothing.
+        typer.echo(
+            "BloodHound upload FAILED: a token is required "
+            "(pass --token-id/--token-key or -B <token-id>:<token-key>@<url>).",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Uploading to BloodHound at {url} ...")
     schemas = load_sccm_schemas(disable_possible) if upload_schema else []
-    run_upload(
+    summary = run_upload(
         uploader=uploader, schemas=schemas, results_dir=results_dir,
         work_dir=work_dir, upload_schema=upload_schema, upload_results=upload_results,
         logger=logger,
     )
+    if summary.ok:
+        typer.echo(
+            f"BloodHound upload complete: {summary.schemas_uploaded} schema(s), "
+            f"{summary.files_uploaded} results file(s)."
+        )
+        return
+
+    # Upload had failures -- surface them and exit non-zero so a script/operator
+    # cannot mistake a silent failure for success. Collected/converted output on
+    # disk is untouched.
+    typer.echo(
+        f"BloodHound upload FAILED ({len(summary.errors)} error(s)): "
+        f"{'; '.join(summary.errors) or 'see logs'}",
+        err=True,
+    )
+    typer.echo("Your collected/converted output on disk is intact.", err=True)
+    raise typer.Exit(code=1)
 
 
 # A level above CRITICAL (50) that no record can ever reach — used to mute a
@@ -1143,6 +1181,14 @@ def collect_sccm(
     # ---- Performance ----
     threads: int = typer.Option(10, "-t", "--threads", rich_help_panel="Performance", help="Number of machines collected concurrently (per-host worker pool size; default 10)."),
     # ---- Output ----
+    clean: bool = typer.Option(
+        False, "--clean", rich_help_panel="Output",
+        help="Discard a previous collection in OUTPUT_PATH before collecting: removes the "
+        "sccm/ dataset dir, graph/, and lookup.duckdb. Without it, dlt APPENDS beside the "
+        "old load packages and preprocess merges both runs' rows into one graph (a table "
+        "this run finds empty keeps the old rows entirely). Per-run logs and "
+        "integration/compare reports are timestamped and are always kept.",
+    ),
     run_all: bool = typer.Option(
         False, "--run-all", rich_help_panel="Output",
         help="After collecting, automatically run preprocess and convert in-process so a "
@@ -1259,6 +1305,13 @@ def collect_sccm(
     _debug_logger_levels = [(lg, lg.level) for lg in _debug_loggers]
     for lg in _debug_loggers:
         lg.setLevel(logging.DEBUG)
+
+    # Deliberately OUTSIDE the try below: if --clean cannot remove a locked artifact we
+    # must abort, not fall through into the collection error handling and quietly collect
+    # onto stale data. Runs after the --skip-collection early return, so an upload-only
+    # invocation never touches an existing dataset.
+    _clean_previous_collection(output_path, clean)
+
     try:
         _warn_for_suspicious_cli_arguments()
         flag_kwargs = locals()
@@ -1586,6 +1639,82 @@ def _log_collect_summary(
     logger.info("Next steps: '%s' then '%s'", preprocess_cmd, convert_cmd)
 
 
+# Artifacts a previous run leaves behind that FEED or FORM the graph. Everything else
+# in the output dir (collect_full_<ts>.log, collect_issues_<ts>.log,
+# integration_results-<ts>.json, compare-<ts>.json) is uniquely named per run, never read
+# back, and is often what you want to diff against afterwards -- so it is deliberately kept.
+_REUSABLE_ARTIFACTS = ("sccm", "graph", "lookup.duckdb")
+
+
+def _prior_load_packages(output_path: pathlib.Path) -> tuple[int, Optional[str]]:
+    """Return (load-package count, oldest package's date) for the dataset dir.
+
+    Returns ``(0, None)`` when there is no bucket. NOTE: one collection writes SEVERAL
+    load packages (dlt emits one per pipeline run, and the phased pipeline runs more than
+    once), so the count is NOT a count of previous collections -- measured on a live run:
+    3 packages for a single collect. The oldest package's date is the actionable signal,
+    because it is what tells an operator the directory holds data from another day.
+    """
+    loads = output_path / "sccm" / "_dlt_loads"
+    if not loads.is_dir():
+        return 0, None
+    files = [p for p in loads.iterdir() if p.is_file()]
+    if not files:
+        return 0, None
+    oldest = min(f.stat().st_mtime for f in files)
+    return len(files), datetime.datetime.fromtimestamp(oldest).strftime("%Y-%m-%d %H:%M")
+
+
+def _clean_previous_collection(output_path: pathlib.Path, clean: bool) -> None:
+    """Discard (``--clean``) or warn about a previous collection in *output_path*.
+
+    Why this exists: re-running into a used directory does NOT overwrite the raw data.
+    dlt appends a new load package beside the old ones and preprocess reads every
+    ``.jsonl.gz`` in each table dir, so the previous run's rows are UNIONed into this
+    run's graph. Worse, a table the new run finds empty keeps only the OLD rows, silently
+    resurrecting infrastructure that no longer exists. Both are invisible: the exit code
+    is 0 and ``graph/`` timestamps are fresh either way.
+    """
+    prior, oldest = _prior_load_packages(output_path)
+    present = [n for n in _REUSABLE_ARTIFACTS if (output_path / n).exists()]
+
+    if not clean:
+        if prior or present:
+            logger.warning(
+                "%s already contains a previous collection (%d dlt load package(s), oldest "
+                "written %s; %s). Those rows WILL be merged into this run's graph, and any "
+                "table this run finds empty will keep the OLD rows entirely. Pass --clean to "
+                "discard them first.",
+                output_path, prior, oldest or "unknown",
+                ", ".join(present) or "no dataset dir",
+            )
+        else:
+            logger.debug("%s holds no previous collection; nothing to clean", output_path)
+        return
+
+    if not present:
+        logger.info("--clean: %s holds no previous collection artifacts; nothing to remove", output_path)
+        return
+
+    for name in present:
+        target = output_path / name
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            logger.info("--clean: removed %s", target)
+        except OSError as ex:
+            # A locked lookup.duckdb (BloodHound/DBeaver holding it open) is the likely
+            # cause. Fail loudly rather than proceeding onto stale data.
+            raise typer.BadParameter(
+                f"--clean could not remove {target}: {ex}. Close anything holding it open, "
+                f"or delete it manually, then re-run."
+            ) from ex
+    logger.info("--clean: discarded %d prior load package(s) (oldest %s) from %s",
+                prior, oldest or "unknown", output_path)
+
+
 def _run_e2e_after_collect(output_path: pathlib.Path, progress: ProgressOption) -> "StagePaths":
     """Chain preprocess + convert in-process after a successful --run-all collect.
 
@@ -1722,6 +1851,10 @@ def _preproc_table_map() -> dict[str, str]:
         "ldap_network_boot_servers",
         "ldap_pattern_matches",
         "ldap_system_management_dacl",
+        # Task 12: routed out of ldap_system_management_dacl's own generator via
+        # dlt.mark.with_table_name (same resource, a second destination table) --
+        # not a separate @app.resource, so it has no name= of its own to point to.
+        "ldap_smc_group_members",
         # DNS discovery phase (dns.py @app.resource name=...)
         "dns_management_points",
         # Local discovery phase (local.py @app.resource name=...)
@@ -1829,6 +1962,9 @@ AD_NODE_SPECS: list[tuple[str, type]] = [
     ("node_computer", ComputerNode),
     ("node_user", UserNode),
     ("node_group", GroupNode),
+    # Container (Task 11, Tier A+) is a standard BloodHound base kind, like the
+    # three above -- its id (objectGUID) merges with SharpHound's own node.
+    ("node_container", ContainerNode),
     # node_backfill is LAST so a real AD node wins any id overlap via append semantics.
     # Every backfill stub is an AD principal (User/Group/Computer or bare Base).
     ("node_backfill", StubNode),

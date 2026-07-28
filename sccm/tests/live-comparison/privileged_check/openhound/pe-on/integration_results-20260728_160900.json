@@ -1,0 +1,591 @@
+{
+  "passed": 63,
+  "failed": 9,
+  "skipped": 1,
+  "results": [
+    {
+      "case_id": "edge-localadminrequired-cas-pss-to-cas-db",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The CAS primary site server has local administrator rights on the CAS site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-cas-pss-to-cas-scp",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The CAS primary site server has local administrator rights on the service connection point server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-pss-to-ps1-db",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 primary site server has local administrator rights on the site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-pss-to-ps1-sms",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 primary site server has local administrator rights on the SMS Provider server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-pss-to-ps1-mp",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 primary site server has local administrator rights on the management point server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-pss-to-ps1-dp",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 primary site server has local administrator rights on the distribution point server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-pss-to-ps1-psv",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 primary site server has local administrator rights on the passive site server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-ps1-psv-to-ps1-pss",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS1 passive site server has local administrator rights on the primary site server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-localadminrequired-negative-ps2-pss-to-ps1-db",
+      "kind": "SCCM_LocalAdminRequired",
+      "description": "The PS2 primary site server does not have local administrator rights on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "correctly absent",
+      "matched_count": 0
+    },
+    {
+      "case_id": "edge-coerceandrelaytoadminservice-ps1",
+      "kind": "SCCM_CoerceAndRelayToAdminService",
+      "description": "Authenticated Users group can coerce the PS1 primary site server and relay authentication to the AdminService on the PS1 SMS Provider, coerce the PS1 primary site server and relay authentication to the AdminService on the PS1 passive site server, coerce the PS1 passive site server and relay authentication to the AdminService on the PS1 primary site server, and coerce the PS1 passive site server and relay authentication to the AdminService on the PS1 SMS Provider",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytomssql-cas",
+      "kind": "MSSQL_CoerceAndRelayToMSSQL",
+      "description": "Authenticated Users group can coerce and relay authentication to the MSSQL service on the CAS site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytomssql-ps1-pss",
+      "kind": "MSSQL_CoerceAndRelayToMSSQL",
+      "description": "Authenticated Users group can coerce and relay authentication to the MSSQL service on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytomssql-ps1-sms",
+      "kind": "MSSQL_CoerceAndRelayToMSSQL",
+      "description": "Authenticated Users group can coerce and relay authentication to the MSSQL service on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytomssql-ps1-psv",
+      "kind": "MSSQL_CoerceAndRelayToMSSQL",
+      "description": "Authenticated Users group can coerce and relay authentication to the MSSQL service on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytosmb-ps1-sms",
+      "kind": "SCCM_CoerceAndRelayToSMB",
+      "description": "Authenticated Users group can coerce and relay authentication to the SMB service on the PS1 SMS Provider",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytosmb-ps1-db",
+      "kind": "SCCM_CoerceAndRelayToSMB",
+      "description": "Authenticated Users group can coerce and relay authentication to the SMB service on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytosmb-ps1-pss",
+      "kind": "SCCM_CoerceAndRelayToSMB",
+      "description": "Authenticated Users group can coerce and relay authentication to the SMB service on the PS1 primary site server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-coerceandrelaytosmb-ps1-psv",
+      "kind": "SCCM_CoerceAndRelayToSMB",
+      "description": "Authenticated Users group can coerce and relay authentication to the SMB service on the PS1 passive site server",
+      "outcome": "FAIL",
+      "detail": "not found",
+      "matched_count": 0
+    },
+    {
+      "case_id": "edge-hassession-cas-db",
+      "kind": "HasSession",
+      "description": "The MSSQL service account has an active session on the CAS site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-hassession-ps1-db",
+      "kind": "HasSession",
+      "description": "The MSSQL service account has an active session on the PS1 site database server",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-cas-server-cm-cas-database",
+      "kind": "MSSQL_Contains",
+      "description": "The CAS site database MSSQL server contains the CM_<SiteCode> database",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-cas-server-cas-pss-login",
+      "kind": "MSSQL_Contains",
+      "description": "The CAS site database MSSQL server contains the CAS-PSS$ login",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-cas-database-db-owner-role",
+      "kind": "MSSQL_Contains",
+      "description": "The CAS site database contains the db_owner database role",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-cas-database-cas-pss-user",
+      "kind": "MSSQL_Contains",
+      "description": "The CAS site database contains the CAS-PSS$ user",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-ps1-server-cm-ps1-database",
+      "kind": "MSSQL_Contains",
+      "description": "The PS1 site database MSSQL server contains the CM_<SiteCode> database",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-ps1-server-ps1-pss-login",
+      "kind": "MSSQL_Contains",
+      "description": "The PS1 site database MSSQL server contains the PS1-PSS$ login",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-ps1-database-db-owner-role",
+      "kind": "MSSQL_Contains",
+      "description": "The PS1 site database contains the db_owner database role",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-ps1-database-ps1-pss-user",
+      "kind": "MSSQL_Contains",
+      "description": "The PS1 site database contains the PS1-PSS$ user",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-contains-servers-sysadmin-role",
+      "kind": "MSSQL_Contains",
+      "description": "The MSSQL servers (cas-db, ps1-db, and ps1-psv) contain the sysadmin server role",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 3
+    },
+    {
+      "case_id": "edge-controldb-db-owner-site-databases",
+      "kind": "MSSQL_ControlDB",
+      "description": "The db_owner MSSQL database role controls the site database on cas-db and ps1-db",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-controlserver-sysadmin-server-instances",
+      "kind": "MSSQL_ControlServer",
+      "description": "The sysadmin MSSQL server role controls the server instance on cas-db, ps1-db, and ps1-psv",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 3
+    },
+    {
+      "case_id": "edge-executeonhost-servers-hosts",
+      "kind": "MSSQL_ExecuteOnHost",
+      "description": "The MSSQL servers (cas-db, ps1-db, and ps1-psv) can execute commands on their hosts",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 4)",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-getadmintgs-service-account-server-instance",
+      "kind": "MSSQL_GetAdminTGS",
+      "description": "The site database MSSQL service account can request a TGS for any domain login on the server instance",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-gettgs-service-account-logins",
+      "kind": "MSSQL_GetTGS",
+      "description": "The site database MSSQL service account can request a TGS for any domain login on the server instance (CAS-PSS, PS1-PSS, PS1-PSV, and PS1-SMS)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-haslogin-computers-logins",
+      "kind": "MSSQL_HasLogin",
+      "description": "The primary and passive site server and SMS Provider computers have logins on the MSSQL server instances (CAS-PSS -> CAS-DB, PS1-PSS -> PS1-DB, PS1-SMS -> PS1-DB, PS1-PSV -> PS1-DB)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-hostfor-servers-computers",
+      "kind": "MSSQL_HostFor",
+      "description": "The MSSQL server computers (cas-db, ps1-db, and ps1-psv) host the MSSQL server instances",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 4)",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-ismappedto-mssql-logins-dbusers",
+      "kind": "MSSQL_IsMappedTo",
+      "description": "The primary and passive site server and SMS Provider MSSQL server logins (CAS-PSS, PS1-PSS, PS1-PSV, and PS1-SMS) are mapped to database users in the site databases",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-memberof-dbusers-db-owner-role",
+      "kind": "MSSQL_MemberOf",
+      "description": "The primary and passive site server and SMS Provider MSSQL database users (CAS-PSS, PS1-PSS, PS1-PSV, and PS1-SMS) are members of the db_owner database role in the site databases",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-memberof-logins-sysadmin-role",
+      "kind": "MSSQL_MemberOf",
+      "description": "The primary and passive site server and SMS Provider MSSQL server logins (CAS-PSS, PS1-PSS, PS1-PSV, and PS1-SMS) are members of the sysadmin server role on the MSSQL server instances",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "edge-serviceaccountfor-server-instances",
+      "kind": "MSSQL_ServiceAccountFor",
+      "description": "The site database MSSQL service account is the service account for the MSSQL server instances (CAS and PS1 primary and passive)",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 3)",
+      "matched_count": 3
+    },
+    {
+      "case_id": "edge-samehostas-clientdevice-to-computer-ps1-dev",
+      "kind": "SCCM_SameHostAs",
+      "description": "The PS1 client device is the same host as the domain joined computer (bi-directional)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-samehostas-computer-to-clientdevice-ps1-dev",
+      "kind": "SCCM_SameHostAs",
+      "description": "The PS1 client device is the same host as the domain joined computer (bi-directional)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-adminsreplicatedto-ps1-to-cas",
+      "kind": "SCCM_AdminsReplicatedTo",
+      "description": "The PS1 primary site has the same admins as the CAS primary site",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-adminsreplicatedto-cas-to-ps1",
+      "kind": "SCCM_AdminsReplicatedTo",
+      "description": "The PS1 primary site has the same admins as the CAS primary site (both directions)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-adminsreplicatedto-negative-sec-not-replicated",
+      "kind": "SCCM_AdminsReplicatedTo",
+      "description": "Admin users in secondary sites are NOT replicated to primary sites (no replication from SEC to PS1 or CAS)",
+      "outcome": "PASS",
+      "detail": "correctly absent",
+      "matched_count": 0
+    },
+    {
+      "case_id": "edge-allpermissions-domainadmin-all-sites",
+      "kind": "SCCM_AllPermissions",
+      "description": "The Full Administrator with all collections has all permissions to all primary sites in the hierarchy",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-assignallpermissions-smsprovider-hosts",
+      "kind": "SCCM_AssignAllPermissions",
+      "description": "Domain computers hosting the SMS Provider role (CAS-PSS, PS1-PSS, PS1-PSV, PS1-SMS) can assign all permissions to any primary site in the hierarchy (CAS, PS1)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 8
+    },
+    {
+      "case_id": "edge-assignallpermissions-site-databases",
+      "kind": "SCCM_AssignAllPermissions",
+      "description": "SCCM primary site databases (CAS-DB\\CM_CAS and PS1-DB\\CM_PS1) can assign all permissions to their primary site in the hierarchy (CAS, PS1)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-assignspecificpermissions-constraintless",
+      "kind": "SCCM_AssignSpecificPermissions",
+      "description": "SCCM_AssignSpecificPermissions edges (constraint-less in the PS kit; presence is not asserted)",
+      "outcome": "SKIP",
+      "detail": "coverage placeholder",
+      "matched_count": 0
+    },
+    {
+      "case_id": "edge-contains-sites-admin-user",
+      "kind": "SCCM_Contains",
+      "description": "The CAS and PS1 primary sites contain an SCCM admin user",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-contains-sites-full-admin-role",
+      "kind": "SCCM_Contains",
+      "description": "The CAS and PS1 primary sites contain the Full Administrator security role",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-contains-sites-sms00001-collection",
+      "kind": "SCCM_Contains",
+      "description": "The CAS and PS1 primary sites contain the SMS00001 collection",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 2
+    },
+    {
+      "case_id": "edge-fulladministrator-domainadmin-client-devices",
+      "kind": "SCCM_FullAdministrator",
+      "description": "The domainadmin SCCM admin user has the Full Administrator security role over all client devices in the hierarchy",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 19)",
+      "matched_count": 19
+    },
+    {
+      "case_id": "edge-hasadlastlogonuser-ps1-dev-domainuser",
+      "kind": "SCCM_HasADLastLogonUser",
+      "description": "The PS1 client device has domainuser as the last logged on user in Active Directory",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-hasclient-ps1-site-ps1-dev",
+      "kind": "SCCM_HasClient",
+      "description": "PS1-DEV is a client of the PS1 site",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-hascurrentuser-ps1-dev-domainuser",
+      "kind": "SCCM_HasCurrentUser",
+      "description": "The PS1 client device has domainuser as the current logged on user (requires manual addition of user device affinity after Ludus lab build)",
+      "outcome": "FAIL",
+      "detail": "not found",
+      "matched_count": 0
+    },
+    {
+      "case_id": "edge-hasmember-sms00001-ps1-dev",
+      "kind": "SCCM_HasMember",
+      "description": "The SMS00001 collection contains the PS1 client device",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-hasprimaryuser-ps1-dev-domainuser",
+      "kind": "SCCM_HasPrimaryUser",
+      "description": "The PS1 client device has domainuser as the primary user",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-isassigned-domainadmin-full-admin-role",
+      "kind": "SCCM_IsAssigned",
+      "description": "The domainadmin SCCM admin user is assigned the Full Administrator security role in the CAS root site (plus one dupe that BloodHound dedupes)",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 1)",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-ismappedto-sccm-domainadmin-adminuser",
+      "kind": "SCCM_IsMappedTo",
+      "description": "The domainadmin user is mapped to an SCCM admin user in the CAS primary site (plus one dupe that BloodHound dedupes)",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 1)",
+      "matched_count": 1
+    },
+    {
+      "case_id": "edge-ismappedto-sccm-negative-domainuser-not-mapped",
+      "kind": "SCCM_IsMappedTo",
+      "description": "The domainuser user is NOT mapped to an SCCM admin user in any primary site",
+      "outcome": "PASS",
+      "detail": "correctly absent",
+      "matched_count": 0
+    },
+    {
+      "case_id": "node-site-count",
+      "kind": "SCCM_Site",
+      "description": "Exactly 3 SCCM sites (CAS + PS1 + secondary)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 3
+    },
+    {
+      "case_id": "node-site-has-sitecode",
+      "kind": "SCCM_Site",
+      "description": "Every SCCM_Site carries a siteCode",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 3
+    },
+    {
+      "case_id": "node-clientdevice-count",
+      "kind": "SCCM_ClientDevice",
+      "description": "At least 19 SCCM client devices across the hierarchy",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 20
+    },
+    {
+      "case_id": "node-collection-count",
+      "kind": "SCCM_Collection",
+      "description": "At least 10 SCCM collections across the hierarchy",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 10
+    },
+    {
+      "case_id": "node-adminuser-count",
+      "kind": "SCCM_AdminUser",
+      "description": "At least 3 SCCM admin users across the hierarchy",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "node-securityrole-count",
+      "kind": "SCCM_SecurityRole",
+      "description": "At least 17 SCCM security roles across the hierarchy",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 17
+    },
+    {
+      "case_id": "node-mssql-server-count",
+      "kind": "MSSQL_Server",
+      "description": "3 MSSQL servers discovered (CAS-DB, PS1-DB, PS1-PSV)",
+      "outcome": "FAIL",
+      "detail": "wrong count (found 4)",
+      "matched_count": 4
+    },
+    {
+      "case_id": "node-mssql-database-count",
+      "kind": "MSSQL_Database",
+      "description": "At least 3 MSSQL databases (one CM_<SiteCode> per primary site)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 3
+    },
+    {
+      "case_id": "node-mssql-login-count",
+      "kind": "MSSQL_Login",
+      "description": "At least 4 MSSQL logins (site server/provider machine accounts)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "node-mssql-databaseuser-count",
+      "kind": "MSSQL_DatabaseUser",
+      "description": "At least 4 MSSQL database users mapped from those logins",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 4
+    },
+    {
+      "case_id": "node-root-site-normalization",
+      "kind": "invariant",
+      "description": "AdminUser/SecurityRole/Collection node ids use the root site code",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 0
+    },
+    {
+      "case_id": "node-clientdevice-primary-site",
+      "kind": "invariant",
+      "description": "SCCM_ClientDevice belongs to a primary site (not the root)",
+      "outcome": "PASS",
+      "detail": "",
+      "matched_count": 0
+    }
+  ]
+}

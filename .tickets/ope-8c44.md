@@ -2,7 +2,7 @@
 id: ope-8c44
 status: open
 deps: []
-links: [Ope-8wi2]
+links: [Ope-8wi2, ope-feb0]
 created: 2026-07-24T13:45:49Z
 type: task
 priority: 2

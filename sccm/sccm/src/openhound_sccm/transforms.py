@@ -118,6 +118,21 @@ def _ensure_columns(
     ensure_columns(con, schema, table, coldefs, logger=logger)
 
 
+def _column_exists(con: duckdb.DuckDBPyConnection, schema: str, table: str, column: str) -> bool:
+    """True if *table* in *schema* currently has a column named *column*.
+
+    Backed by information_schema, which returns zero rows for a table that
+    doesn't exist yet — no try/except needed here (unlike a direct SELECT
+    against the table itself, which would raise CatalogException).
+    """
+    row = con.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+        [schema, table, column],
+    ).fetchone()
+    return row is not None
+
+
 # SCCM's former _arr was byte-identical to the shared arr_sql (normalize a
 # list-shaped column to VARCHAR[] whatever physical shape dlt produced). Pure SQL
 # string builder, no logging — alias directly.
@@ -189,12 +204,93 @@ def _principal_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     logger.info("principal_by_name built in schema %r", schema)
 
 
-def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+# 'None' / 'Undetermined' / '' are placeholders several collectors emit for an
+# unknown parent OR root (e.g. ldap_sites:197 for parent; MP capabilities can
+# in principle emit the same placeholders for root_site_code). Both columns
+# hold "a site code this collector may not have resolved yet", so both must
+# normalize these to NULL or the parentless-Primary root test in
+# _site_hierarchy silently never matches. One constant, one SQL fragment, so
+# every consumer (the arms below and the root query) agrees on what a
+# placeholder looks like -- previously the root query re-typed this list
+# inline and could drift from the arms' own normalization.
+_SITE_CODE_SENTINELS = ("None", "Undetermined", "")
+_SITE_CODE_SENTINEL_SQL = ", ".join(f"'{s}'" for s in _SITE_CODE_SENTINELS)
+
+
+def _norm_site_code(col: str) -> str:
+    """SQL fragment: a parent/root site-code column with sentinels normalized to NULL.
+
+    Casts to VARCHAR before comparing/upper-casing. When every row of *col* collected
+    this run is NULL -- the routine low-privilege shape this whole plan targets (e.g.
+    a single standalone Primary site genuinely has no parent to report) -- there is no
+    non-NULL value in the column to infer a type from, and DuckDB can infer it as
+    INTEGER instead of VARCHAR. A bare upper() on that then raises a BinderException;
+    _safe() swallows it as a logged skip, which silently drops the WHOLE arm -- not
+    just this column, but every other value (site_code, site_type, ...) that arm would
+    have contributed. The CAST makes this type-safe regardless of what DuckDB inferred
+    (same fix pattern already used ad hoc elsewhere in this file, e.g. for
+    restrict_receiving_ntlm_traffic / extended_protection).
+    """
+    c = f"CAST({col} AS VARCHAR)"
+    return f"CASE WHEN {c} IN ({_SITE_CODE_SENTINEL_SQL}) THEN NULL ELSE upper({c}) END"
+
+
+# Tables already consumed with their full hierarchy shape (type + parent + root);
+# re-reading them as bare codes in the discovery loop below would be harmless but
+# confusing in the logs.
+_HIERARCHY_SHAPED = frozenset({
+    "adminservice_site_definitions", "wmi_site_definitions", "ldap_management_points_raw",
+})
+
+
+def _bare_site_code_tables(con: duckdb.DuckDBPyConnection, schema: str) -> list[str]:
+    """Every raw table in *schema* carrying a site_code column, minus the ones
+    already loaded above with their parent/type (D5).
+
+    Discovered rather than hardcoded so a new collector that learns a site code
+    feeds the hierarchy automatically, and so absent tables need no _safe guard —
+    they simply aren't listed. A site_code appearing anywhere is evidence that
+    site exists, so widening the net cannot invent a site.
+
+    `_site_hierarchy` runs first in `transforms()`, before any node_*/edge_* table
+    exists, so those two guards below are pure defence for a future reordering —
+    they can't currently exclude anything. The underscore-prefixed and
+    `assumed_site_dbs` exclusions serve the same defensive purpose: they keep this
+    loop from ever feeding on transforms' own derived output if it is ever called
+    again after those tables exist. Every `LIKE` that targets a literal
+    underscore is `ESCAPE`d -- in DuckDB (as in standard SQL) an unescaped `_`
+    in a LIKE pattern is a single-character wildcard, so an unescaped
+    `'node_%'`/`'edge_%'`/`'_%'` would also match names like `nodeX...` or,
+    worse, match (and so silently exclude) every table name via the bare `_%`
+    guard.
+    """
+    rows = con.execute(
+        "SELECT table_name FROM information_schema.columns "
+        "WHERE table_schema = ? AND column_name = 'site_code' "
+        "  AND table_name NOT LIKE 'node\\_%' ESCAPE '\\' "
+        "  AND table_name NOT LIKE 'edge\\_%' ESCAPE '\\' "
+        "  AND table_name NOT LIKE '\\_%' ESCAPE '\\' "
+        "  AND table_name <> 'site_hierarchy' AND table_name <> 'assumed_site_dbs' "
+        "ORDER BY table_name",
+        [schema],
+    ).fetchall()
+    return [t for (t,) in rows if t not in _HIERARCHY_SHAPED]
+
+
+def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str, disable_possible_edges: bool) -> None:
     """Build site_code/parent_site_code/site_type, then stamp root_site_code.
 
-    Root = the CAS (site_type=4) if present, else a parentless Primary
-    (site_type=2), matching CMBP Get-HierarchyRoot (ps1:2620). Single-hierarchy
-    assumption (README Assumptions): one root per graph.
+    Root resolution is tried in order of strongest evidence first (D4/D5):
+      A. `ldap_management_points_raw.root_site_code` — the site the MP
+         capabilities XML itself names as root. Observed evidence, not derived,
+         so it wins over B/C and applies in BOTH flag modes.
+      B. CAS (site_type=4) if present, else a parentless Primary (site_type=2) —
+         matching CMBP Get-HierarchyRoot (ps1:2620). Also observed, both modes.
+      C. Only if A and B found nothing: a best-effort guess among the remaining
+         untyped-or-Primary sites (never a Secondary — see Step C below), gated
+         by `disable_possible_edges` except in the single-parentless-candidate
+         case, which is deduction rather than a guess.
+    Single-hierarchy assumption (README Assumptions): one root per graph.
     """
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
     con.execute(
@@ -202,23 +298,137 @@ def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"(site_code VARCHAR, parent_site_code VARCHAR, site_type INTEGER)"
     )
 
-    # Load from whichever site-definition sources were collected.
+    # Load from whichever site-definition sources were collected. site_code is
+    # upper()'d here for the same reason every other arm upper()s it: the
+    # collapse below groups by site_code, so if this privileged source and a
+    # low-priv source (LDAP/HTTP/SMB, all upper()'d) ever disagree only on
+    # casing for the same site, the un-normalized version would split into two
+    # rows -- fanning out root_site_code and mis-anchoring every SCCM-native id
+    # built from it. This was a latent risk introduced by D5 (before it, both
+    # arms here were the only feeders, so a self-consistent casing was
+    # guaranteed); site codes are already uppercase on live data, so this is a
+    # no-op there. Sentinel parents are normalized here too (IMPORTANT-4) --
+    # without it a privileged collection can still store a literal '' / 'None'
+    # parent instead of NULL, which would silently fail the parentless-Primary
+    # check in Step B below.
+    #
+    # site_code itself is cast to VARCHAR before upper() throughout this function
+    # (here and in every arm below), for the same type-safety reason _norm_site_code
+    # now casts: if site_code is all-NULL for a source's whole load, DuckDB can infer
+    # it as a non-VARCHAR type and a bare upper() would BinderException the entire
+    # arm away.
+    #
+    # But an all-NULL column is the FIXTURE shape, not the production one: dlt does
+    # not materialize an all-NULL column as some other type -- it drops the column
+    # entirely (models/raw_table.py, _ensure_columns' own docstring). A dropped
+    # column raises the exact same BinderException the CAST above guards against,
+    # so every raw column any arm below references must ALSO go through
+    # _ensure_columns first -- the CAST alone only protects the test-fixture shape.
+    # This mirrors the protection the bare-code loop already has via
+    # _column_exists/has_parent a few lines down; these three hierarchy-shaped arms
+    # never had it.
+    for _hs in ("adminservice_site_definitions", "wmi_site_definitions"):
+        _ensure_columns(con, schema, _hs, {
+            "site_code": "VARCHAR", "parent_site_code": "VARCHAR", "site_type": "VARCHAR",
+        })
     _safe(
         con,
         "site_hierarchy<-adminservice",
         f"INSERT INTO {schema}.site_hierarchy "
-        f"SELECT site_code, parent_site_code, TRY_CAST(site_type AS INTEGER) "
+        f"SELECT upper(CAST(site_code AS VARCHAR)), {_norm_site_code('parent_site_code')}, "
+        f"  TRY_CAST(site_type AS INTEGER) "
         f"FROM {schema}.adminservice_site_definitions",
     )
     _safe(
         con,
         "site_hierarchy<-wmi",
         f"INSERT INTO {schema}.site_hierarchy "
-        f"SELECT site_code, parent_site_code, TRY_CAST(site_type AS INTEGER) "
+        f"SELECT upper(CAST(site_code AS VARCHAR)), {_norm_site_code('parent_site_code')}, "
+        f"  TRY_CAST(site_type AS INTEGER) "
         f"FROM {schema}.wmi_site_definitions",
     )
 
-    # Collapse duplicate rows (same site_code from multiple sources).
+    # LDAP management-point capabilities already carry site type/parent/root
+    # (collectors/ldap.py _parse_mp_capabilities). Low-priv reachable; feed them
+    # so a domain-only bind still yields a hierarchy. String site_type -> INTEGER
+    # contract (1=Secondary, 2=Primary, 4=CAS). root_site_code is read separately
+    # in Step A below (it is not a site_hierarchy row column; it is used once to
+    # resolve root_code directly) -- ensured here too since Step A reads the same
+    # table and would otherwise hit the identical dropped-column BinderException
+    # (reviewer C1: collectors/ldap.py:35 defaults root_site_code to None, so a run
+    # where every MP's mSSMSCapabilities is empty/unparseable never populates it,
+    # and dlt drops the resulting all-NULL column entirely).
+    _ensure_columns(con, schema, "ldap_management_points_raw", {
+        "site_code": "VARCHAR", "parent_site_code": "VARCHAR", "site_type": "VARCHAR",
+        "root_site_code": "VARCHAR",
+    })
+    _safe(
+        con,
+        "site_hierarchy<-ldap_mp",
+        f"INSERT INTO {schema}.site_hierarchy "
+        f"SELECT DISTINCT upper(CAST(site_code AS VARCHAR)), {_norm_site_code('parent_site_code')}, "
+        f"  CASE site_type WHEN 'Central Administration Site' THEN 4 "
+        f"                 WHEN 'Primary Site' THEN 2 "
+        f"                 WHEN 'Secondary Site' THEN 1 ELSE NULL END "
+        f"FROM {schema}.ldap_management_points_raw WHERE site_code IS NOT NULL",
+    )
+
+    # D5: every other site-code source registers its bare code. No type/parent, so
+    # the collapse below lets any richer row for the same code win (max(site_type)).
+    # Track which tables actually inserted a row (IMPORTANT-8): several bare
+    # tables exist but carry only NULL site codes for every record they collect
+    # (e.g. adminservice_admins), so "N tables discovered" overstates what was
+    # actually learned -- log what contributed instead.
+    bare_tables = _bare_site_code_tables(con, schema)
+    contributed = []
+    for table in bare_tables:
+        # _bare_site_code_tables just confirmed this table exists (via
+        # information_schema, moments ago, on this same single-threaded
+        # connection), so this COUNT cannot hit a missing-table error. It
+        # references a dynamic column type, though (like every other query in
+        # this family), so a try/except still guards it for consistency: a
+        # LIST/STRUCT/BLOB-typed site_code would fail the CAST/upper() with a
+        # BinderException. This value only feeds the "which tables
+        # contributed" log line below, not site_hierarchy itself -- the
+        # _safe-wrapped INSERT further down is a separate statement and is
+        # unaffected either way -- so a failure here just falls back to
+        # "nothing counted" rather than aborting the loop.
+        try:
+            site_code_count = con.execute(
+                f"SELECT count(DISTINCT upper(CAST(site_code AS VARCHAR))) "
+                f"FROM {schema}.{table} WHERE site_code IS NOT NULL"
+            ).fetchone()[0]
+        except duckdb.BinderException as ex:
+            logger.debug(
+                "site_hierarchy: could not count distinct site codes in %r for the "
+                "contributor log line (%s); treating as zero", table, ex,
+            )
+            site_code_count = 0
+        # Some bare sources (e.g. http_management_points) never collected a
+        # parent_site_code column at all; referencing a column that doesn't
+        # exist would fail the whole SELECT, so fall back to a literal NULL.
+        has_parent = _column_exists(con, schema, table, "parent_site_code")
+        parent_expr = _norm_site_code("parent_site_code") if has_parent else "NULL"
+        _safe(
+            con,
+            f"site_hierarchy<-{table}",
+            f"INSERT INTO {schema}.site_hierarchy "
+            f"SELECT DISTINCT upper(CAST(site_code AS VARCHAR)), {parent_expr}, NULL "
+            f"FROM {schema}.{table} WHERE site_code IS NOT NULL",
+        )
+        if site_code_count:
+            contributed.append(table)
+    logger.info(
+        "site_hierarchy: %d of %d discovered bare-code source table(s) actually contributed a "
+        "site code in schema %r: %s",
+        len(contributed), len(bare_tables), schema, contributed,
+    )
+
+    # Collapse duplicate rows (same site_code from multiple sources). any_value
+    # skips NULLs (picks the first non-null value in the group), so a bare
+    # source's NULL parent never overwrites a richer source's real parent for
+    # the same site_code -- pinned by
+    # test_bare_source_null_parent_does_not_clobber_privileged_parent.
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.site_hierarchy AS "
         f"SELECT site_code, "
@@ -229,23 +439,208 @@ def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"GROUP BY site_code"
     )
 
-    # Determine the root: CAS (type 4) takes priority; fall back to a parentless
-    # Primary (type 2) for single-Primary hierarchies with no CAS.
-    root = con.execute(
-        f"SELECT site_code FROM {schema}.site_hierarchy WHERE site_type = 4 "
-        f"UNION ALL "
-        f"SELECT site_code FROM {schema}.site_hierarchy "
-        f"WHERE site_type = 2 "
-        f"  AND (parent_site_code IS NULL OR parent_site_code IN ('', 'None', 'Undetermined')) "
-        f"LIMIT 1"
-    ).fetchone()
+    # --- Infer the site types the collected sources could not state ---
+    # Only management-point capabilities carry an explicit site_type, and a CAS has no
+    # management point, so a CAS is NEVER typed directly: live 2026-07-28 low-priv run
+    # produced ldap_management_points_raw = [('PS1','Primary Site','CAS','CAS')] and
+    # nothing at all for CAS, leaving site_hierarchy = [('CAS',NULL,NULL),('PS1','CAS',2)].
+    # That silently cost every SCCM_AdminsReplicatedTo edge, because _edge_replication
+    # joins on `child.site_type = 2 AND parent.site_type = 4`.
+    #
+    # Both rules below are deductions from SCCM's hierarchy model, not guesses: a Primary
+    # site's parent can only be a CAS, and a site whose parent is a Primary can only be a
+    # Secondary. Each fires only where the type is currently unknown, so an explicitly
+    # collected type always wins.
+    for label, sql in (
+        ("cas-from-primary-parent",
+         f"UPDATE {schema}.site_hierarchy SET site_type = 4 WHERE site_type IS NULL "
+         f"AND site_code IN (SELECT parent_site_code FROM {schema}.site_hierarchy "
+         f"                  WHERE site_type = 2 AND parent_site_code IS NOT NULL)"),
+        ("secondary-from-primary-parent",
+         f"UPDATE {schema}.site_hierarchy SET site_type = 1 WHERE site_type IS NULL "
+         f"AND parent_site_code IN (SELECT site_code FROM {schema}.site_hierarchy "
+         f"                         WHERE site_type = 2)"),
+    ):
+        try:
+            n = con.execute(sql).fetchone()
+            changed = n[0] if n else 0
+            if changed:
+                logger.info("site_hierarchy: inferred site_type for %s site(s) via %s",
+                            changed, label)
+            else:
+                logger.debug("site_hierarchy: %s inferred nothing", label)
+        except duckdb.Error as ex:
+            # Never fatal: an un-inferred type only costs edges, whereas aborting
+            # preprocess costs the whole graph.
+            logger.warning("site_hierarchy: site_type inference %s failed: %s", label, ex)
 
-    root_code = root[0] if root else None
+    # --- Root resolution (strongest evidence first) ---
 
-    if root_code:
-        logger.info("site_hierarchy root resolved to %r in schema %r", root_code, schema)
-    else:
-        logger.warning("site_hierarchy: no root site found in schema %r", schema)
+    # Step A (D4/CRITICAL-2): LDAP MP capabilities directly report the site the
+    # site-hierarchy XML calls the root (RootSiteCode). This is observed
+    # evidence read straight off the wire, not something derived from collected
+    # types/parents, so it takes priority over Steps B/C and applies in BOTH
+    # flag modes -- consulting it isn't a guess.
+    try:
+        mp_root_rows = con.execute(
+            f"SELECT DISTINCT {_norm_site_code('root_site_code')} AS root_site_code "
+            f"FROM {schema}.ldap_management_points_raw "
+            f"WHERE root_site_code IS NOT NULL"
+        ).fetchall()
+    except duckdb.CatalogException:
+        # No LDAP management-point capabilities this run (an HTTP-only,
+        # SMB-only, or RemoteRegistry-only collection) -- fall through to Step B.
+        logger.debug("site_hierarchy: ldap_management_points_raw absent in schema %r; "
+                     "no MP-reported root to consult", schema)
+        mp_root_rows = []
+    except duckdb.BinderException as ex:
+        # Belt-and-suspenders: root_site_code is _ensure_columns'd onto this table
+        # above, so this branch should be unreachable via the column-dropped path
+        # (reviewer C1) it was originally written for -- BinderException is a
+        # SIBLING of CatalogException (not a subclass), so an unguarded reference
+        # to a dropped column would otherwise propagate uncaught and abort the
+        # entire preprocess run. But _ensure_columns now guarantees that specific
+        # cause is gone, so any BinderException actually reaching this handler is,
+        # BY DEFINITION, something else -- a typo, a bad cast, some other unguarded
+        # reference. WARNING (not DEBUG) + the real exception text (reviewer
+        # OVER-CATCH), so a genuine SQL bug here can't vanish silently under a
+        # hardcoded "missing root_site_code" diagnosis that no longer applies.
+        logger.warning(
+            "site_hierarchy: unexpected BinderException reading root_site_code from "
+            "ldap_management_points_raw in schema %r (%s); treating as no MP-reported "
+            "root and falling through to Step B", schema, ex,
+        )
+        mp_root_rows = []
+    mp_root_codes = sorted({code for (code,) in mp_root_rows if code is not None})
+
+    root_code = None
+    if len(mp_root_codes) == 1:
+        root_code = mp_root_codes[0]
+        logger.info(
+            "site_hierarchy: root %r observed directly via LDAP MP capabilities' RootSiteCode "
+            "in schema %r", root_code, schema,
+        )
+    elif len(mp_root_codes) > 1:
+        # More than one distinct RootSiteCode means more than one hierarchy was
+        # traversed (a multi-hierarchy environment). Still observed evidence --
+        # not a guess -- so this resolves in BOTH modes; pick deterministically.
+        root_code = min(mp_root_codes)
+        logger.warning(
+            "site_hierarchy: %d distinct RootSiteCode values reported by LDAP MP capabilities "
+            "%s in schema %r (multi-hierarchy environment); using %r deterministically.",
+            len(mp_root_codes), mp_root_codes, schema, root_code,
+        )
+    # else: no LDAP-reported root at all -- fall through to Step B.
+
+    # Step B: CAS (type 4) takes priority; fall back to a parentless Primary
+    # (type 2) for single-Primary hierarchies with no CAS. Only consulted when
+    # Step A found nothing. The sentinel IN-list reuses _SITE_CODE_SENTINEL_SQL
+    # (IMPORTANT-4) as a defensive backstop -- every arm above already
+    # normalizes sentinels to NULL at insert time, so this should never match
+    # a live row, but it keeps this query correct even if a future arm forgets.
+    if root_code is None:
+        root = con.execute(
+            f"SELECT site_code FROM {schema}.site_hierarchy WHERE site_type = 4 "
+            f"UNION ALL "
+            f"SELECT site_code FROM {schema}.site_hierarchy "
+            f"WHERE site_type = 2 "
+            f"  AND (parent_site_code IS NULL OR parent_site_code IN ({_SITE_CODE_SENTINEL_SQL})) "
+            f"LIMIT 1"
+        ).fetchone()
+        root_code = root[0] if root else None
+        if root_code is not None:
+            logger.info("site_hierarchy root resolved to %r in schema %r", root_code, schema)
+
+    # Step C (CRITICAL-1): neither A nor B found a root. Only untyped-or-Primary
+    # sites are ever viable roots: a Secondary (type 1) reports to something
+    # above it by definition and is excluded outright here, not merely
+    # deprioritized -- picking it would mint the whole graph under the wrong
+    # '@<root>' scope.
+    if root_code is None:
+        # Preferred pool: no known type, or explicitly Primary (2), AND no known
+        # parent. That is the same CAS-else-parentless-Primary shape the
+        # contract requires, just without a confirmed type for the untyped
+        # case -- so a SINGLE such site is deduction (it must be the root, the
+        # same way a lone parentless Primary is in Step B), not a guess, and
+        # resolves in BOTH modes.
+        preferred = [
+            code for (code,) in con.execute(
+                f"SELECT site_code FROM {schema}.site_hierarchy "
+                f"WHERE (site_type IS NULL OR site_type = 2) AND parent_site_code IS NULL "
+                f"ORDER BY site_code"
+            ).fetchall()
+        ]
+        if len(preferred) == 1:
+            root_code = preferred[0]
+            logger.info(
+                "site_hierarchy: single untyped-or-Primary, parentless site %r in schema %r; "
+                "using it as the root by deduction", root_code, schema,
+            )
+        elif len(preferred) > 1:
+            # More than one parentless untyped-or-Primary site: picking one IS
+            # an assumption, so evidence-only mode declines to make it. Leaving
+            # root_code None means SCCM-native ids lose their '@<root>' scope
+            # (transforms.py:1583), so say that plainly.
+            if disable_possible_edges:
+                logger.warning(
+                    "site_hierarchy: %d parentless untyped-or-Primary sites %s in schema %r and "
+                    "--disable-possible-edges is set, so no root is assumed. SCCM-native node ids "
+                    "will be minted without their '@<root>' scope and will not match a "
+                    "default-mode graph of the same environment. Collect with LDAP reachable "
+                    "(or pass --site-codes) to resolve a real root.",
+                    len(preferred), preferred, schema,
+                )
+            else:
+                root_code = min(preferred)
+                # WARNING here, because with more than one candidate the pick is
+                # alphabetical and the root -- plus every id and edge anchored to
+                # it -- may be wrong.
+                logger.warning(
+                    "site_hierarchy: %d parentless untyped-or-Primary sites %s in schema %r; none "
+                    "is confirmed as the root (no CAS/RootSiteCode observed), so %r was chosen "
+                    "alphabetically. Collect with LDAP reachable (or pass --site-codes) to anchor "
+                    "the root correctly.",
+                    len(preferred), preferred, schema, root_code,
+                )
+        else:
+            # No parentless candidate at all: every known untyped-or-Primary
+            # site reports to a parent that was never itself observed as a row
+            # (e.g. a Primary whose CAS wasn't collected). That parent is
+            # unresolved, so picking one of these is a guess too -- a weaker one
+            # than the parentless case above, since even the sole candidate's
+            # own parent is unknown.
+            fallback = [
+                code for (code,) in con.execute(
+                    f"SELECT site_code FROM {schema}.site_hierarchy "
+                    f"WHERE (site_type IS NULL OR site_type = 2) "
+                    f"ORDER BY site_code"
+                ).fetchall()
+            ]
+            if fallback and disable_possible_edges:
+                logger.warning(
+                    "site_hierarchy: %d untyped-or-Primary site(s) %s in schema %r have only an "
+                    "unresolved parent (no CAS/RootSiteCode observed) and --disable-possible-edges "
+                    "is set, so no root is assumed. SCCM-native node ids will be minted without "
+                    "their '@<root>' scope. Collect with LDAP reachable (or pass --site-codes) to "
+                    "resolve a real root.",
+                    len(fallback), fallback, schema,
+                )
+            elif fallback:
+                root_code = min(fallback)
+                logger.warning(
+                    "site_hierarchy: %d untyped-or-Primary site(s) %s in schema %r have only an "
+                    "unresolved parent (no CAS/RootSiteCode observed), so %r was chosen "
+                    "alphabetically as the root. Collect with LDAP reachable (or pass "
+                    "--site-codes) to anchor the root correctly.",
+                    len(fallback), fallback, schema, root_code,
+                )
+            else:
+                # Every known site is a Secondary (excluded outright), or there
+                # are no sites at all -- nothing viable to guess from in either mode.
+                logger.warning(
+                    "site_hierarchy: no untyped-or-Primary site found in schema %r (only Secondary "
+                    "sites and/or no sites at all); no root can be determined", schema,
+                )
 
     # Stamp every row with the resolved root.
     con.execute(
@@ -273,6 +668,12 @@ def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     place. Must run before _node_computer/_node_user/_node_group so _join_ad_props has
     something to join against.
 
+    sam_account_name / distinguished_name are carried here too (ldap_resolved_principals
+    already persists both -- context.py:_record_resolved_principal) so that a node type
+    with no OTHER source for them (e.g. Group: unlike Computer/User it has no raw arm of
+    its own that spreads an AD object) can still pick them up whenever its SID happens to
+    have been independently LDAP-resolved.
+
     ldap_resolved_principals is itself a best-effort finalization table (Task A2) whose
     own pipeline.run is allowed to fail without aborting the collect, so it may be absent
     this run. Treated like any other optional source: _ensure_columns backfills columns a
@@ -290,7 +691,9 @@ def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "object_class VARCHAR[], "
         "service_principal_name VARCHAR[], "
         "cn VARCHAR, "
-        "domain VARCHAR"
+        "domain VARCHAR, "
+        "sam_account_name VARCHAR, "
+        "distinguished_name VARCHAR"
         ")"
     )
     _ensure_columns(con, schema, "ldap_resolved_principals", {
@@ -299,6 +702,8 @@ def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "service_principal_name": "VARCHAR",
         "cn": "VARCHAR",
         "domain": "VARCHAR",
+        "sam_account_name": "VARCHAR",
+        "distinguished_name": "VARCHAR",
     })
     _oc = _arr("object_class")
     _spn = _arr("service_principal_name")
@@ -319,7 +724,9 @@ def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  any_value(object_class) AS object_class, "
         f"  any_value(service_principal_name) AS service_principal_name, "
         f"  any_value(cn) AS cn, "
-        f"  any_value(domain) AS domain "
+        f"  any_value(domain) AS domain, "
+        f"  any_value(sam_account_name) AS sam_account_name, "
+        f"  any_value(distinguished_name) AS distinguished_name "
         f"FROM ("
         f"  SELECT upper(sid) AS sid, "
         # userAccountControl arrives as VARCHAR in production (ldap3 raw values decode to
@@ -334,7 +741,7 @@ def _derive_ad_props(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"    TRUE AS is_domain_principal, "
         f"    {_oc} AS object_class, "
         f"    {_spn} AS service_principal_name, "
-        f"    cn, domain "
+        f"    cn, domain, sam_account_name, distinguished_name "
         f"  FROM {schema}.ldap_resolved_principals "
         f"  WHERE sid IS NOT NULL"
         f") "
@@ -429,8 +836,18 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "smb_computers", "remoteregistry_computers",
         "adminservice_site_definitions_computers", "wmi_site_definitions_computers",
         "http_management_points", "http_distribution_points", "http_smsproviders",
+        "http_site_servers", "dns_management_points",
     ):
         _ensure_columns(con, schema, _src, _optional)
+
+    # site_code/mp_host are scoped to exactly the tables that need them (review
+    # fix round 1, MINOR-3), not folded into the shared _optional dict above --
+    # that would create all-NULL site_code/mp_host columns on the other ~11
+    # unrelated tables in the loop, which a later re-run's _bare_site_code_tables
+    # discovery (Task 1) would then pick up as spurious contributors.
+    _ensure_columns(con, schema, "http_site_servers", {"site_code": "VARCHAR", "mp_host": "VARCHAR"})
+    _ensure_columns(con, schema, "http_management_points", {"site_code": "VARCHAR"})
+    _ensure_columns(con, schema, "dns_management_points", {"site_code": "VARCHAR"})
 
     # Each INSERT selects exactly the columns the source has, with NULL / false / []
     # for the rest. INSERT … BY NAME pairs source column names to staging column names
@@ -702,6 +1119,211 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"WHERE object_sid IS NOT NULL",
     )
 
+    # --- http_site_servers: role's site code resolved via the MP that served the
+    # sitesigncert (D6). The probe runs before MPKEYINFORMATION sets self.site_code
+    # (ps1:8611 ordering, which must not change), so the row's own site_code is
+    # usually NULL; mp_host is the breadcrumb recording which MP it came from, so
+    # join to that MP's own site_code as a fallback. Bare role when neither side
+    # knows a code -- never guess (D6).
+    #
+    # Pre-aggregate http_management_points by host into a TEMP TABLE, mirroring the
+    # _sysres_roles pattern below, for two reasons (review fix round 1):
+    #
+    #   IMPORTANT-1: http_management_points can legitimately hold two rows for the
+    #   same dns_host_name with DIFFERENT site_code -- collectors/http.py:322-324
+    #   probes MPLIST1&<other-site>, and :370 stamps the *probing* MP's own
+    #   self.site_code onto every sibling it enumerates, so the same MP can be
+    #   reported under a foreign site by one host's probe and its true site by
+    #   another's. Taking "any" or "first" site_code here would fabricate a
+    #   guessed '@<site>' exactly like D6 forbids, so a code is only trusted when
+    #   it is the SAME across every row for that host (COUNT(DISTINCT) = 1);
+    #   otherwise NULL, logged, and the site-server role falls back to bare.
+    #
+    #   MINOR-2: building this unconditionally (via _safe, which just leaves the
+    #   temp table empty if http_management_points is absent) means a missing MP
+    #   table can never gate whether the site-server row itself is emitted -- only
+    #   whether its site code gets enriched. The credential-free scenario this arm
+    #   exists for is exactly one where http_management_points may be thin/absent.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _mp_site_by_host "
+        "(dns_host_name VARCHAR, site_code VARCHAR, distinct_codes VARCHAR[])"
+    )
+    _safe(
+        con,
+        "_mp_site_by_host<-http_management_points",
+        f"INSERT INTO _mp_site_by_host "
+        f"SELECT lower(dns_host_name) AS dns_host_name, "
+        f"  CASE WHEN count(DISTINCT {_norm_site_code('site_code')}) = 1 "
+        f"       THEN any_value({_norm_site_code('site_code')}) ELSE NULL END AS site_code, "
+        f"  list_distinct(list_filter(list({_norm_site_code('site_code')}), x -> x IS NOT NULL)) AS distinct_codes "
+        f"FROM {schema}.http_management_points "
+        f"WHERE dns_host_name IS NOT NULL "
+        f"GROUP BY lower(dns_host_name)",
+    )
+    # Name the ambiguous hosts that actually matter -- i.e. only ones a real
+    # http_site_servers row is joining to -- rather than every ambiguous MP.
+    try:
+        _ambiguous = con.execute(
+            f"SELECT DISTINCT ss.mp_host, mp.distinct_codes "
+            f"FROM {schema}.http_site_servers ss "
+            f"JOIN _mp_site_by_host mp ON lower(ss.mp_host) = mp.dns_host_name "
+            f"WHERE mp.site_code IS NULL AND len(mp.distinct_codes) > 1"
+        ).fetchall()
+    except duckdb.CatalogException:
+        _ambiguous = []  # http_site_servers absent -- nothing to warn about
+    except duckdb.BinderException as ex:
+        # FAMILY-1 (same shape as C1/I1): BinderException is a SIBLING of
+        # CatalogException, not a subclass. This query only binds today because
+        # ss.mp_host is _ensure_columns'd onto http_site_servers earlier in this
+        # function -- a fragile, non-obvious dependency, not a structural
+        # guarantee at this call site. A future refactor that dropped or reordered
+        # that _ensure_columns call would otherwise raise here uncaught (this is
+        # NOT wrapped in _safe -- it's a plain con.execute for a warning list, not
+        # an INSERT). WARNING + the real exception text (reviewer OVER-CATCH):
+        # don't assume it's the column-missing case without saying so.
+        logger.warning(
+            "node_computer<-http_site_servers: could not compute the ambiguous-MP "
+            "warning list in schema %r (%s); skipping it (site-server rows are "
+            "still emitted, just without this diagnostic)", schema, ex,
+        )
+        _ambiguous = []
+    for _host, _codes in _ambiguous:
+        logger.warning(
+            "node_computer<-http_site_servers: MP %r reports %d competing site codes %s "
+            "across its http_management_points rows; cannot attribute the site server "
+            "probed via it to any single site (D6) -- emitting a bare role instead.",
+            _host, len(_codes), _codes,
+        )
+
+    _resolved_ss_site = f"coalesce({_norm_site_code('ss.site_code')}, mp.site_code)"
+    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _safe(
+        con,
+        "node_computer<-http_site_servers",
+        f"INSERT INTO {schema}.node_computer BY NAME "
+        f"SELECT upper(ss.object_sid) AS sid, ss.name, "
+        f"ss.dns_host_name AS dnshostname, ss.sam_account_name, NULL AS distinguished_name, "
+        f"NULL AS resource_id_str, "
+        f"CASE WHEN {_resolved_ss_site} IS NULL THEN ['SMS Site Server'] "
+        f"     ELSE ['SMS Site Server@' || {_resolved_ss_site}] END AS roles, "
+        f"true AS sccm_infra, "
+        f"NULL AS sms_unique_identifier, "
+        f"NULL AS smb_signing_required, "
+        f"false AS sccm_has_client_remote_control_spn, "
+        f"false AS network_boot_server, "
+        f"NULL AS disable_loopback_check, "
+        f"NULL AS restrict_receiving_ntlm_traffic, "
+        f"ss.client_cert_required AS sccm_client_certificate_required, "
+        f"NULL AS sccm_hosts_content_library, "
+        f"NULL AS sccm_is_pxe_support_enabled "
+        f"FROM {schema}.http_site_servers ss "
+        f"LEFT JOIN _mp_site_by_host mp ON lower(ss.mp_host) = mp.dns_host_name "
+        f"WHERE ss.object_sid IS NOT NULL",
+    )
+    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    logger.info("node_computer<-http_site_servers contributed %d row(s)", _after - _before)
+
+    # --- ldap_management_points_raw (FSP): the fallback status point is a second
+    # host named by the MP-capabilities row, keyed by fsp_sid (Task 1b hoists this
+    # out of collectors/ldap.py's log-message-only local var). site_code here is
+    # the naming MP's own site code, which the collector already attributes
+    # directly to the FSP it names (register_target(..., site_code=mp_code_upper)),
+    # so this is not a cross-host guess (D6). ---
+    _ensure_columns(con, schema, "ldap_management_points_raw", {
+        "fsp_hostname": "VARCHAR", "fsp_sid": "VARCHAR", "site_code": "VARCHAR",
+    })
+    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _safe(
+        con,
+        "node_computer<-ldap_management_points_raw(fsp)",
+        f"INSERT INTO {schema}.node_computer BY NAME "
+        f"SELECT upper(fsp_sid) AS sid, fsp_hostname AS name, "
+        f"fsp_hostname AS dnshostname, NULL AS sam_account_name, NULL AS distinguished_name, "
+        f"NULL AS resource_id_str, "
+        f"CASE WHEN {_norm_site_code('site_code')} IS NULL THEN ['SMS Fallback Status Point'] "
+        f"     ELSE ['SMS Fallback Status Point@' || {_norm_site_code('site_code')}] END AS roles, "
+        f"true AS sccm_infra, "
+        f"NULL AS sms_unique_identifier, "
+        f"NULL AS smb_signing_required, "
+        f"false AS sccm_has_client_remote_control_spn, "
+        f"false AS network_boot_server, "
+        f"NULL AS disable_loopback_check, "
+        f"NULL AS restrict_receiving_ntlm_traffic, "
+        f"NULL AS sccm_client_certificate_required, "
+        f"NULL AS sccm_hosts_content_library, "
+        f"NULL AS sccm_is_pxe_support_enabled "
+        f"FROM {schema}.ldap_management_points_raw "
+        f"WHERE fsp_sid IS NOT NULL",
+    )
+    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    logger.info("node_computer<-ldap_management_points_raw(fsp) contributed %d row(s)", _after - _before)
+
+    # --- dns_management_points: the SRV/ADIDNS query key IS the site code
+    # (authoritative, D6), and the collector now emits the role string directly,
+    # so this is a plain arm -- no join needed, same shape as http_management_points. ---
+    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _safe(
+        con,
+        "node_computer<-dns_management_points",
+        f"INSERT INTO {schema}.node_computer BY NAME "
+        f"SELECT upper(object_sid) AS sid, name, "
+        f"dns_host_name AS dnshostname, sam_account_name, NULL AS distinguished_name, "
+        f"NULL AS resource_id_str, "
+        f"{_arr('sccm_site_system_roles')} AS roles, "
+        f"coalesce(sccm_infra, false) AS sccm_infra, "
+        f"NULL AS sms_unique_identifier, "
+        f"NULL AS smb_signing_required, "
+        f"false AS sccm_has_client_remote_control_spn, "
+        f"false AS network_boot_server, "
+        f"NULL AS disable_loopback_check, "
+        f"NULL AS restrict_receiving_ntlm_traffic, "
+        f"NULL AS sccm_client_certificate_required, "
+        f"NULL AS sccm_hosts_content_library, "
+        f"NULL AS sccm_is_pxe_support_enabled "
+        f"FROM {schema}.dns_management_points "
+        f"WHERE object_sid IS NOT NULL",
+    )
+    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    logger.info("node_computer<-dns_management_points contributed %d row(s)", _after - _before)
+
+    # --- mssql_server_instances: an MSSQLSvc SPN or a probed-open TCP/1433 is
+    # proof the host runs SQL Server (D2a), collect_mssql.py now records it even
+    # when only the SPN fired (port closed). Running SQL is NOT an SCCM role --
+    # sccm_infra stays false and no role is added; a real SCCM role, if any,
+    # arrives from another arm above and merges on sid. ---
+    _ensure_columns(con, schema, "mssql_server_instances", {"name": "VARCHAR", "dns_host_name": "VARCHAR"})
+    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _safe(
+        con,
+        "node_computer<-mssql_server_instances",
+        f"INSERT INTO {schema}.node_computer BY NAME "
+        f"SELECT upper(domain_computer_sid) AS sid, name, "
+        # dnshostname prefers the real FQDN (dns_host_name) over the AD CN (name)
+        # -- using the CN here would fail every LIKE '%.%' dependent join downstream
+        # (e.g. the coerce-and-relay builders) and misreport dnsHostName in the
+        # entity panel (reviewer M2) -- but falls back to name (same reasoning as
+        # REGRESSION-1's node_mssql_server fix) so a cached bucket collected before
+        # collect_mssql emitted dns_host_name still gets SOME hostname rather than
+        # NULL outright.
+        f"coalesce(dns_host_name, name) AS dnshostname, NULL AS sam_account_name, NULL AS distinguished_name, "
+        f"NULL AS resource_id_str, "
+        f"CAST([] AS VARCHAR[]) AS roles, "
+        f"false AS sccm_infra, "
+        f"NULL AS sms_unique_identifier, "
+        f"NULL AS smb_signing_required, "
+        f"false AS sccm_has_client_remote_control_spn, "
+        f"false AS network_boot_server, "
+        f"NULL AS disable_loopback_check, "
+        f"NULL AS restrict_receiving_ntlm_traffic, "
+        f"NULL AS sccm_client_certificate_required, "
+        f"NULL AS sccm_hosts_content_library, "
+        f"NULL AS sccm_is_pxe_support_enabled "
+        f"FROM {schema}.mssql_server_instances "
+        f"WHERE domain_computer_sid IS NOT NULL",
+    )
+    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    logger.info("node_computer<-mssql_server_instances contributed %d row(s)", _after - _before)
+
     # Collapse all staging rows into one row per SID. Role lists are array-unioned;
     # boolean flags use bool_or (true wins); scalars use any_value (first non-null wins).
     con.execute(
@@ -768,8 +1390,68 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_computer nc "
         f"LEFT JOIN _sr sr ON nc.dnshostname IS NOT NULL AND lower(nc.dnshostname) = sr.host"
     )
+    _backfill_bare_site_roles(con, schema)
     _join_ad_props(con, schema, "node_computer")
     logger.info("node_computer built in schema %r", schema)
+
+
+def _backfill_bare_site_roles(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Backfill a bare ``<Role>`` to ``<Role>@<site>`` using the SAME host's other
+    site-coded roles (D6).
+
+    An HTTP SMS-Provider-only probe (or an SMS Distribution Point probe) has no site
+    code of its own -- MPKEYINFORMATION is a management-point endpoint, not a
+    site-server endpoint (collectors/http.py:180) -- so those roles land bare even
+    though another probe against the SAME host (RemoteRegistry, SysResUse, ...)
+    already established its site. Downstream matchers such as
+    _edge_coerce_relay_adminservice key on 'SMS Provider@<site>' and silently miss
+    the bare form (live 2026-07-28 low-priv run: 0 edges where CMBP emitted 1).
+
+    Applying the site from a co-occurring role ON THE SAME ROW is not a guess (D6
+    only forbids inferring a host's site from a DIFFERENT host) -- the site is a
+    fact this exact host's own other roles already established. Only applied when
+    those other @-suffixed roles resolve to exactly one distinct site; an
+    ambiguous (>1 site) or absent (0 sites) case leaves the bare role untouched.
+    """
+    rows = con.execute(
+        f"SELECT sid, dnshostname, site_system_roles FROM {schema}.node_computer "
+        f"WHERE len(list_filter(site_system_roles, x -> NOT contains(x, '@'))) > 0"
+    ).fetchall()
+    for sid, dnshostname, roles in rows:
+        bare = [r for r in roles if "@" not in r]
+        sites = sorted({r.rsplit("@", 1)[1] for r in roles if "@" in r})
+        if not sites:
+            # Nothing on this host names a site at all -- leave the bare role(s)
+            # alone rather than inventing a scope for them.
+            logger.debug(
+                "node_computer backfill: host %r (sid %s) has bare role(s) %s but no "
+                "@-suffixed role to infer a site from; leaving bare",
+                dnshostname, sid, bare,
+            )
+            continue
+        if len(sites) > 1:
+            # This host's own roles disagree on the site -- guessing which one
+            # applies to the bare role would violate D6, so log and move on.
+            logger.warning(
+                "node_computer backfill: host %r (sid %s) has bare role(s) %s but its "
+                "other roles span %d competing sites %s; cannot infer a single site "
+                "(D6) -- leaving bare",
+                dnshostname, sid, bare, len(sites), sites,
+            )
+            continue
+        site = sites[0]
+        # list(set(...)) then sort: de-duplicates in case '<role>@<site>' was
+        # already present alongside the bare '<role>'.
+        new_roles = sorted({r for r in roles if "@" in r} | {f"{b}@{site}" for b in bare})
+        con.execute(
+            f"UPDATE {schema}.node_computer SET site_system_roles = ? WHERE sid = ?",
+            [new_roles, sid],
+        )
+        logger.info(
+            "node_computer backfill: host %r (sid %s) bare role(s) %s -> site %r "
+            "(inferred from this host's own other site-coded roles)",
+            dnshostname, sid, bare, site,
+        )
 
 
 def _node_user(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -1112,6 +1794,25 @@ def _node_group(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"GROUP BY upper(sid)"
     )
     _join_ad_props(con, schema, "node_group")
+
+    # sam_account_name / distinguished_name: unlike Computer/User, node_group has no raw
+    # arm of its own that spreads an AD object (its only sources are principal_by_name
+    # name-resolution and admins SID rows, neither of which carry these). ad_props is the
+    # only place they can come from -- populated whenever this SID happened to be
+    # independently LDAP-resolved elsewhere (e.g. the System Management container
+    # GenericAll ACL walk, CMBP's own source for this: its 3 low-priv Group nodes with
+    # these fields all trace to LDAP-GenericAllSystemManagement). A dedicated join (not
+    # folded into _join_ad_props, which node_computer/node_user also use and already have
+    # their own better-sourced sam_account_name/distinguished_name columns that a blind
+    # ap.* would collide with by name).
+    _safe(
+        con,
+        "node_group<-ad_props(sam/dn)",
+        f"CREATE OR REPLACE TABLE {schema}.node_group AS "
+        f"SELECT g.*, ap.sam_account_name, ap.distinguished_name "
+        f"FROM {schema}.node_group g "
+        f"LEFT JOIN {schema}.ad_props ap ON ap.sid = g.sid",
+    )
     logger.info("node_group built in schema %r", schema)
 
 
@@ -1338,9 +2039,21 @@ def _node_site(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # SIDs + FQDNs (CMBP ps1:7052-7065). The SQL service-account SID is resolved by
     # name through principal_by_name (CMBP ps1:3040). All LEFT JOINs so a site missing
     # any of these still appears.
+    #
+    # site_type: ns's own value (from adminservice_sites/wmi_sites/site_definitions --
+    # all privileged sources) wins when known; site_hierarchy's value is the fallback.
+    # site_hierarchy now infers a type _node_site's own arms can never state directly
+    # (e.g. a CAS, which has no management point and so is never typed by the one
+    # low-priv source that carries an explicit type -- see _site_hierarchy's CAS/
+    # Secondary inference). Without this fallback a low-priv CAS/PS1 site kept
+    # site_type = NULL even after that inference ran, so SCCM_Site.siteType (FIX4)
+    # stayed unset. `ns.* EXCLUDE (site_type)` avoids a duplicate column name against
+    # the coalesced replacement below.
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_site AS "
-        f"SELECT ns.*, sh.root_site_code, ssa.acct AS sql_service_account_name, "
+        f"SELECT ns.* EXCLUDE (site_type), "
+        f"  coalesce(ns.site_type, sh.site_type) AS site_type, "
+        f"  sh.root_site_code, ssa.acct AS sql_service_account_name, "
         f"  site_srv.object_sid AS site_server_domain_sid, "
         f"  site_srv.dns_host_name AS site_server_fqdn, "
         f"  sql_srv.object_sid AS sql_server_domain_sid, "
@@ -1459,6 +2172,22 @@ def _read_disable_possible(con: duckdb.DuckDBPyConnection, schema: str) -> bool:
         # Older collection without the settings table -> default to emitting possible rows.
         logger.info("collection_settings absent; possible edges/nodes enabled by default")
         table_disabled = False
+    except duckdb.BinderException as ex:
+        # FAMILY-1 (same shape as C1/I1): BinderException is a SIBLING of
+        # CatalogException, not a subclass, so a collection_settings table that
+        # EXISTS but is missing the disable_possible_edges column (dlt dropped it,
+        # e.g. every row happened to be all-NULL/all-False) would otherwise
+        # propagate uncaught -- and this function is called first and unwrapped
+        # from transforms(), so that would abort the entire preprocess run, same
+        # as C1. Default to emitting possible rows, same outcome as the missing-
+        # table case above. WARNING + the real exception text (reviewer
+        # OVER-CATCH): this is a genuinely different cause than the table-missing
+        # case, so don't fold it into the same low-visibility INFO message.
+        logger.warning(
+            "collection_settings.disable_possible_edges unreadable in schema %r "
+            "(%s); possible edges/nodes enabled by default", schema, ex,
+        )
+        table_disabled = False
     # (2) Env-var override (tightening-only).
     env_raw = os.environ.get("SOURCES__SCCM__DISABLE_POSSIBLE_EDGES")
     env_disabled = env_raw is not None and env_raw.strip().lower() in _TRUTHY_ENV
@@ -1473,6 +2202,158 @@ def _read_disable_possible(con: duckdb.DuckDBPyConnection, schema: str) -> bool:
         disabled, table_disabled, env_disabled,
     )
     return disabled
+
+
+# ---------------------------------------------------------------------------
+# Provenance stamp for assumed (unconfirmed) nodes/edges (D3)
+# ---------------------------------------------------------------------------
+# Shared strings so every SQL builder that stamps an assumed row (Tasks 4/5 below)
+# uses the exact same wording instead of retyping it, and so the wording never
+# drifts from what `_mark_assumed` would produce for the same concept.
+ASSUMED_SITE_DB_BASIS = (
+    "site DB inferred from MSSQLSvc SPN + SCCM-relatedness; DB internals not observed"
+)
+ASSUMED_SITE_DB_SOURCE = "Assumed-SiteDB"
+# The MSSQL site-DB scaffolding (CM_<site>, sysadmin/db_owner, machine-account
+# logins/db-users, and their edges) is templated from SCCM's own default schema
+# knowledge whether the underlying site DB is confirmed or assumed -- CMBP never
+# reads any of it out of SQL. So confirmed rows get THIS tag (not the old
+# transport-name literal), keeping the derivation auditable without implying doubt.
+CONFIRMED_SITE_DB_SOURCE = "SCCM-SiteDBDefaultSchema"
+
+ASSIGN_ALL_PERMISSIONS_BASIS = "SMS Provider role implies site control; RBAC not confirmed"
+ASSIGN_ALL_PERMISSIONS_SOURCE = "Assumed-AssignAllPermissions"
+LOCAL_ADMIN_REQUIRED_BASIS = "site-system co-location implies mutual local admin rights; RBAC not confirmed"
+LOCAL_ADMIN_REQUIRED_SOURCE = "Assumed-LocalAdminRequired"
+COERCE_RELAY_BASIS = "relay feasibility assumed from role topology + NTLM/SMB-signing state"
+COERCE_RELAY_SOURCE = "Assumed-CoerceRelay"
+# A "possible" client device is inferred from a CmRcService SPN alone -- the SPN proves
+# remote control was once configured, not that the SCCM client is still installed. The
+# device node and both edges that hang off it (SCCM_HasClient, SCCM_SameHostAs) are
+# therefore assumptions, and --disable-possible-edges already drops all three. They were
+# nonetheless reaching the graph UNSTAMPED in default mode (found in Task 10's live run:
+# 42 flag-removed edges carrying no `assumed`), which is exactly the D3 gap the stamp
+# exists to close -- an operator could not tell them from confirmed client data.
+POSSIBLE_CLIENT_BASIS = (
+    "device inferred from a CmRcService SPN; SCCM client presence not confirmed"
+)
+POSSIBLE_CLIENT_SOURCE = "Assumed-PossibleClientDevice"
+# MSSQL_CoerceAndRelayToMSSQL is the one relay family whose assumption is CONDITIONAL: the
+# edge fires either on a measured Extended Protection of 'Off' (evidence) or on a NULL EPA
+# that default mode treats as off (an assumption). Only the latter rows carry this basis,
+# so the stamp is a per-row CASE rather than a literal true like its siblings.
+MSSQL_RELAY_EPA_ASSUMED_BASIS = (
+    "Extended Protection never measured (host unreachable on its SQL port); "
+    "default mode assumes EPA is Off"
+)
+
+
+def _mark_assumed(props: dict, basis: str) -> dict:
+    """Stamp provenance on an assumed (unconfirmed) node/edge property dict (D3).
+
+    Adds assumed=True, a human assumptionBasis, and an 'Assumed-<slug>' entry in
+    collectionSource (idempotent -- re-stamping an already-stamped dict adds no
+    second tag). Assumed items still stay traversable -- the tag is how an
+    operator tells assumed from confirmed apart, not a suppression.
+
+    This module builds nearly everything via raw SQL, where a Python dict helper
+    can't run mid-query -- so the SQL builders in Tasks 4/5 below inline the
+    equivalent three columns directly into their INSERTs, referencing the
+    ASSUMED_*_BASIS/ASSUMED_*_SOURCE constants above instead of calling this
+    function. This helper is for any Python-side row construction that needs the
+    same stamp.
+    """
+    props["assumed"] = True
+    props["assumptionBasis"] = basis
+    slug = "Assumed-" + basis.split(";")[0].strip().replace(" ", "")
+    sources = list(props.get("collectionSource") or [])
+    if slug not in sources:
+        sources.append(slug)
+    props["collectionSource"] = sources
+    return props
+
+
+def _site_db_provenance_cols(is_assumed_sql: str) -> str:
+    """Return the `assumed, assumption_basis, collection_source` SQL column trio
+    for a row in the MSSQL site-DB scaffolding family (Task 4/D3/spec §7), keyed
+    off a boolean SQL predicate for "this row rests on the SPN+SCCM inference".
+
+    The scaffolding itself (CM_<site> database, sysadmin/db_owner roles,
+    machine-account logins/db-users, and their containment/membership edges) is
+    always templated from SCCM's own default-schema knowledge -- CMBP never reads
+    any of it out of SQL, confirmed site DB or not. So collection_source always
+    names that derivation; only the `assumed` stamp (and its human explanation) is
+    conditional on `is_assumed_sql`. Callers pass either a `basis` comparison
+    (e.g. "s.basis = 'SPN+SCCM'") or a boolean passthrough from an already-stamped
+    parent row (e.g. "s.assumed") -- both read the same either way.
+    """
+    return (
+        f"({is_assumed_sql}) AS assumed, "
+        f"CASE WHEN ({is_assumed_sql}) THEN '{ASSUMED_SITE_DB_BASIS}' ELSE NULL END AS assumption_basis, "
+        f"CASE WHEN ({is_assumed_sql}) THEN ['{ASSUMED_SITE_DB_SOURCE}'] ELSE ['{CONFIRMED_SITE_DB_SOURCE}'] END "
+        f"AS collection_source"
+    )
+
+
+def _node_smc_container(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """One Container node for the System Management container (Task 11, Tier A+).
+
+    Wires up ldap_system_management_dacl, which is collected but was previously read
+    by nothing. Standard BloodHound BASE kind (NOT added to schema_SCCM.json): id is
+    the container's own objectGUID, uppercased in the collector
+    (collectors/ldap.py::_format_guid) to match SharpHound's own Container node for
+    the same AD object so the two merge.
+
+    fallback_domain_sid is read off any co-collected GenericAll principal that has a
+    normal domain-relative SID (S-1-5-21-...-RID) -- the container itself has no SID
+    of its own to derive a domain from. Same "co-occurring domain SID" idiom
+    GroupNode already uses for builtin/well-known SIDs.
+
+    Confirmed (an ACL read directly off AD), so this table is the same in both
+    --disable-possible-edges modes -- no flag parameter.
+    """
+    # Unconditional CREATE first (mirrors node_mssql_server/node_computer): convert's
+    # AD_NODE_SPECS reads this table by name regardless of whether LDAP collection
+    # ran, so it must exist (possibly empty) even when the source table doesn't.
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.node_container "
+        "(id VARCHAR, distinguished_name VARCHAR, fallback_domain_sid VARCHAR)"
+    )
+    _ensure_columns(con, schema, "ldap_system_management_dacl", {
+        "object_sid": "VARCHAR", "smc_container_guid": "VARCHAR", "smc_container_dn": "VARCHAR",
+    })
+    _safe(con, "node_smc_container<-ldap_system_management_dacl",
+          f"INSERT INTO {schema}.node_container BY NAME "
+          f"SELECT upper(smc_container_guid) AS id, "
+          f"  any_value(smc_container_dn) AS distinguished_name, "
+          f"  any_value(NULLIF(regexp_extract(upper(object_sid), "
+          f"    '^(S-1-5-21(?:-\\d+){{3}})-\\d+$', 1), '')) AS fallback_domain_sid "
+          f"FROM {schema}.ldap_system_management_dacl "
+          f"WHERE smc_container_guid IS NOT NULL "
+          f"GROUP BY upper(smc_container_guid)")
+    n = con.execute(f"SELECT count(*) FROM {schema}.node_container").fetchone()[0]
+    logger.info("node_smc_container built (%d System Management container node(s)) in schema %r", n, schema)
+
+
+def _edge_generic_all_smc(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """GenericAll from each Full-Control principal to the System Management
+    container (Task 11, Tier A+). Standard BloodHound BASE kind; traversable via
+    TRAVERSABLE_EDGE_KINDS (kinds/edges.py), like SharpHound's own GenericAll edges.
+
+    Confirmed (an ACL read directly off AD, not a template) -- both flag modes, no
+    disable_possible_edges parameter and no assumed/assumption_basis stamp.
+    """
+    from .kinds.edges import GENERIC_ALL
+    _ensure_columns(con, schema, "ldap_system_management_dacl", {
+        "object_sid": "VARCHAR", "smc_container_guid": "VARCHAR",
+    })
+    _safe(con, "edge_generic_all_smc",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT upper(object_sid) AS start_id, upper(smc_container_guid) AS end_id, "
+          f"  '{GENERIC_ALL}' AS kind, "
+          f"  ['LDAP-GenericAllSystemManagement'] AS collection_source "
+          f"FROM {schema}.ldap_system_management_dacl "
+          f"WHERE object_sid IS NOT NULL AND smc_container_guid IS NOT NULL")
 
 
 def _node_collection(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -1817,6 +2698,28 @@ def _dedup_client_device(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         logger.info("node_client_device dedup: merged %d duplicate client-device row(s)", before - after)
     else:
         logger.debug("node_client_device dedup: no duplicate ad_domain_sid rows found")
+
+
+def _enrich_client_device_ad_attrs(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """Add CN / dnshostname / distinguished_name / domain / object_class /
+    sam_account_name / service_principal_name to node_client_device.
+
+    ad_domain_sid is the client device's join key to the resolved AD computer
+    (node_computer already carries these -- either straight from a raw arm that
+    spread an AD object, or via _join_ad_props when the SID was independently
+    LDAP-resolved). These are attributes of that underlying computer, not of the
+    SCCM device record itself, so they are joined in rather than collected twice.
+    """
+    _safe(
+        con,
+        "node_client_device<-node_computer(ad_attrs)",
+        f"CREATE OR REPLACE TABLE {schema}.node_client_device AS "
+        f"SELECT d.*, c.cn, c.dnshostname, c.distinguished_name, c.domain, "
+        f"  c.object_class, c.sam_account_name, c.service_principal_name "
+        f"FROM {schema}.node_client_device d "
+        f"LEFT JOIN {schema}.node_computer c ON c.sid = d.ad_domain_sid",
+    )
+    logger.info("node_client_device enriched with AD computer attributes in schema %r", schema)
 
 
 def _enrich_site_lists(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -2290,6 +3193,204 @@ def _role_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _assumed_site_dbs(con: duckdb.DuckDBPyConnection, schema: str,
+                       disable_possible_edges: bool) -> None:
+    """Identify site-database-server hosts without privileged (AdminService/WMI)
+    data (D2): builds `{schema}.assumed_site_dbs(host_sid, site_code, basis)`.
+
+    Two independent signals, UNIONed:
+
+    - RemoteRegistry-confirmed (basis='RemoteRegistry'): node_computer.site_system_roles
+      already carries a merged 'SMS SQL Server@<site>' role tag, however it was
+      collected (AdminService, WMI, or low-priv RemoteRegistry) -- node_computer
+      merges every source into one array, so the tag's mere presence is the
+      confirmed signal. Emitted in BOTH flag modes.
+    - SPN+SCCM fallback (basis='SPN+SCCM'): a host with an AD-readable MSSQLSvc
+      SPN (mssql_server_instances.has_mssql_spn, Task 1c) that is ALSO
+      SCCM-related (carries some SMS role or sccm_infra). A co-located SQL host
+      need not be *the* site database, so this is a deliberate tightening of
+      CMBP's "any host reachable on 1433" rule -- an inference, not a
+      confirmation.
+
+    The fallback is possible-edges-gated: --disable-possible-edges drops it and
+    keeps only the RemoteRegistry-confirmed rows. Gating here, once, at the
+    single source means every downstream consumer (starting with
+    _mssql_sql_servers below) inherits the filter -- no builder repeats the
+    check. Nothing confirmed is lost: an MSSQLSvc SPN host still gets its
+    MSSQL_Server node from the independent SPN/EPA arm of _node_mssql_server,
+    just without the sccm_site / sccm_infra / CM_<site> characterization that
+    arm derives from this table.
+
+    Site-code attribution never guesses (D6): each arm resolves a site code only
+    when every candidate role for that host names the SAME site. A host whose
+    roles span multiple sites (e.g. 'SMS Distribution Point@PS2' AND
+    'SMS Site Server@PS1') is an unresolvable clash, not a coin flip -- taking
+    array position [1] of a de-duplicated, unordered list would silently pick
+    whichever site happened to sort first (review round 1 caught exactly this).
+    Ambiguous hosts are logged at WARNING (naming the host and the competing
+    codes) and dropped entirely, mirroring the http_management_points ambiguity
+    fix above (transforms.py:1085-1134). A host with NO knowable site is dropped
+    the same way (logged at INFO, not WARNING -- it isn't a clash, just nothing
+    to report): a site DB row with a NULL site_code can't produce CM_<site> and
+    has no downstream use, and Task 4 consumes this table directly, so the "gate
+    once, here" principle applies to unknowable site codes exactly as it does to
+    the possible-edges flag -- no row is emitted for a downstream builder to
+    have to re-filter.
+    """
+    con.execute(
+        f"CREATE OR REPLACE TABLE {schema}.assumed_site_dbs "
+        "(host_sid VARCHAR, site_code VARCHAR, basis VARCHAR)"
+    )
+    # node_computer.sid / site_system_roles / sccm_infra are unconditionally built
+    # earlier in the pipeline, so node_computer itself never goes missing here --
+    # but a referenced COLUMN can (dlt drops an all-NULL column; a cached bucket
+    # predates a column). A bare reference to an absent column raises a
+    # BinderException -- a sibling of CatalogException, not a subclass -- which
+    # would otherwise escape uncaught and abort the whole preprocess run (the same
+    # failure family fixed elsewhere in this plan, e.g. transforms.py:1112-1127).
+    # _ensure_columns prevents the exception; every statement below is also run
+    # through _safe as defense in depth, so this arm degrades to a logged skip
+    # rather than a hard abort even if some other column loss slips past it.
+    _ensure_columns(con, schema, "node_computer", {
+        "sid": "VARCHAR", "site_system_roles": "VARCHAR[]", "sccm_infra": "BOOLEAN",
+    })
+
+    # --- RemoteRegistry-confirmed: authoritative, emitted in both flag modes. ---
+    # Unconditional CREATE first, then a _safe-wrapped INSERT (mirrors
+    # _mp_site_by_host, transforms.py:1085-1088): if the INSERT's SELECT ever
+    # raises, _safe logs and swallows it, but the table itself is already a
+    # freshly-emptied one from the CREATE OR REPLACE two lines above -- not the
+    # previous transforms() invocation's TEMP table. Re-running transforms()
+    # over an existing lookup.duckdb (same connection reused across calls) is a
+    # supported workflow, so a stale table surviving a failed rebuild would leak
+    # a prior run's rows into this run's assumed_site_dbs. Combining CREATE and
+    # SELECT in one _safe-wrapped statement (the previous shape) does not have
+    # this property: a failed SELECT means the CREATE never lands either, so the
+    # old TEMP table (if any) is left standing with its stale contents intact.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _rr_site_candidates "
+        "(host_sid VARCHAR, distinct_codes VARCHAR[])"
+    )
+    _safe(
+        con, "_rr_site_candidates<-node_computer",
+        "INSERT INTO _rr_site_candidates "
+        f"SELECT sid AS host_sid, "
+        f"  list_distinct(list_transform("
+        f"    list_filter(site_system_roles, x -> x LIKE 'SMS SQL Server@%'), "
+        f"    x -> upper(split_part(x, '@', 2))"
+        f"  )) AS distinct_codes "
+        f"FROM {schema}.node_computer "
+        f"WHERE len(list_filter(site_system_roles, x -> x LIKE 'SMS SQL Server@%')) > 0",
+    )
+    try:
+        _rr_ambiguous = con.execute(
+            "SELECT host_sid, distinct_codes FROM _rr_site_candidates WHERE len(distinct_codes) > 1"
+        ).fetchall()
+    except duckdb.CatalogException:
+        # _rr_site_candidates is now unconditionally created above, so this is
+        # unreachable in practice -- kept as defense in depth (FAMILY-1
+        # precedent elsewhere in this module) in case a future refactor removes
+        # the unconditional CREATE.
+        _rr_ambiguous = []
+    for _host, _codes in _rr_ambiguous:
+        logger.warning(
+            "assumed_site_dbs: host %r carries 'SMS SQL Server@<site>' roles naming "
+            "%d competing site codes %s; cannot attribute it to a single site (D6) "
+            "-- dropping it rather than guessing", _host, len(_codes), _codes,
+        )
+    _safe(
+        con, "assumed_site_dbs<-_rr_site_candidates",
+        f"INSERT INTO {schema}.assumed_site_dbs "
+        f"SELECT host_sid, distinct_codes[1] AS site_code, 'RemoteRegistry' AS basis "
+        f"FROM _rr_site_candidates WHERE len(distinct_codes) = 1",
+    )
+    n_rr = con.execute(f"SELECT count(*) FROM {schema}.assumed_site_dbs").fetchone()[0]
+    if disable_possible_edges:
+        logger.info(
+            "assumed_site_dbs: --disable-possible-edges set; keeping %d "
+            "RemoteRegistry-confirmed site DB(s), dropping the SPN+SCCM inference (D2)",
+            n_rr,
+        )
+        return
+
+    # --- SPN+SCCM fallback, for hosts not already confirmed above. ---
+    # The predicate is has_mssql_spn specifically, not bare presence in
+    # mssql_server_instances -- before Task 1c that table only held hosts whose
+    # TCP/1433 answered, so a plain semi-join would silently test port
+    # reachability instead of SPN presence (the exact weakness D2 exists to
+    # avoid). Site attribution draws from ANY '@'-suffixed role (not just SMS SQL
+    # Server ones) since this arm's evidence is "SCCM-related, somehow" -- but the
+    # same single-distinct-site rule applies. Hosts already RemoteRegistry-
+    # confirmed are excluded (the trailing len(...) = 0 predicate) so a host never
+    # gets two rows with two different basis values, which would make Task 4's
+    # provenance stamp ambiguous.
+    _ensure_columns(con, schema, "mssql_server_instances", {
+        "domain_computer_sid": "VARCHAR", "has_mssql_spn": "BOOLEAN",
+    })
+    # Same unconditional-CREATE-then-_safe-INSERT shape as _rr_site_candidates
+    # above, for the identical reason: a failed INSERT must not leave a prior
+    # run's stale TEMP table in place for the SELECTs below to read from.
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE _spn_site_candidates "
+        "(host_sid VARCHAR, distinct_codes VARCHAR[])"
+    )
+    _safe(
+        con, "_spn_site_candidates<-node_computer",
+        "INSERT INTO _spn_site_candidates "
+        f"SELECT nc.sid AS host_sid, "
+        f"  list_distinct(list_transform("
+        f"    list_filter(nc.site_system_roles, x -> x LIKE '%@%'), "
+        f"    x -> upper(split_part(x, '@', 2))"
+        f"  )) AS distinct_codes "
+        f"FROM {schema}.node_computer nc "
+        f"WHERE nc.sid IN ("
+        f"        SELECT upper(domain_computer_sid) FROM {schema}.mssql_server_instances "
+        f"        WHERE coalesce(has_mssql_spn, false)) "
+        f"  AND (nc.sccm_infra = true OR len(nc.site_system_roles) > 0) "
+        f"  AND len(list_filter(nc.site_system_roles, x -> x LIKE 'SMS SQL Server@%')) = 0",
+    )
+    try:
+        _spn_ambiguous = con.execute(
+            "SELECT host_sid, distinct_codes FROM _spn_site_candidates WHERE len(distinct_codes) > 1"
+        ).fetchall()
+    except duckdb.CatalogException:
+        # Unreachable now that _spn_site_candidates is unconditionally created
+        # above; kept as defense in depth, same rationale as _rr_ambiguous.
+        _spn_ambiguous = []
+    for _host, _codes in _spn_ambiguous:
+        logger.warning(
+            "assumed_site_dbs: SPN+SCCM host %r carries '@<site>' roles naming %d "
+            "competing site codes %s; cannot attribute it to a single site (D6) "
+            "-- dropping it rather than guessing", _host, len(_codes), _codes,
+        )
+    try:
+        n_spn_no_site = con.execute(
+            "SELECT count(*) FROM _spn_site_candidates WHERE len(distinct_codes) = 0"
+        ).fetchone()[0]
+    except duckdb.CatalogException:
+        # Unreachable now that _spn_site_candidates is unconditionally created
+        # above; kept as defense in depth, same rationale as _spn_ambiguous.
+        n_spn_no_site = 0
+    if n_spn_no_site:
+        logger.info(
+            "assumed_site_dbs: dropping %d SPN+SCCM candidate(s) with no '@<site>' "
+            "role at all -- a site DB with no knowable site has no downstream use",
+            n_spn_no_site,
+        )
+    _safe(
+        con, "assumed_site_dbs<-_spn_site_candidates",
+        f"INSERT INTO {schema}.assumed_site_dbs "
+        f"SELECT host_sid, distinct_codes[1] AS site_code, 'SPN+SCCM' AS basis "
+        f"FROM _spn_site_candidates WHERE len(distinct_codes) = 1",
+    )
+    n_total = con.execute(f"SELECT count(*) FROM {schema}.assumed_site_dbs").fetchone()[0]
+    logger.info(
+        "assumed_site_dbs built: %d RemoteRegistry-confirmed + %d SPN+SCCM-inferred "
+        "= %d total in schema %r",
+        n_rr, n_total - n_rr, n_total, schema,
+    )
+
+
 def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Resolve every (site, SQL-host computer) pair that runs the site database.
 
@@ -2301,16 +3402,29 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     role rows directly here instead. Site-level SQL attributes (db name, port,
     service account) are shared across a site's SQL hosts, so they are joined from
     node_site. The database name falls back to CM_<siteCode> (CMBP :6082).
+
+    A third, non-privileged source (D2/Task 2) reads `assumed_site_dbs` -- the
+    RemoteRegistry-confirmed and (unless --disable-possible-edges dropped it)
+    SPN+SCCM-inferred site-DB hosts a low-privilege operator can see without
+    AdminService/WMI. That table is already possible-edges-gated at its own
+    source, so this arm needs no flag check of its own; duplicates of a
+    privileged-source pair simply collapse below via the same GROUP BY that
+    already collapses the two privileged sources with each other.
     """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}._mssql_sql_servers ("
         "site_code VARCHAR, root_site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR, "
-        "port VARCHAR, db_name VARCHAR, service_account_name VARCHAR, service_account_sid VARCHAR)"
+        "port VARCHAR, db_name VARCHAR, service_account_name VARCHAR, service_account_sid VARCHAR, "
+        "basis VARCHAR)"
     )
-    # Staging temp: collect (site, SQL host) pairs from all available sources.
+    # Staging temp: collect (site, SQL host) pairs from all available sources. basis
+    # carries assumed_site_dbs' provenance label through to the final table (Task 4);
+    # the two privileged-source arms below leave it NULL -- they have no basis of
+    # their own, and _node_mssql_database etc. below treat NULL the same as
+    # 'RemoteRegistry' (both unstamped, spec §7).
     con.execute(
         "CREATE OR REPLACE TEMP TABLE _mssql_sql_hosts "
-        "(site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR)"
+        "(site_code VARCHAR, host_sid VARCHAR, dns_host_name VARCHAR, basis VARCHAR)"
     )
     for _sdc in ("adminservice_site_definitions_computers", "wmi_site_definitions_computers"):
         _ensure_columns(con, schema, _sdc, {
@@ -2319,18 +3433,40 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         _safe(con, f"_mssql_sql_hosts<-{_sdc}",
               f"INSERT INTO _mssql_sql_hosts "
               f"SELECT upper(split_part(sccm_site_system_roles, '@', 2)) AS site_code, "
-              f"  upper(object_sid) AS host_sid, dns_host_name "
+              f"  upper(object_sid) AS host_sid, dns_host_name, NULL AS basis "
               f"FROM {schema}.{_sdc} "
               f"WHERE object_sid IS NOT NULL AND sccm_site_system_roles LIKE 'SMS SQL Server@%'")
 
+    # Non-privileged arm (D2/Task 2): host/site pairs from assumed_site_dbs, joined
+    # back to node_computer for a hostname (assumed_site_dbs itself carries none).
+    # assumed_site_dbs (review round 1, IMPORTANT-3) now guarantees a non-NULL
+    # site_code on every row it emits -- an unattributable candidate is dropped at
+    # that single source rather than passed downstream for every consumer to
+    # re-filter (Task 4 reads assumed_site_dbs directly and would otherwise
+    # inherit a useless row too). The IS NOT NULL check below is intentionally
+    # kept anyway as a belt-and-braces guard: if that upstream guarantee ever
+    # regressed, a NULL site_code would otherwise join node_site as a site-less
+    # ghost row instead of failing loudly.
+    _safe(con, "_mssql_sql_hosts<-assumed_site_dbs",
+          f"INSERT INTO _mssql_sql_hosts "
+          f"SELECT a.site_code, a.host_sid, nc.dnshostname AS dns_host_name, a.basis "
+          f"FROM {schema}.assumed_site_dbs a "
+          f"JOIN {schema}.node_computer nc ON nc.sid = a.host_sid "
+          f"WHERE a.site_code IS NOT NULL")
+
     # Collapse duplicate (site, host) rows, then attach the site-level SQL attributes.
+    # basis: max() over the group so a privileged-arm row (NULL) never masks a
+    # same-host assumed_site_dbs row's real basis string -- max() ignores NULLs and
+    # surfaces whichever non-null value is present (there is at most one, since
+    # assumed_site_dbs never emits two basis values for the same host, Task 2).
     con.execute(
         f"INSERT INTO {schema}._mssql_sql_servers "
         f"SELECT h.site_code, ns.root_site_code, h.host_sid, any_value(h.dns_host_name) AS dns_host_name, "
         f"  coalesce(any_value(ns.sql_service_port), '1433') AS port, "
         f"  coalesce(any_value(ns.sql_database_name), 'CM_' || h.site_code) AS db_name, "
         f"  any_value(ns.sql_service_account_name) AS service_account_name, "
-        f"  any_value(ns.sql_service_account_domain_sid) AS service_account_sid "
+        f"  any_value(ns.sql_service_account_domain_sid) AS service_account_sid, "
+        f"  max(h.basis) AS basis "
         f"FROM _mssql_sql_hosts h "
         f"LEFT JOIN {schema}.node_site ns ON upper(ns.site_code) = h.site_code "
         f"GROUP BY h.site_code, ns.root_site_code, h.host_sid"
@@ -2359,9 +3495,24 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         "sccm_site VARCHAR, sccm_infra BOOLEAN, databases VARCHAR[], "
         "force_encryption BOOLEAN, extended_protection VARCHAR, strict_encryption BOOLEAN, "
         "instance_names VARCHAR[], service_account_name VARCHAR, service_account_domain_sid VARCHAR, "
-        "collection_source VARCHAR[])"
+        # Task 13 (Tier A+): the LOW-PRIV MSSQLSvc SPN holder, distinct from
+        # service_account_domain_sid above (the PRIVILEGED SMS_SCI_SysResUse arm's
+        # identity). Kept as separate columns rather than merged into one so neither
+        # arm's provenance is misattributed to the other; when both resolve the same
+        # real account on the same server, _graph_edges_dedup collapses the resulting
+        # duplicate edge triples into one, so no cross-arm guard is needed here.
+        "service_account_sid VARCHAR, service_account_is_computer BOOLEAN, "
+        "port_open BOOLEAN, collection_source VARCHAR[], "
+        "assumed BOOLEAN, assumption_basis VARCHAR)"
     )
-    # Arm 1: SCCM-resolved site databases.
+    # Arm 1: SCCM-resolved site databases. No port probe involved -- port_open NULL
+    # (neither confirmed open nor confirmed closed; see the Stage 6 relay gate below).
+    # Provenance (Task 4 ownership gap, 2026-07-27 review): this arm used to stamp the
+    # privileged collection_source unconditionally, which would let an SPN+SCCM
+    # inference (basis, from _mssql_sql_servers <- assumed_site_dbs) claim privileged
+    # provenance. basis drives the stamp now -- NULL (a privileged-arm-only pair with
+    # no assumed_site_dbs row) is treated the same as 'RemoteRegistry' (confirmed).
+    _server_provenance = _site_db_provenance_cols("basis = 'SPN+SCCM'")
     _safe(con, "node_mssql_server<-_mssql_sql_servers",
           f"INSERT INTO {schema}.node_mssql_server BY NAME "
           f"SELECT host_sid, coalesce(port, '1433') AS port, dns_host_name AS name, dns_host_name, "
@@ -2370,22 +3521,54 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
           f"  NULL AS force_encryption, NULL AS extended_protection, NULL AS strict_encryption, "
           f"  CAST([] AS VARCHAR[]) AS instance_names, "
           f"  service_account_name, service_account_sid AS service_account_domain_sid, "
-          f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+          # This arm's identity is the PRIVILEGED one (above); it has no SPN-search
+          # result of its own, so the low-priv columns stay NULL here (arm 2 alone
+          # populates them).
+          f"  NULL AS service_account_sid, NULL AS service_account_is_computer, "
+          f"  NULL AS port_open, "
+          f"  {_server_provenance} "
           f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL")
-    # Arm 2: EPA scan.
+    # Arm 2: EPA scan. port_open records whether collect_mssql actually reached 1433 --
+    # a row can now exist on SPN evidence alone with the port filtered (Task 1c/D2a),
+    # so this is the one arm where the flag can be an explicit false.
     _ensure_columns(con, schema, "mssql_server_instances", {
-        "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR",
+        "domain_computer_sid": "VARCHAR", "port": "INTEGER", "name": "VARCHAR", "dns_host_name": "VARCHAR",
         "extended_protection": "VARCHAR", "force_encryption": "BOOLEAN", "strict_encryption": "BOOLEAN",
+        "port_open": "BOOLEAN", "service_account_sid": "VARCHAR", "service_account_is_computer": "BOOLEAN",
     })
     _safe(con, "node_mssql_server<-mssql_server_instances",
           f"INSERT INTO {schema}.node_mssql_server BY NAME "
           f"SELECT upper(domain_computer_sid) AS host_sid, CAST(coalesce(port, 1433) AS VARCHAR) AS port, "
-          f"  name, name AS dns_host_name, NULL AS sccm_site, false AS sccm_infra, "
+          # name stays the AD CN; dns_host_name prefers the real FQDN (reviewer M2)
+          # but falls back to name (reviewer REGRESSION-1) -- collect_mssql only
+          # started emitting dns_host_name in this same task, so re-processing a
+          # cached bucket collected before it existed would otherwise land NULL
+          # here instead of the CN it used to carry.
+          f"  name, coalesce(dns_host_name, name) AS dns_host_name, "
+          f"  NULL AS sccm_site, false AS sccm_infra, "
           f"  CAST([] AS VARCHAR[]) AS databases, force_encryption, extended_protection, strict_encryption, "
           f"  CAST([] AS VARCHAR[]) AS instance_names, NULL AS service_account_name, "
-          f"  NULL AS service_account_domain_sid, ['MSSQL-ScanForEPA'] AS collection_source "
+          # This arm's identity is the LOW-PRIV one (Task 13: the MSSQLSvc SPN holder
+          # collect_mssql resolves via find_mssql_spn_holder) -- service_account_domain_sid
+          # (the PRIVILEGED arm 1 identity) stays NULL here.
+          f"  NULL AS service_account_domain_sid, "
+          f"  upper(service_account_sid) AS service_account_sid, service_account_is_computer, "
+          f"  port_open, "
+          # Provenance must reflect what actually happened (reviewer M1):
+          # 'MSSQL-ScanForEPA' means an EPA scan actually ran, which
+          # _edge_coerce_relay_mssql filters on as "the server's EPA-determination
+          # sources" (CMBP ps1:6715). Since Task 1c a row can exist on SPN evidence
+          # alone with port_open = false, where no scan ever ran -- tag those
+          # 'MSSQL-SPN' instead so nothing downstream credits a scan that never
+          # happened. NULL port_open (a row from before this column existed) predates
+          # the SPN-only path entirely, so it was always a real scan.
+          f"  CASE WHEN port_open = false THEN ['MSSQL-SPN'] ELSE ['MSSQL-ScanForEPA'] END "
+          f"    AS collection_source, "
+          # An EPA scan says nothing about whether the host is SCCM's site database --
+          # that claim belongs to arm 1 alone, so this arm never stamps assumed.
+          f"  NULL AS assumed, NULL AS assumption_basis "
           f"FROM {schema}.mssql_server_instances WHERE domain_computer_sid IS NOT NULL")
-    # Arm 3: remote-registry.
+    # Arm 3: remote-registry. Reads the registry directly, no port probe -- NULL, same as arm 1.
     # port is a REG_SZ string in the registry, so dlt types it VARCHAR (unlike the
     # EPA scan's INTEGER). Declare/coalesce it as VARCHAR so the arm binds either way.
     _ensure_columns(con, schema, "remoteregistry_mssql_servers", {
@@ -2398,10 +3581,17 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
           f"  name, name AS dns_host_name, NULL AS sccm_site, false AS sccm_infra, "
           f"  CAST([] AS VARCHAR[]) AS databases, force_encryption, extended_protection, NULL AS strict_encryption, "
           f"  {_arr('instance_names')} AS instance_names, NULL AS service_account_name, "
-          f"  NULL AS service_account_domain_sid, ['RemoteRegistry-MSSQL'] AS collection_source "
+          f"  NULL AS service_account_domain_sid, "
+          f"  NULL AS service_account_sid, NULL AS service_account_is_computer, "
+          f"  NULL AS port_open, "
+          f"  ['RemoteRegistry-MSSQL'] AS collection_source, "
+          # Same reasoning as arm 2: this arm confirms a SQL instance exists, not
+          # that it's SCCM's site database -- assumed is arm 1's claim alone.
+          f"  NULL AS assumed, NULL AS assumption_basis "
           f"FROM {schema}.remoteregistry_mssql_servers WHERE domain_computer_sid IS NOT NULL")
     # Collapse to one row per host_sid:port. SCCM scalars win via any_value-skip-null ordering;
-    # EPA prefers any non-null. server_id minted final here.
+    # EPA prefers any non-null. server_id minted final here. port_open uses bool_or so a
+    # host reached via multiple arms is "open" if ANY arm actually saw it answer.
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_server AS "
         f"SELECT upper(host_sid) || ':' || port AS server_id, "
@@ -2414,7 +3604,17 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  list_distinct(flatten(list(instance_names))) AS instance_names, "
         f"  any_value(service_account_name) AS service_account_name, "
         f"  any_value(service_account_domain_sid) AS service_account_domain_sid, "
-        f"  list_distinct(flatten(list(collection_source))) AS collection_source "
+        # Task 13's low-priv columns: only arm 2 ever contributes them, so any_value/
+        # bool_or just surface that arm's value untouched (same idiom as the
+        # privileged pair above).
+        f"  any_value(service_account_sid) AS service_account_sid, "
+        f"  bool_or(service_account_is_computer) AS service_account_is_computer, "
+        f"  bool_or(port_open) AS port_open, "
+        f"  list_distinct(flatten(list(collection_source))) AS collection_source, "
+        # assumed/assumption_basis are arm 1's claim alone (arms 2/3 always leave
+        # them NULL) -- bool_or/max surface arm 1's value untouched when it
+        # contributed, and stay NULL (no stamp) when only arms 2/3 did.
+        f"  bool_or(assumed) AS assumed, max(assumption_basis) AS assumption_basis "
         f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL AND port IS NOT NULL "
         f"GROUP BY upper(host_sid), host_sid, port"
     )
@@ -2428,7 +3628,14 @@ def _node_mssql_database(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     Built only from _mssql_sql_servers (the SCCM-linked servers) — CMBP never creates a
     database for a SQL server it didn't reach via site processing, and non-SCCM scan-only
     servers expose no database name. db_name defaults to CM_<siteCode> in _mssql_sql_servers.
+
+    Provenance (Task 4/D3/spec §7): this whole templated schema is never read out of
+    SQL, confirmed site DB or not -- basis (from assumed_site_dbs, via _mssql_sql_servers)
+    decides only whether it rests on the SPN+SCCM inference. No disable_possible_edges
+    parameter here -- Task 2 already dropped the SPN+SCCM rows upstream when the flag is
+    set, so this builder simply has fewer _mssql_sql_servers rows to build from.
     """
+    _db_provenance = _site_db_provenance_cols("basis = 'SPN+SCCM'")
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_database AS "
         f"SELECT DISTINCT "
@@ -2436,7 +3643,7 @@ def _node_mssql_database(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  upper(host_sid) || ':' || coalesce(port, '1433') AS server_id, "
         f"  upper(host_sid) AS host_sid, coalesce(port, '1433') AS port, "
         f"  db_name AS name, site_code AS sccm_site, dns_host_name AS sql_server, "
-        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"  {_db_provenance} "
         f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL AND db_name IS NOT NULL"
     )
     n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database").fetchone()[0]
@@ -2449,7 +3656,12 @@ def _node_mssql_login(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     Sysadmin computer = a Site Server / SMS Provider for the SAME site as the SQL host,
     EXCLUDING the SQL host itself (CMBP :1912-1920). Login id/name use the computer's OWN
     DNS domain first label as NETBIOS (grilled 2026-06-29): <NETBIOS>\\<sam>@<server_id>.
+
+    Provenance: same basis-derived stamp as _node_mssql_database (Task 4/D3) -- a login
+    on an SPN+SCCM-inferred site DB is exactly as templated/unconfirmed as the database
+    it maps into.
     """
+    _login_provenance = _site_db_provenance_cols("s.basis = 'SPN+SCCM'")
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_login AS "
         f"SELECT DISTINCT "
@@ -2460,7 +3672,7 @@ def _node_mssql_login(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  upper(s.host_sid) AS host_sid, coalesce(s.port, '1433') AS port, "
         f"  s.dns_host_name AS sql_server, s.site_code AS sccm_site, "
         f"  c.sid AS sysadmin_computer_sid, "
-        f"  ['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'] AS collection_source "
+        f"  {_login_provenance} "
         f"FROM {schema}._mssql_sql_servers s "
         f"JOIN {schema}.node_computer c "
         f"  ON c.sid != upper(s.host_sid) "
@@ -2480,7 +3692,11 @@ def _node_mssql_database_user(con: duckdb.DuckDBPyConnection, schema: str) -> No
     The sysadmin computer's login is mapped into the site database as a db user with the
     same DOMAIN\\sam name. id = <login_name>@<database_id>. `database` is the db name; `login`
     is the source login name (CMBP sets both).
+
+    Provenance: carried forward from the login (Task 4/D3) -- l and d share the same
+    server, so they always agree on whether it rests on the SPN+SCCM inference.
     """
+    _dbuser_provenance = _site_db_provenance_cols("l.assumed")
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_database_user AS "
         f"SELECT DISTINCT "
@@ -2488,7 +3704,7 @@ def _node_mssql_database_user(con: duckdb.DuckDBPyConnection, schema: str) -> No
         f"  l.login_name AS dbuser_name, l.login_id, l.login_name, "
         f"  d.database_id, d.name AS database, l.server_id, l.host_sid, l.port, "
         f"  l.sql_server, l.sccm_site, "
-        f"  ['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'] AS collection_source "
+        f"  {_dbuser_provenance} "
         f"FROM {schema}.node_mssql_login l "
         f"JOIN {schema}.node_mssql_database d ON d.server_id = l.server_id"
     )
@@ -2502,7 +3718,12 @@ def _node_mssql_server_role(con: duckdb.DuckDBPyConnection, schema: str) -> None
     members is populated from the logins on the server (fix for CMBP's empty-array scope
     bug at :6105, grilled 2026-06-29). Only SCCM-linked servers get the role — non-SCCM
     scan-only servers are bare (CMBP builds the role inside the per-site server function).
+
+    Provenance: carried forward from the server (Task 4/D3) -- s.sccm_infra is only ever
+    true via arm 1, which is the only arm that ever stamps assumed, so s.assumed is
+    always boolean (never NULL) in this filtered set.
     """
+    _role_provenance = _site_db_provenance_cols("s.assumed")
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_server_role AS "
         f"SELECT 'sysadmin@' || s.server_id AS role_id, s.server_id, s.host_sid, "
@@ -2510,7 +3731,7 @@ def _node_mssql_server_role(con: duckdb.DuckDBPyConnection, schema: str) -> None
         f"  coalesce((SELECT list_distinct(list(l.login_id)) FROM {schema}.node_mssql_login l "
         f"            WHERE l.server_id = s.server_id), CAST([] AS VARCHAR[])) AS members, "
         f"  s.sccm_site, s.dns_host_name AS sql_server, "
-        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"  {_role_provenance} "
         f"FROM {schema}.node_mssql_server s WHERE s.sccm_infra"
     )
     n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_server_role").fetchone()[0]
@@ -2522,7 +3743,10 @@ def _node_mssql_database_role(con: duckdb.DuckDBPyConnection, schema: str) -> No
 
     members populated from the database users in the database (fix for CMBP's empty-array
     scope bug at :6155, grilled 2026-06-29).
+
+    Provenance: carried forward from the database (Task 4/D3).
     """
+    _dbrole_provenance = _site_db_provenance_cols("d.assumed")
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.node_mssql_database_role AS "
         f"SELECT 'db_owner@' || d.database_id AS role_id, d.database_id, d.server_id, d.host_sid, "
@@ -2530,7 +3754,7 @@ def _node_mssql_database_role(con: duckdb.DuckDBPyConnection, schema: str) -> No
         f"  coalesce((SELECT list_distinct(list(u.dbuser_id)) FROM {schema}.node_mssql_database_user u "
         f"            WHERE u.database_id = d.database_id), CAST([] AS VARCHAR[])) AS members, "
         f"  d.sccm_site, d.sql_server, "
-        f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
+        f"  {_dbrole_provenance} "
         f"FROM {schema}.node_mssql_database d"
     )
     n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database_role").fetchone()[0]
@@ -2544,12 +3768,17 @@ def _graph_edges_init(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     The coercion_* columns are populated only by the Stage 6 relay builders; sccm_infra
     is populated only by _edge_is_mapped_to (CMBP parity, SCCM_IsMappedTo only); every
     other builder INSERTs BY NAME and leaves them NULL (dedup coalesces coercion_*
-    NULL -> [] and leaves sccm_infra NULL when no duplicate row set it true)."""
+    NULL -> [] and leaves sccm_infra NULL when no duplicate row set it true).
+
+    assumed/assumption_basis (Task 3/4/5, D3) are populated only by the MSSQL
+    site-DB-scaffolding edges (Task 4, basis-derived) and the Tier-B SCCM
+    permission/coerce/local-admin edges (Task 5, unconditionally true) -- every
+    other builder leaves them NULL, meaning "not an assumption"."""
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges "
         f"(start_id VARCHAR, end_id VARCHAR, kind VARCHAR, collection_source VARCHAR[], "
         f"coercion_victim_and_relay_target_pairs VARCHAR[], coercion_victim_hostnames VARCHAR[], "
-        f"sccm_infra BOOLEAN)"
+        f"sccm_infra BOOLEAN, assumed BOOLEAN, assumption_basis VARCHAR)"
     )
 
 
@@ -2795,10 +4024,39 @@ def _edge_member_of(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"WHERE r.sid IS NOT NULL AND t.gname IS NOT NULL AND trim(t.gname) != ''{obsolete_clause}")
 
 
+def _edge_member_of_smc(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """MemberOf edges for the full nested membership chain of each System
+    Management DACL Full-Control group (Task 12, Tier A+).
+
+    Wires up ldap_smc_group_members, which collectors/ldap.py::_expand_group_targets
+    populates during the recursive walk it already performs (for scan-target
+    registration) — one row per (member, its immediate containing group) at every
+    nesting level, so the full chain is already present without extra recursion here.
+    Standard BloodHound BASE kind; BloodHound de-dupes identical edges a merged
+    SharpHound collection also supplies.
+
+    Confirmed (the AD `member` attribute, read directly) -- both flag modes, no
+    disable_possible_edges parameter and no assumed/assumption_basis stamp.
+    """
+    from .kinds.edges import MEMBER_OF
+    _safe(con, "edge_member_of_smc",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT DISTINCT upper(member_sid) AS start_id, upper(group_sid) AS end_id, "
+          f"  '{MEMBER_OF}' AS kind, "
+          f"  ['LDAP-GenericAllSystemManagement'] AS collection_source "
+          f"FROM {schema}.ldap_smc_group_members "
+          f"WHERE member_sid IS NOT NULL AND group_sid IS NOT NULL")
+
+
 def _edge_has_session(con: duckdb.DuckDBPyConnection, schema: str) -> None:
-    """Computer -> User sessions (CMBP ps1:5029 + ps1:8007). Two sources:
-    (1) RemoteRegistry logged-on user; (2) the MSSQL service account on the site DB
-    server (domain accounts only). HasSession is traversable (allow-list)."""
+    """Computer -> User sessions (CMBP ps1:5029 + ps1:8007). Three sources:
+    (1) RemoteRegistry logged-on user; (2) the PRIVILEGED MSSQL service account on
+    the site DB server (SMS_SCI_SysResUse, domain accounts only); (3) the LOW-PRIV
+    MSSQLSvc SPN holder (Task 13, Tier A+). HasSession is traversable (allow-list).
+
+    All three are confirmed evidence (an observed logon, or an observed service
+    identity) -- this function deliberately takes no disable_possible_edges
+    parameter and is called unconditionally; that must never change."""
     from .kinds.edges import HAS_SESSION
 
     # (1) RemoteRegistry: host_object_sid -> the logged-on user's object_sid.
@@ -2837,6 +4095,22 @@ def _edge_has_session(con: duckdb.DuckDBPyConnection, schema: str) -> None:
               f"  AND contains(ss.sql_server_service_logon_account, '\\') "
               f"  AND upper(ss.sql_server_service_logon_account) NOT LIKE 'NT AUTHORITY\\%' "
               f"  AND upper(ss.sql_server_service_logon_account) NOT IN ('LOCALSYSTEM', 'LOCAL SERVICE', 'NETWORK SERVICE')")
+
+    # (3) SPN holder (Task 13, Tier A+): host computer -> the SPN-resolved service
+    # account, skipped when the account IS a computer object (no distinct session --
+    # mirrors mssql/mssql edges/derive_ad.py:_service_account_edges' built-in/
+    # machine-account skip). Reads node_mssql_server's service_account_sid/
+    # service_account_is_computer columns (Task 13); arm (2) above reads a
+    # differently-named column (service_account_domain_sid) from a different,
+    # privileged source, so the two arms overlapping on the same real account
+    # collapse into one edge via _graph_edges_dedup, not by a guard here.
+    _safe(con, "edge_has_session<-node_mssql_server_spn",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT upper(host_sid) AS start_id, upper(service_account_sid) AS end_id, "
+          f"'{HAS_SESSION}' AS kind, ['LDAP-MSSQLSvcSPN'] AS collection_source "
+          f"FROM {schema}.node_mssql_server "
+          f"WHERE service_account_sid IS NOT NULL "
+          f"  AND coalesce(service_account_is_computer, false) = false")
 
 
 def _edge_has_stored_account(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -2977,6 +4251,13 @@ def _edge_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) ->
     Any computer whose site_system_roles contains an 'SMS Provider' entry gets an
     SCCM_AssignAllPermissions edge to every non-secondary site in the single hierarchy.
     start = computer SID (the Computer node id); end = non-secondary site_code.
+
+    Provenance (Task 5/D3, spec §7 ruling): this templates "SMS Provider role implies
+    site control" from role topology rather than reading an actual RBAC grant, so it
+    is unconditionally assumed -- the design spec's earlier claim that
+    --disable-possible-edges removes it was wrong (the code never gated it and never
+    should: CMBP itself emits this same family under its own -DisablePossibleEdges).
+    The stamp is unconditional, not flag-gated.
     """
     from .kinds.edges import SCCM_ASSIGN_ALL_PERMISSIONS
     nonsec = (f"(SELECT site_code FROM {schema}.site_hierarchy "
@@ -2986,7 +4267,9 @@ def _edge_assign_all_permissions(con: duckdb.DuckDBPyConnection, schema: str) ->
     _safe(con, "edge_assign_all_permissions",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"SELECT computer.sid AS start_id, site.site_code AS end_id, "
-          f"'{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, "
+          f"  ['SCCM_Invoke-PostProcessing', '{ASSIGN_ALL_PERMISSIONS_SOURCE}'] AS collection_source, "
+          f"  true AS assumed, '{ASSIGN_ALL_PERMISSIONS_BASIS}' AS assumption_basis "
           f"FROM {schema}.node_computer computer "
           f"CROSS JOIN {nonsec} site "
           f"WHERE computer.sid IS NOT NULL "
@@ -3004,13 +4287,19 @@ def _edge_same_host(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     _safe(con, "edge_same_host",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"SELECT computer.sid AS start_id, dev.smsid AS end_id, "
-          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source, "
+          f"NOT coalesce(dev.is_confirmed_active_client, true) AS assumed, "
+          f"CASE WHEN NOT coalesce(dev.is_confirmed_active_client, true) "
+          f"     THEN '{POSSIBLE_CLIENT_BASIS}' END AS assumption_basis "
           f"FROM {schema}.node_computer computer "
           f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
           f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL "
           f"UNION ALL "
           f"SELECT dev.smsid AS start_id, computer.sid AS end_id, "
-          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_SAME_HOST_AS}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source, "
+          f"NOT coalesce(dev.is_confirmed_active_client, true) AS assumed, "
+          f"CASE WHEN NOT coalesce(dev.is_confirmed_active_client, true) "
+          f"     THEN '{POSSIBLE_CLIENT_BASIS}' END AS assumption_basis "
           f"FROM {schema}.node_computer computer "
           f"JOIN {schema}.node_client_device dev ON dev.ad_domain_sid = computer.sid "
           f"WHERE computer.sid IS NOT NULL AND dev.smsid IS NOT NULL")
@@ -3029,6 +4318,11 @@ def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> N
 
     Site codes are extracted from the 'Role@SiteCode' strings the same way CMBP did
     (everything after the first '@'); both sides are uppercased for a robust join.
+
+    Provenance (Task 5/D3, spec §7 ruling): this templates "co-location at a site
+    implies mutual local admin" from role topology rather than reading an actual ACL,
+    so it is unconditionally assumed, flag-independent (same ruling as
+    _edge_assign_all_permissions above).
     """
     from .kinds.edges import SCCM_LOCAL_ADMIN_REQUIRED
     _safe(con, "edge_local_admin_required",
@@ -3049,7 +4343,9 @@ def _edge_local_admin_required(con: duckdb.DuckDBPyConnection, schema: str) -> N
           f"  SELECT DISTINCT sid, site FROM roles WHERE site != ''"
           f") "
           f"SELECT ss.sid AS start_id, sys.sid AS end_id, "
-          f"'{SCCM_LOCAL_ADMIN_REQUIRED}' AS kind, ['SCCM_Invoke-PostProcessing'] AS collection_source "
+          f"'{SCCM_LOCAL_ADMIN_REQUIRED}' AS kind, "
+          f"  ['SCCM_Invoke-PostProcessing', '{LOCAL_ADMIN_REQUIRED_SOURCE}'] AS collection_source, "
+          f"  true AS assumed, '{LOCAL_ADMIN_REQUIRED_BASIS}' AS assumption_basis "
           f"FROM site_servers ss "
           f"JOIN site_systems sys ON ss.site = sys.site AND ss.sid != sys.sid "
           f"JOIN nonsec n ON n.site = ss.site")
@@ -3062,6 +4358,17 @@ def _edge_mssql_structural(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     #3 host Computer -HostFor-> Server; #4 Server -ExecuteOnHost-> host Computer;
     #5 Server -Contains-> Database; #6 Database -Contains-> db_owner role;
     #7 db_owner -ControlDB-> Database. The host Computer node id is the raw host SID.
+    Resolve-or-drop: #3/#4 require the host to exist as a node_computer row (same
+    convention as _edge_mssql_service_account's acct_exists guard) -- else the pair
+    is skipped rather than left dangling against a SID with no node.
+
+    Provenance (Task 4/D3): #1/#2/#5/#6/#7 carry the assumed/assumption_basis/
+    collection_source columns straight through from the node they attach to
+    (node_mssql_server_role/node_mssql_database/node_mssql_database_role already
+    carry the basis-derived stamp) -- these edges are just that node's containment/
+    control relationship, so they're exactly as assumed as the node itself. #3/#4
+    (HostFor/ExecuteOnHost) are the one confirmed-and-ungated exception (D2(a)) and
+    keep the plain literal `src` tag, unmarked.
     """
     from .kinds.edges import (MSSQL_CONTAINS, MSSQL_CONTROL_DB, MSSQL_CONTROL_SERVER,
                               MSSQL_EXECUTE_ON_HOST, MSSQL_HOST_FOR)
@@ -3069,30 +4376,65 @@ def _edge_mssql_structural(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # #1 + #2 server <-> sysadmin role
     _safe(con, "edge_mssql_server_role",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT server_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"SELECT server_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, "
+          f"  collection_source, assumed, assumption_basis "
           f"FROM {schema}.node_mssql_server_role "
           f"UNION ALL "
-          f"SELECT role_id, server_id, '{MSSQL_CONTROL_SERVER}', {src} FROM {schema}.node_mssql_server_role")
-    # #3 + #4 host computer <-> server
+          f"SELECT role_id, server_id, '{MSSQL_CONTROL_SERVER}', collection_source, assumed, assumption_basis "
+          f"FROM {schema}.node_mssql_server_role")
+    # #3 + #4 host computer <-> server. Resolve-or-drop (same convention as the
+    # service-account guard in _edge_mssql_service_account below): the host must
+    # exist as a node_computer row, else these two edges would dangle against a
+    # SID with no node behind it.
+    # nc.sid = upper(host_sid), not a bare equality: node_mssql_server's collapse
+    # (upper(host_sid) || ':' || port) uppercases server_id but leaves the plain
+    # host_sid column as whatever case its feeder arm produced. Every current
+    # feeder happens to already upper() it, so this works today by accident; a
+    # future arm that didn't would otherwise silently fail this EXISTS check and
+    # drop both host edges with only a DEBUG line (reviewer M3) -- matching the
+    # explicit upper() every other join against node_computer.sid uses.
+    # BREAK-1: the guard and the emitted endpoint must agree on casing. The guard
+    # matches nc.sid = upper(host_sid); emitting the RAW host_sid as the edge
+    # endpoint (as an earlier revision did) means a differently-cased feeder could
+    # pass the guard yet still emit an edge whose endpoint resolves to no
+    # node_computer row -- inverting resolve-or-drop in exactly the case it exists
+    # to prevent (a dangling edge is worse than a dropped one). Emit upper(host_sid)
+    # on both halves, matching how server_id is already minted.
+    _host_exists = f"EXISTS (SELECT 1 FROM {schema}.node_computer nc WHERE nc.sid = upper(host_sid))"
     _safe(con, "edge_mssql_host",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT host_sid AS start_id, server_id AS end_id, '{MSSQL_HOST_FOR}' AS kind, {src} AS collection_source "
-          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL "
+          f"SELECT upper(host_sid) AS start_id, server_id AS end_id, '{MSSQL_HOST_FOR}' AS kind, {src} AS collection_source "
+          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL AND {_host_exists} "
           f"UNION ALL "
-          f"SELECT server_id, host_sid, '{MSSQL_EXECUTE_ON_HOST}', {src} "
-          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL")
+          f"SELECT server_id, upper(host_sid), '{MSSQL_EXECUTE_ON_HOST}', {src} "
+          f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL AND {_host_exists}")
+    try:
+        _dropped = con.execute(
+            f"SELECT DISTINCT host_sid FROM {schema}.node_mssql_server "
+            f"WHERE host_sid IS NOT NULL AND NOT {_host_exists}"
+        ).fetchall()
+    except duckdb.CatalogException:
+        _dropped = []  # node_mssql_server / node_computer absent -- nothing to report
+    for (_hsid,) in _dropped:
+        logger.debug(
+            "edge_mssql_host: host_sid %r has no node_computer row; "
+            "MSSQL_HostFor/MSSQL_ExecuteOnHost skipped (resolve-or-drop)", _hsid,
+        )
     # #5 server -> database
     _safe(con, "edge_mssql_server_db",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT server_id AS start_id, database_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"SELECT server_id AS start_id, database_id AS end_id, '{MSSQL_CONTAINS}' AS kind, "
+          f"  collection_source, assumed, assumption_basis "
           f"FROM {schema}.node_mssql_database")
     # #6 + #7 database <-> db_owner role
     _safe(con, "edge_mssql_db_role",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT database_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, {src} AS collection_source "
+          f"SELECT database_id AS start_id, role_id AS end_id, '{MSSQL_CONTAINS}' AS kind, "
+          f"  collection_source, assumed, assumption_basis "
           f"FROM {schema}.node_mssql_database_role "
           f"UNION ALL "
-          f"SELECT role_id, database_id, '{MSSQL_CONTROL_DB}', {src} FROM {schema}.node_mssql_database_role")
+          f"SELECT role_id, database_id, '{MSSQL_CONTROL_DB}', collection_source, assumed, assumption_basis "
+          f"FROM {schema}.node_mssql_database_role")
 
 
 def _edge_mssql_membership(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -3101,24 +4443,33 @@ def _edge_mssql_membership(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     #9  Login -MemberOf-> sysadmin role; #10 Server -Contains-> Login;
     #11 sysadmin Computer -HasLogin-> Login; #12 Login -IsMappedTo-> DatabaseUser;
     #13 DatabaseUser -MemberOf-> db_owner role; #14 Database -Contains-> DatabaseUser.
+
+    Provenance (Task 4/D3): every edge here carries the assumed/assumption_basis/
+    collection_source columns straight through from the login/database-user row it
+    attaches to -- each is just that node's membership/containment relationship, so
+    it's exactly as assumed as the node itself.
     """
     from .kinds.edges import MSSQL_CONTAINS, MSSQL_HAS_LOGIN, MSSQL_IS_MAPPED_TO, MSSQL_MEMBER_OF
-    src = "['SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer']"
     # #9 + #10 + #11 from logins
     _safe(con, "edge_mssql_login",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT login_id AS start_id, 'sysadmin@' || server_id AS end_id, '{MSSQL_MEMBER_OF}' AS kind, {src} AS collection_source "
+          f"SELECT login_id AS start_id, 'sysadmin@' || server_id AS end_id, '{MSSQL_MEMBER_OF}' AS kind, "
+          f"  collection_source, assumed, assumption_basis "
           f"FROM {schema}.node_mssql_login "
-          f"UNION ALL SELECT server_id, login_id, '{MSSQL_CONTAINS}', {src} FROM {schema}.node_mssql_login "
-          f"UNION ALL SELECT sysadmin_computer_sid, login_id, '{MSSQL_HAS_LOGIN}', {src} "
+          f"UNION ALL SELECT server_id, login_id, '{MSSQL_CONTAINS}', collection_source, assumed, assumption_basis "
+          f"  FROM {schema}.node_mssql_login "
+          f"UNION ALL SELECT sysadmin_computer_sid, login_id, '{MSSQL_HAS_LOGIN}', collection_source, assumed, assumption_basis "
           f"  FROM {schema}.node_mssql_login WHERE sysadmin_computer_sid IS NOT NULL")
     # #12 + #13 + #14 from database users
     _safe(con, "edge_mssql_dbuser",
           f"INSERT INTO {schema}.graph_edges BY NAME "
-          f"SELECT login_id AS start_id, dbuser_id AS end_id, '{MSSQL_IS_MAPPED_TO}' AS kind, {src} AS collection_source "
+          f"SELECT login_id AS start_id, dbuser_id AS end_id, '{MSSQL_IS_MAPPED_TO}' AS kind, "
+          f"  collection_source, assumed, assumption_basis "
           f"FROM {schema}.node_mssql_database_user "
-          f"UNION ALL SELECT dbuser_id, 'db_owner@' || database_id, '{MSSQL_MEMBER_OF}', {src} FROM {schema}.node_mssql_database_user "
-          f"UNION ALL SELECT database_id, dbuser_id, '{MSSQL_CONTAINS}', {src} FROM {schema}.node_mssql_database_user")
+          f"UNION ALL SELECT dbuser_id, 'db_owner@' || database_id, '{MSSQL_MEMBER_OF}', collection_source, assumed, assumption_basis "
+          f"  FROM {schema}.node_mssql_database_user "
+          f"UNION ALL SELECT database_id, dbuser_id, '{MSSQL_CONTAINS}', collection_source, assumed, assumption_basis "
+          f"  FROM {schema}.node_mssql_database_user")
 
 
 def _edge_mssql_service_account(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -3160,6 +4511,79 @@ def _edge_mssql_service_account(con: duckdb.DuckDBPyConnection, schema: str) -> 
           f"  AND s.service_account_domain_sid != s.host_sid AND ({acct_exists})")
 
 
+def _edge_mssql_service_account_spn(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """MSSQL_ServiceAccountFor from the MSSQLSvc SPN holder (Task 13, Tier A+):
+    confirmed, low-priv -- LDAP-readable proof of who a SQL service actually runs as.
+
+    Distinct from the PRIVILEGED arm above (_edge_mssql_service_account, reading
+    node_mssql_server.service_account_domain_sid, sourced from AdminService/WMI's
+    SMS_SCI_SysResUse): this reads the service_account_sid column Task 13 added,
+    populated from collectors/mssql.py's LDAP SPN-holder search (clients/ad.py
+    find_mssql_spn_holder). When both sources resolve the same real account on the
+    same server, they emit the identical (start_id, end_id, kind) triple --
+    _graph_edges_dedup (run once, after every edge builder) collapses that into one
+    edge, so no NOT EXISTS guard against the privileged arm is needed here.
+
+    Unlike the privileged arm, no resolve-or-drop existence guard: this identity is
+    already a live AD lookup result (a real objectSid returned by an LDAP search),
+    not an account NAME pending resolution, so there is nothing that can fail to
+    resolve. HasSession's end_id is in BACKFILL_END_KIND ("User"), so the common
+    case -- a service account not otherwise known to any SCCM source -- still gets a
+    node via the stub-backfill mechanism, covering this edge's start_id too (same id).
+
+    Not traversable (CMBP comments this kind out of its allow-list, ps1:2233) --
+    matches the privileged arm's TRAVERSABLE_EDGE_KINDS omission.
+    """
+    from .kinds.edges import MSSQL_SERVICE_ACCOUNT_FOR
+    _safe(con, "edge_mssql_service_account_for_spn",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT upper(service_account_sid) AS start_id, server_id AS end_id, "
+          f"  '{MSSQL_SERVICE_ACCOUNT_FOR}' AS kind, "
+          f"  ['LDAP-MSSQLSvcSPN'] AS collection_source "
+          f"FROM {schema}.node_mssql_server WHERE service_account_sid IS NOT NULL")
+
+
+def _edge_mssql_kerberoast_spn(con: duckdb.DuckDBPyConnection, schema: str) -> None:
+    """MSSQL_GetAdminTGS + MSSQL_GetTGS from the SPN-resolved service account
+    (Task 13) to Task 4's site-server/provider sysadmin logins (node_mssql_login).
+
+    Every node_mssql_login row is, by construction, a domain sysadmin login (it is
+    built from the Site Server/SMS Provider machine account, which SCCM's own
+    default schema grants sysadmin -- see _node_mssql_login), so "at least one
+    login exists for this server" already means "a domain principal is sysadmin",
+    and every login qualifies as a GetTGS target. Mirrors mssql/mssql
+    edges/derive_ad.py:_service_account_edges' GetAdminTGS/GetTGS (lines 460-476),
+    simplified for that always-sysadmin invariant.
+
+    These edges inherit the confidence of the login they rest on (plan amendment,
+    Task 14) -- assumed/assumption_basis/collection_source are copied straight from
+    node_mssql_login (the same columns _site_db_provenance_cols already stamps
+    there for Task 4), not recomputed here. A login built off a RemoteRegistry/
+    privileged-confirmed site DB is confirmed and unstamped; one off an SPN+SCCM
+    site DB is assumed and stamped. --disable-possible-edges already removed the
+    SPN+SCCM logins upstream (Task 2's _assumed_site_dbs), so under the flag those
+    rows simply don't exist here for the join to find -- no separate gate is needed
+    in this builder, and it takes no disable_possible_edges parameter.
+    """
+    from .kinds.edges import MSSQL_GET_ADMIN_TGS, MSSQL_GET_TGS
+    _safe(con, "edge_mssql_get_admin_tgs_spn",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT DISTINCT upper(i.service_account_sid) AS start_id, i.server_id AS end_id, "
+          f"  '{MSSQL_GET_ADMIN_TGS}' AS kind, "
+          f"  l.collection_source, l.assumed, l.assumption_basis "
+          f"FROM {schema}.node_mssql_server i "
+          f"JOIN {schema}.node_mssql_login l ON l.server_id = i.server_id "
+          f"WHERE i.service_account_sid IS NOT NULL")
+    _safe(con, "edge_mssql_get_tgs_spn",
+          f"INSERT INTO {schema}.graph_edges BY NAME "
+          f"SELECT upper(i.service_account_sid) AS start_id, l.login_id AS end_id, "
+          f"  '{MSSQL_GET_TGS}' AS kind, "
+          f"  l.collection_source, l.assumed, l.assumption_basis "
+          f"FROM {schema}.node_mssql_server i "
+          f"JOIN {schema}.node_mssql_login l ON l.server_id = i.server_id "
+          f"WHERE i.service_account_sid IS NOT NULL")
+
+
 def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     """Database -SCCM_AssignAllPermissions-> its OWN (non-secondary) site (CMBP :6173-6180).
 
@@ -3173,10 +4597,18 @@ def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> No
     legitimately fans out to every primary site via the AdminService.)
     """
     from .kinds.edges import SCCM_ASSIGN_ALL_PERMISSIONS
+    # This edge inherits the confidence of the DATABASE it starts from -- the same rule
+    # Task 14 applies to the kerberoast edges and their logins. A CM_<site> database off a
+    # RemoteRegistry/privileged-confirmed site DB is confirmed, so the edge is too; off an
+    # SPN+SCCM-inferred site DB the database is assumed, and an edge asserting "this DB can
+    # assign all permissions over that site" is then equally an assumption. Reading the
+    # node's own columns rather than re-deriving keeps the two from drifting apart.
     _safe(con, "edge_mssql_db_assign_all",
           f"INSERT INTO {schema}.graph_edges BY NAME "
           f"SELECT d.database_id AS start_id, sh.site_code AS end_id, "
           f"  '{SCCM_ASSIGN_ALL_PERMISSIONS}' AS kind, "
+          f"  coalesce(d.assumed, false) AS assumed, "
+          f"  d.assumption_basis AS assumption_basis, "
           f"  ['SCCM_Add-MSSQLServerNodesAndEdges'] AS collection_source "
           f"FROM {schema}.node_mssql_database d "
           f"JOIN {schema}.site_hierarchy sh "
@@ -3185,7 +4617,7 @@ def _edge_mssql_db_assign_all(con: duckdb.DuckDBPyConnection, schema: str) -> No
 
 
 def _edge_coerce_relay_adminservice(
-    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
+    con: duckdb.DuckDBPyConnection, schema: str
 ) -> None:
     """SCCM_CoerceAndRelayToAdminService: Authenticated Users -> SCCM_Site (CMBP ps1:6572-6624).
 
@@ -3195,10 +4627,18 @@ def _edge_coerce_relay_adminservice(
     SCCM_Site node id). Start = the Authenticated Users node of the SITE SERVER's domain
     (CMBP keys it off the coerced victim, ps1:6606).
 
-    NTLM gate is on the PROVIDER (the relay target must accept NTLM): default treats
-    null-or-'Off' as vulnerable; with --disable-possible-edges only explicit 'Off' qualifies
-    (Stage 6 decision #1). collectionSource is the static ['Post-processing'] CMBP passes at
-    ps1:1955. Sites confirmed running SCCM 2509+ (build >= ADMINSERVICE_NTLM_MIN_BUILD) are
+    NTLM gate is on the PROVIDER (the relay target must accept NTLM) and is
+    **flag-independent**: an unset RestrictReceivingNTLMTraffic is the Windows default
+    (0 = allow all inbound NTLM) = vulnerable, so null-or-'Off' qualifies and any other
+    explicit value disqualifies, in BOTH modes. This builder therefore takes no
+    disable_possible parameter -- it used to accept one and never read it, which read as
+    deliberate gating that did not exist (dead parameter removed 2026-07-27).
+    Ruling (Task 5, design spec §7, 2026-07-28): the code was right and the spec was
+    wrong -- this family is unconditionally assumed (D3: templated relay feasibility
+    from role topology, not read from an ACL) but NOT flag-gated, so it carries the
+    stamp on every row regardless of --disable-possible-edges. collectionSource keeps
+    CMBP's static ['Post-processing'] tag (CMBP ps1:1955) with an added 'Assumed-*'
+    tag. Sites confirmed running SCCM 2509+ (build >= ADMINSERVICE_NTLM_MIN_BUILD) are
     excluded — the AdminService rejects NTLM there; unknown versions fail open (edge kept).
     _safe() skips+logs if site_hierarchy / node_computer is missing."""
     from .kinds.edges import SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE
@@ -3241,7 +4681,8 @@ def _edge_coerce_relay_adminservice(
         f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
         f"  n.site_code AS end_id, "
         f"  '{SCCM_COERCE_AND_RELAY_TO_ADMIN_SERVICE}' AS kind, "
-        f"  ['Post-processing'] AS collection_source, "
+        f"  ['Post-processing', '{COERCE_RELAY_SOURCE}'] AS collection_source, "
+        f"  true AS assumed, '{COERCE_RELAY_BASIS}' AS assumption_basis, "
         f"  ['Coerce ' || coalesce(srv.dnshostname, srv.sid) || ', relay to ' "
         f"    || coalesce(prov.dnshostname, prov.sid)] AS coercion_victim_and_relay_target_pairs, "
         f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_hostnames "
@@ -3265,7 +4706,21 @@ def _edge_coerce_relay_mssql(
     Protection. Default treats null as vulnerable (null NTLM => assume Off; null EPA =>
     assume Off). A known EPA other than 'Off' always disqualifies the server. With
     --disable-possible-edges both must be EXPLICITLY 'Off'. collectionSource = the server's
-    EPA-determination sources only (CMBP ps1:6715). _safe() skips+logs missing tables."""
+    EPA-determination sources only (CMBP ps1:6715). _safe() skips+logs missing tables.
+
+    Deliberately NOT gated on node_mssql_server.port_open (considered during Task 1c,
+    reverted on review): a port unreachable FROM THE COLLECTOR's network position is not
+    evidence an attacker cannot reach it -- this edge models attacker capability, and the
+    attacker's foothold may be elsewhere on the network. node_mssql_login (and therefore
+    every row this builder can ever see) is built solely from _mssql_sql_servers -- a
+    confirmed SCCM site DB -- never from the SPN-only mssql_server_instances arm, so an
+    unreachable-from-here port says nothing about whether relaying would succeed from a
+    different vantage point. The existing EPA gate above already does the right thing when
+    EPA was never measured: null-or-Off is honoured only in default mode (Tier C of the
+    design spec), so --disable-possible-edges already withholds the edge until EPA is
+    confirmed. Gating on port_open in addition would only WITHHOLD a genuine default-mode
+    edge for a confirmed site DB whose 1433 this collector's run happened not to reach --
+    silently diverging from CMBP without a decision to do so."""
     from .kinds.edges import MSSQL_COERCE_AND_RELAY_TO_MSSQL
     # Cast to VARCHAR first — DuckDB may infer the column as INTEGER when the seed row
     # contains a NULL placeholder; real node_mssql_server and node_computer always emit
@@ -3291,7 +4746,16 @@ def _edge_coerce_relay_mssql(
         f"  ['Coerce ' || v.dnshostname || ', relay to ' "
         f"    || coalesce(s.dns_host_name, s.name) || ':' || coalesce(s.port, '1433')] "
         f"    AS coercion_victim_and_relay_target_pairs, "
-        f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_hostnames "
+        f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_hostnames, "
+        # Unlike its SMB/AdminService siblings, this family's assumption is CONDITIONAL, so
+        # the stamp is per-row rather than a literal true. The edge fires either because EPA
+        # was measured 'Off' (evidence -> not assumed) or because EPA was never measured at
+        # all and default mode treats NULL as off (an assumption -> stamped). Marking the
+        # whole family assumed would libel the measured rows; marking none of it would hide
+        # exactly the inference design spec §7 calls out.
+        f"  (s.extended_protection IS NULL) AS assumed, "
+        f"  CASE WHEN s.extended_protection IS NULL "
+        f"       THEN '{MSSQL_RELAY_EPA_ASSUMED_BASIS}' END AS assumption_basis "
         f"FROM {schema}.node_mssql_login l "
         f"JOIN {schema}.node_mssql_server s ON s.server_id = l.server_id "
         f"JOIN {schema}.node_computer h ON h.sid = l.host_sid "
@@ -3302,7 +4766,7 @@ def _edge_coerce_relay_mssql(
 
 
 def _edge_coerce_relay_smb(
-    con: duckdb.DuckDBPyConnection, schema: str, disable_possible: bool
+    con: duckdb.DuckDBPyConnection, schema: str
 ) -> None:
     """SCCM_CoerceAndRelayToSMB: Authenticated Users -> Computer (CMBP ps1:6728-6781).
 
@@ -3311,9 +4775,18 @@ def _edge_coerce_relay_smb(
     = the Authenticated Users node of the SITE SERVER's domain (CMBP ps1:6763).
 
     Gates (Stage 6 decision #1): the TARGET's smb_signing_required is false (always explicit
-    in CMBP) AND its NTLM is null-or-'Off' (default) / explicitly 'Off' (flag).
+    in CMBP) AND its NTLM is null-or-'Off'. **Both gates are flag-independent**, so this
+    builder takes no disable_possible parameter -- it used to accept one and never read it
+    (dead parameter removed 2026-07-27). The docstring previously claimed the NTLM gate
+    tightened under the flag, contradicting the inline comment a few lines below; the comment
+    was right.
+    Ruling (Task 5, design spec §7, 2026-07-28): the code was right and the spec was
+    wrong -- this family is unconditionally assumed (D3: templated relay feasibility
+    from role topology, not read from an ACL) but NOT flag-gated, so it carries the
+    stamp on every row regardless of --disable-possible-edges.
     collectionSource = the target's smb_signing_source filtered to the SMB-signing probes
-    (CMBP ps1:6773). coercionVictimHostnames = the coerced site server's dnshostname.
+    (CMBP ps1:6773), plus an 'Assumed-*' tag. coercionVictimHostnames = the coerced site
+    server's dnshostname.
     _safe() skips+logs missing tables."""
     from .kinds.edges import SCCM_COERCE_AND_RELAY_TO_SMB
     # Cast restrict_receiving_ntlm_traffic to VARCHAR before upper() — DuckDB types a
@@ -3346,9 +4819,10 @@ def _edge_coerce_relay_smb(
         f"SELECT DISTINCT {_authed_users_id('srv.dnshostname')} AS start_id, "
         f"  tgt.sid AS end_id, "
         f"  '{SCCM_COERCE_AND_RELAY_TO_SMB}' AS kind, "
-        f"  coalesce(list_filter(tgt.smb_signing_source, "
-        f"    x -> x IN ('SMB-Negotiate', 'RemoteRegistry-SMBSigningCheck')), CAST([] AS VARCHAR[])) "
-        f"    AS collection_source, "
+        f"  list_append(coalesce(list_filter(tgt.smb_signing_source, "
+        f"    x -> x IN ('SMB-Negotiate', 'RemoteRegistry-SMBSigningCheck')), CAST([] AS VARCHAR[])), "
+        f"    '{COERCE_RELAY_SOURCE}') AS collection_source, "
+        f"  true AS assumed, '{COERCE_RELAY_BASIS}' AS assumption_basis, "
         f"  CAST(NULL AS VARCHAR[]) AS coercion_victim_and_relay_target_pairs, "
         f"  [srv.dnshostname] AS coercion_victim_hostnames "
         f"FROM targets tgt "
@@ -3421,6 +4895,11 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 
     sccm_infra: bool_or() so a row set true by one source (or one duplicate) wins over
     a NULL from another; stays NULL only when every duplicate row left it NULL.
+
+    assumed/assumption_basis (Task 3/4/5, D3): same bool_or()/max() idiom as
+    node_mssql_server's arm collapse above -- a confirmed duplicate (NULL) never
+    masks an assumed one, and vice versa is impossible (an edge triple only ever
+    gets an assumed stamp from one builder).
     """
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges AS "
@@ -3434,7 +4913,8 @@ def _graph_edges_dedup(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  coalesce(list_distinct(flatten(list(coercion_victim_hostnames) "
         f"    FILTER (WHERE coercion_victim_hostnames IS NOT NULL))), CAST([] AS VARCHAR[])) "
         f"    AS coercion_victim_hostnames, "
-        f"  bool_or(sccm_infra) AS sccm_infra "
+        f"  bool_or(sccm_infra) AS sccm_infra, "
+        f"  bool_or(assumed) AS assumed, max(assumption_basis) AS assumption_basis "
         f"FROM {schema}.graph_edges "
         f"GROUP BY start_id, end_id, kind"
     )
@@ -3453,7 +4933,12 @@ def _edge_has_client(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"INSERT INTO {schema}.graph_edges BY NAME "
         f"SELECT site_code AS start_id, smsid AS end_id, '{SCCM_HAS_CLIENT}' AS kind, "
         f"CASE WHEN coalesce(is_confirmed_active_client, true) THEN ['AdminService-ClientDevices'] "
-        f"     ELSE ['LDAP-CmRcService'] END AS collection_source "
+        f"     ELSE ['LDAP-CmRcService', '{POSSIBLE_CLIENT_SOURCE}'] END AS collection_source, "
+        # Same predicate the collection_source CASE above already uses, so the stamp can
+        # never disagree with the provenance tag: only the inferred devices are assumed.
+        f"NOT coalesce(is_confirmed_active_client, true) AS assumed, "
+        f"CASE WHEN NOT coalesce(is_confirmed_active_client, true) "
+        f"     THEN '{POSSIBLE_CLIENT_BASIS}' END AS assumption_basis "
         f"FROM {schema}.node_client_device "
         f"WHERE site_code IS NOT NULL AND smsid IS NOT NULL"
     )
@@ -3518,7 +5003,8 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_ad AS "
         f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
-        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra, "
+        f"  e.assumed, e.assumption_basis "
         f"FROM {schema}.graph_edges e "
         f"WHERE EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"   OR EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
@@ -3526,7 +5012,8 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(
         f"CREATE OR REPLACE TABLE {schema}.graph_edges_sccm AS "
         f"SELECT e.start_id, e.end_id, e.kind, e.collection_source, "
-        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra "
+        f"  e.coercion_victim_and_relay_target_pairs, e.coercion_victim_hostnames, e.sccm_infra, "
+        f"  e.assumed, e.assumption_basis "
         f"FROM {schema}.graph_edges e "
         f"WHERE NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"  AND NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
@@ -3539,18 +5026,23 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
 def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     """Top-level transform entrypoint (registered via @app.preproc(transformer=transforms))."""
     con.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    # Read once, up front: _site_hierarchy's untyped-root fallback (D5) needs this
+    # flag and runs before any other builder, so it can no longer be read lazily
+    # at its first use further down (that used to be right before
+    # _node_client_device_possible). Every later gated builder reuses this value.
+    disable_possible = _read_disable_possible(con, schema)
     _principal_by_name(con, schema)
-    _site_hierarchy(con, schema)
+    _site_hierarchy(con, schema, disable_possible)
     _derive_ad_props(con, schema)  # must precede the AD node builders below (_join_ad_props)
     _node_computer(con, schema)
     _node_user(con, schema)
     _node_group(con, schema)
+    _node_smc_container(con, schema)
     _node_site(con, schema)
     _node_collection(con, schema)
     _node_security_role(con, schema)
     _node_admin_user(con, schema)
     _node_client_device(con, schema)
-    disable_possible = _read_disable_possible(con, schema)
     _node_client_device_possible(con, schema, disable_possible)
     # Stage 2 lookup tables: name/id -> id maps that edge builders join against.
     # These read from the raw source tables (not the node_* coalesces) and must
@@ -3570,9 +5062,17 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     # Stage 4: collapse real+inferred ClientDevice twins by ad_domain_sid BEFORE edges,
     # so every edge builder references survivors (no graph_edges rewrite needed).
     _dedup_client_device(con, schema)
+    # ad_domain_sid is only finalized once dedup has run (real clients get it from
+    # _enrich_client_device; both real and inferred survive dedup keyed on it), so the
+    # join to node_computer's AD attributes runs here, after both.
+    _enrich_client_device_ad_attrs(con, schema)
     _enrich_site_lists(con, schema)
     _derive_site_system_roles(con, schema)
     # Stage 5: MSSQL nodes (built from SCCM topology + EPA scan; spec §6 Stage 5).
+    # _assumed_site_dbs (D2/Task 2) must run first -- it is the non-privileged
+    # signal _mssql_sql_servers' new arm reads, and it needs disable_possible to
+    # gate its own SPN+SCCM inference.
+    _assumed_site_dbs(con, schema, disable_possible)
     _mssql_sql_servers(con, schema)
     _node_mssql_server(con, schema)
     _node_mssql_database(con, schema)
@@ -3586,10 +5086,12 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _edge_replication(con, schema)
     _edge_has_client(con, schema)
     _edge_has_member(con, schema)
+    _edge_generic_all_smc(con, schema)
     _edge_is_mapped_to(con, schema)
     _edge_is_assigned(con, schema)
     _edge_has_user(con, schema)
     _edge_member_of(con, schema)
+    _edge_member_of_smc(con, schema)
     _edge_has_session(con, schema)
     _edge_has_stored_account(con, schema)
     _edge_contains(con, schema)
@@ -3603,15 +5105,19 @@ def transforms(con: duckdb.DuckDBPyConnection, schema: str = "sccm") -> None:
     _edge_mssql_structural(con, schema)
     _edge_mssql_membership(con, schema)
     _edge_mssql_service_account(con, schema)
+    _edge_mssql_service_account_spn(con, schema)
+    _edge_mssql_kerberoast_spn(con, schema)
     _edge_mssql_db_assign_all(con, schema)
     # Stage 6: coerce-and-relay possible edges + the synthetic Authenticated Users node.
-    # disable_possible was read above (for _node_client_device_possible). The relay builders
-    # gate the "assume vulnerable on null" cases on it (surgical, Stage 6 decision #1).
+    # disable_possible was read up top (for _site_hierarchy and _node_client_device_possible).
+    # The relay builders gate the "assume vulnerable on null" cases on it (surgical, Stage 6 decision #1).
     # _node_authenticated_users runs AFTER the relay builders (it reads their start ids) and
     # BEFORE dedup/backfill/split (which read node_group for the AD id set).
-    _edge_coerce_relay_adminservice(con, schema, disable_possible)
+    # adminservice/smb take no flag: both their gates are flag-independent (see their
+    # docstrings). Only the MSSQL relay's EPA gate actually tightens under it.
+    _edge_coerce_relay_adminservice(con, schema)
     _edge_coerce_relay_mssql(con, schema, disable_possible)
-    _edge_coerce_relay_smb(con, schema, disable_possible)
+    _edge_coerce_relay_smb(con, schema)
     _node_authenticated_users(con, schema)
     # Dedup after all edge builders: both adminservice and wmi sources can contribute the
     # same edge, and name fan-out (collection_by_name, role_by_name) can match the same

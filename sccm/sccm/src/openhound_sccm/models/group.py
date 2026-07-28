@@ -49,6 +49,12 @@ class GroupNode(BaseAsset):
     service_principal_name: list[str] | None = None
     cn: str | None = None
     domain: str | None = None
+    # sam_account_name / distinguished_name (Task ope-c141): ad_props-only fields --
+    # node_group has no raw arm of its own that spreads an AD object like
+    # Computer/User do, so these are populated solely when this SID was
+    # independently LDAP-resolved elsewhere (_derive_ad_props).
+    sam_account_name: str | None = None
+    distinguished_name: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -92,6 +98,8 @@ class GroupNode(BaseAsset):
                 objectClass=self.object_class,
                 servicePrincipalName=self.service_principal_name,
                 CN=self.cn,
+                SamAccountName=self.sam_account_name,
+                distinguishedName=self.distinguished_name,
             ),
         )
 

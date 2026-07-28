@@ -250,8 +250,15 @@ def _sitesigncert_probe(client: HttpClient, target: str,
         return  # unresolved in AD; PS1 guards the node upsert on $x.ADObject
     target_entry = ctx.target_hosts_by_hostname.get(target.lower())
     site_code = target_entry.site_code if target_entry else None
-    yield _role_row("http_site_servers", ad_object, dns_name, "HTTP-sitesigncert",
-                    "SMS Site Server", site_code, None)
+    table, row = _role_row("http_site_servers", ad_object, dns_name, "HTTP-sitesigncert",
+                           "SMS Site Server", site_code, None)
+    # D6: sitesigncert is an MP endpoint, so the issuer named in the cert is the
+    # site server of *this MP's* site. The probe runs before MPKEYINFORMATION has
+    # set self.site_code (ps1:8611 ordering, which we must not change), so record
+    # the MP we dialed and let the transform join it for the code. Mirrors
+    # http_site_versions.mp_host.
+    row["mp_host"] = target
+    yield table, row
 
 
 # --- per-target role probe state -------------------------------------------

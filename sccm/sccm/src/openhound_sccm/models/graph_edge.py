@@ -62,6 +62,12 @@ class GraphEdge(_BaseGraphEdge):
     # NULL, so convert prunes the property from their panels.
     sccm_infra: bool | None = None
 
+    # Provenance (Task 3/4/5, D3): populated only by the MSSQL site-DB-scaffolding
+    # edges (Task 4) and the Tier-B SCCM permission/coerce/local-admin edges (Task
+    # 5); every other kind leaves both NULL, so convert prunes them.
+    assumed: bool | None = None
+    assumption_basis: str | None = None
+
     @property
     def edges(self) -> Iterator[Edge]:
         """Yield one Edge for this row.
@@ -87,6 +93,11 @@ class GraphEdge(_BaseGraphEdge):
         else:
             help_fields = {}
             logger.debug("GraphEdge: no entity-panel help authored for kind %r", self.kind)
+        # `assumed` is stored as an explicit false (not null) for confirmed rows in
+        # the MSSQL site-DB scaffolding family (Task 4's basis-derived CASE), so
+        # `or None` prunes those to match the sccm_infra convention: only an
+        # affirmative claim is worth cluttering a confirmed edge's panel with.
+        assumed = self.assumed or None
         if self.kind in _RELAY_KINDS:
             # Relay edges carry the operator-facing coercion context (CMBP).
             properties = SCCMRelayEdgeProperties(
@@ -95,6 +106,7 @@ class GraphEdge(_BaseGraphEdge):
                 coercionVictimAndRelayTargetPairs=self.coercion_victim_and_relay_target_pairs or [],
                 coercionVictimHostnames=self.coercion_victim_hostnames or [],
                 SCCMInfra=self.sccm_infra,
+                assumed=assumed, assumptionBasis=self.assumption_basis,
                 **help_fields,
             )
         else:
@@ -103,6 +115,7 @@ class GraphEdge(_BaseGraphEdge):
                 traversable=traversable,
                 collectionSource=self.collection_source or [],
                 SCCMInfra=self.sccm_infra,
+                assumed=assumed, assumptionBasis=self.assumption_basis,
                 **help_fields,
             )
         yield Edge(

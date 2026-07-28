@@ -2,7 +2,7 @@
 id: ope-6b93
 status: open
 deps: []
-links: [ope-fb99]
+links: [ope-fb99, ope-0947]
 created: 2026-07-24T14:14:47Z
 type: task
 priority: 3

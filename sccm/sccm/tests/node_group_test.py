@@ -156,6 +156,51 @@ def test_node_group_resolves_via_user_group_source_with_json_membership():
     assert ("S-1-5-21-1-2-3-513", "mayyhem\\Domain Users") in rows, rows
 
 
+def test_node_group_gains_sam_account_name_and_distinguished_name_from_ad_props():
+    """A group whose SID was independently LDAP-resolved (e.g. via the
+    System Management container GenericAll ACL walk) must carry SamAccountName
+    and distinguishedName -- the same ad_props table that already backfills
+    Domain/Enabled/IsDomainPrincipal/Type onto node_group via _join_ad_props
+    carries these two fields too (ldap_resolved_principals persists them,
+    context.py:_record_resolved_principal), they just weren't being read.
+
+    Mirrors the live 2026-07-28 low-priv run: 'Domain Admins' sits fully resolved
+    in ldap_resolved_principals (LDAP-GenericAllSystemManagement) but node_group
+    never surfaced sam_account_name/distinguished_name for it.
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+
+    # This group's SID is known directly (is_group=True), same as any admin-sourced group.
+    con.execute(
+        "CREATE TABLE sccm.adminservice_admins AS SELECT "
+        "'MAYYHEM\\Domain Admins' AS logon_name, "
+        "'S-1-5-21-1-2-3-512' AS admin_sid, true AS is_group"
+    )
+    # The SAME sid was independently LDAP-resolved (e.g. GenericAll ACL walk).
+    con.execute(
+        "CREATE TABLE sccm.ldap_resolved_principals ("
+        "sid VARCHAR, object_class VARCHAR[], user_account_control BIGINT, "
+        "service_principal_name VARCHAR[], cn VARCHAR, sam_account_name VARCHAR, "
+        "distinguished_name VARCHAR, domain VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO sccm.ldap_resolved_principals VALUES ("
+        "'S-1-5-21-1-2-3-512', ['top', 'group'], 0, NULL, 'Domain Admins', "
+        "'Domain Admins', 'CN=Domain Admins,CN=Users,DC=mayyhem,DC=com', 'mayyhem.com')"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT sam_account_name, distinguished_name FROM sccm.node_group "
+        "WHERE sid = 'S-1-5-21-1-2-3-512'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "Domain Admins"
+    assert row[1] == "CN=Domain Admins,CN=Users,DC=mayyhem,DC=com"
+
+
 def test_node_group_deduplicates_same_sid_from_multiple_sources():
     """The same group SID appearing in both r_system and admins produces one row."""
     con = duckdb.connect(":memory:")

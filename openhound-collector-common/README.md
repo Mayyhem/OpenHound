@@ -26,8 +26,23 @@ binding, SPNEGO, LDAP, WMI, and SOCKS5 are all done in Python via `impacket` / `
 
 ## Consumers
 
-- `mssql` (`mssql/mssql`) — depends on this via a local path dependency.
-- SCCM (`sccm/sccm`) — to be migrated onto this library later (tracked by a separate ticket);
-  it currently keeps its own copies, generalized from here.
+- **[ConfigManBearPig 2.0](https://github.com/SpecterOps/ConfigManBearPig)** (PyPI: `configmanbearpig`)
+  — the SCCM collector. Depends on a published, capped release (`>=0.1.0,<0.2.0`).
+- **`mssql`** — the in-progress MSSQL collector.
 
-License: MIT.
+This is a library: it has no CLI and is never installed on its own by an end user. It arrives as a
+transitive dependency when someone installs a collector:
+
+```bash
+uv tool install openhound --with configmanbearpig
+```
+
+## Developing
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) — including how to work on this library and a collector at the
+same time without reinstalling after every edit.
+
+## License
+
+Apache-2.0 (see [LICENSE](LICENSE)). This code was factored out of the SCCM collector, itself a port of
+the Apache-2.0 `ConfigManBearPig.ps1`, so it inherits those terms.

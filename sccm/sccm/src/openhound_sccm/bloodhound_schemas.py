@@ -15,8 +15,11 @@ from openhound_collector_common.bloodhound import disable_possible_edges
 
 logger = logging.getLogger(__name__)
 
-# Package root holding the two hand-maintained schema files.
-_SCHEMA_ROOT = Path(__file__).resolve().parents[2]
+# The two hand-maintained schema files ship *inside* the package (see the wheel
+# target in pyproject.toml), so a package-relative path resolves identically in a
+# source checkout and in site-packages. The previous parents[2] hop pointed at the
+# repo directory, which does not exist in an installed copy.
+_SCHEMA_ROOT = Path(__file__).resolve().parent
 _SCCM_SCHEMA = _SCHEMA_ROOT / "schema_SCCM.json"
 _MSSQL_SCHEMA = _SCHEMA_ROOT / "schema_MSSQL.json"
 

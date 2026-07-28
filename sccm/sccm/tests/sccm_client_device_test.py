@@ -48,6 +48,33 @@ def test_client_device_c4_fields_mapped():
     assert p.collectionNames == ["All Systems"]
 
 
+def test_client_device_ad_attrs_mapped_with_cmbp_casing():
+    """AD attributes of the underlying computer surface with CMBP-verbatim casing
+    (confirmed against a real CMBP SCCM_ClientDevice node,
+    bloodhound-sccm-20260728-113941.zip sccm.json): 'DNSHostName' (not 'dNSHostName'
+    like Computer), 'CN', 'distinguishedName', lowercase 'domain' (not 'Domain' like
+    Computer/User/Group), 'objectClass', 'samAccountName', 'servicePrincipalName'.
+    """
+    n = SCCMClientDevice(
+        smsid="GUID-4", name="CAS-DB", site_code="PS1", root_site_code="PS1",
+        cn="CAS-DB",
+        dnshostname="cas-db.mayyhem.com",
+        distinguished_name="CN=CAS-DB,OU=Servers,DC=mayyhem,DC=com",
+        domain="MAYYHEM.COM",
+        object_class=["top", "person", "organizationalPerson", "user", "computer"],
+        sam_account_name="CAS-DB$",
+        service_principal_name=["CmRcService/CAS-DB"],
+    ).as_node
+    p = n.properties
+    assert p.CN == "CAS-DB"
+    assert p.DNSHostName == "cas-db.mayyhem.com"
+    assert p.distinguishedName == "CN=CAS-DB,OU=Servers,DC=mayyhem,DC=com"
+    assert p.domain == "MAYYHEM.COM"
+    assert p.objectClass == ["top", "person", "organizationalPerson", "user", "computer"]
+    assert p.samAccountName == "CAS-DB$"
+    assert p.servicePrincipalName == ["CmRcService/CAS-DB"]
+
+
 def test_client_device_node_exposes_is_confirmed_active_client():
     from openhound_sccm.models.sccm_client_device import SCCMClientDevice
     real = SCCMClientDevice(smsid="GUID:ABC", is_confirmed_active_client=True, root_site_code="PS1")

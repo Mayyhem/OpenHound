@@ -9,8 +9,9 @@ import logging
 import re
 import struct
 import xml.etree.ElementTree as ET
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional
 
+import dlt
 from ldap3 import BASE
 
 from ..clients.ad import bytes_to_sid
@@ -257,7 +258,13 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     source="LDAP-mSSMSManagementPoint",
                 )
                 if mp_target:
-                    mp_sid = mp_target.ad_object.get("object_sid")
+                    # register_target can return an entry with ad_object=None (host
+                    # registered as a probe target but not resolved in AD yet) --
+                    # ``.ad_object.get(...)`` unguarded would raise AttributeError,
+                    # which the outer except would swallow by discarding this ENTIRE
+                    # capabilities row, including site_type/parent_site_code/
+                    # root_site_code that site_hierarchy (Task 1) depends on. Guard it.
+                    mp_sid = mp_target.ad_object.get("object_sid") if mp_target.ad_object else None
                     sid_suffix = f" ({mp_sid})" if mp_sid else ""
                     logger.info("Found management point in site %s: %s%s", mp_site_code, mp_hostname, sid_suffix)
                     mp_count += 1
@@ -281,6 +288,11 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             # Register the fallback status point as a collection target;
             # the FSP hostname comes from the FSPServer node inside the capabilities XML
             fsp_hostname = parsed["fsp_hostname"]
+            # Hoisted out of the `if fsp_target:` block (was previously only used to
+            # build the log-message suffix below and never reached the yielded row) so
+            # the transform can key node_computer's FSP arm off a real sid instead of
+            # having to invent one from the hostname.
+            fsp_sid: Optional[str] = None
             if fsp_hostname:
                 fsp_target = ctx.register_target(
                     fsp_hostname,
@@ -288,12 +300,43 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                     source="LDAP-mSSMSManagementPoint",
                 )
                 if fsp_target:
-                    fsp_sid = fsp_target.ad_object.get("object_sid")
+                    # Same unresolved-in-AD guard as mp_target above -- an unguarded
+                    # ``.ad_object.get(...)`` here would blow up the whole capabilities
+                    # row (and this task's fsp_sid with it) the moment one FSP can't be
+                    # resolved.
+                    fsp_sid = fsp_target.ad_object.get("object_sid") if fsp_target.ad_object else None
                     sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
                     logger.info("Found fallback status point in site %s: %s%s", mp_site_code, fsp_hostname, sid_suffix)
                     fsp_count += 1
-                # No else: register_target logs why it skipped (filtered host or
-                # empty name), so a None return isn't a failure here.
+                else:
+                    # register_target returns None only when the --computers
+                    # allowed-targets filter declines the host (an empty
+                    # identifier is already ruled out by the `if fsp_hostname`
+                    # guard above) -- it resolves the AD object internally
+                    # BEFORE applying that filter (context.py Step 1 vs Step 2),
+                    # so the object exists, it was just discarded. The filter
+                    # gates *probing*, not *recording* (mirrors http.py's
+                    # _register_and_resolve / D6): the sitesigncert probe
+                    # resolves-without-probing for exactly this reason, so an
+                    # FSP excluded from probing by --computers should still
+                    # surface its role here rather than vanish silently.
+                    # resolve_principal is cached, so this costs no extra LDAP
+                    # round-trip.
+                    fsp_ad_object = ctx.resolve_principal(fsp_hostname)
+                    if fsp_ad_object:
+                        fsp_sid = fsp_ad_object.get("object_sid")
+                        sid_suffix = f" ({fsp_sid})" if fsp_sid else ""
+                        logger.info(
+                            "Found fallback status point in site %s: %s%s "
+                            "(excluded from probing by --computers; recording its role only)",
+                            mp_site_code, fsp_hostname, sid_suffix,
+                        )
+                        fsp_count += 1
+                    else:
+                        logger.debug(
+                            "Fallback status point %s in site %s could not be resolved "
+                            "in AD; no role will be recorded for it", fsp_hostname, mp_site_code,
+                        )
 
             yield {
                 "mp_hostname": mp_hostname,
@@ -303,6 +346,7 @@ def ldap_management_points_raw(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 "command_line_site_code": parsed["command_line_site_code"],
                 "root_site_code": parsed["root_site_code"],
                 "fsp_hostname": parsed["fsp_hostname"],
+                "fsp_sid": fsp_sid,
             }
         except Exception as ex:
             logger.error("Failed to process mSSMSManagementPoint entry %s: %s", entry.get("mSSMSMPName"), ex)
@@ -518,6 +562,18 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             logger.debug(f"Search result: {computer}")
 
 
+def _format_guid(raw_guid: Optional[str]) -> Optional[str]:
+    """Render an AD objectGUID in SharpHound's canonical UPPERCASE 8-4-4-4-12 form.
+
+    ADClient._entry_to_dict already decodes the binary objectGUID into that
+    dashed form (bytes_to_guid), but lowercase. SharpHound's objectid for
+    GUID-keyed AD objects (containers, OUs, GPOs) is always uppercase, so a
+    Container node built here (Task 11) must match exactly or it will not merge
+    with SharpHound's own node for the same object.
+    """
+    return raw_guid.upper() if raw_guid else None
+
+
 @app.resource(name="ldap_system_management_dacl", parallelized=False, columns=raw_table_asset("ldap_system_management_dacl"))
 @with_log_context(phase="LDAP", target_from_ctx_domain=True)
 def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
@@ -542,7 +598,7 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             ctx.ad.paged_search(
             search_filter="(objectClass=container)",
             base=system_mgmt_dn,
-            attributes=["nTSecurityDescriptor"],
+            attributes=["nTSecurityDescriptor", "objectGUID", "name"],
             controls=[sd_control],
             )
         )
@@ -553,6 +609,23 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
     if not results:
         logger.warning("Could not read System Management container ACLs")
         return
+
+    # Task 11 (Tier A+): capture the container's own identity once, so every
+    # GenericAll principal row below can carry it through to the transform, which
+    # builds a Container node (id = objectGUID, matching SharpHound's own node so
+    # the two merge) and a GenericAll edge from each principal to it.
+    container_guid = _format_guid(results[0].get("object_guid"))
+    container_dn = results[0].get("distinguished_name") or system_mgmt_dn
+    if container_guid:
+        logger.debug("System Management container objectGUID resolved to %s", container_guid)
+    else:
+        # No usable GUID means Task 11's Container/GenericAll edges can't be built for
+        # this run -- not fatal, the rest of this resource (GenericAll principal
+        # discovery/registration) still proceeds unaffected.
+        logger.warning(
+            "System Management container has no resolvable objectGUID; "
+            "Container/GenericAll edges will be skipped for this run"
+        )
 
     sd_bytes = results[0].get("nTSecurityDescriptor")
     if not sd_bytes or not isinstance(sd_bytes, bytes):
@@ -605,9 +678,20 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             elif "group" in [c.lower() for c in obj_class]:
                 obj_type = "group"
                 # Members effectively inherit Full Control on the container (ope-e191) —
-                # recurse so member computers get registered as scan targets too.
-                _expand_group_targets(ctx, ad_obj, set())
+                # recurse so member computers get registered as scan targets too, and
+                # (Task 12) collect a MemberOf row for every member -> containing-group
+                # hop the walk visits, at every nesting level. Routed to a distinct
+                # table (ldap_smc_group_members) via dlt.mark so this one resource can
+                # feed both the DACL-principal table and the membership table.
+                for member_row in _expand_group_targets(ctx, ad_obj, set()):
+                    yield dlt.mark.with_table_name(member_row, "ldap_smc_group_members")
             logger.info(f"Found {obj_type} with GenericAll on System Management container: {sam} ({sid_str})")
+
+            # Task 11: stamp the container's identity on every principal row so the
+            # transform can build the Container node + GenericAll edge from this
+            # single table.
+            ad_obj["smc_container_guid"] = container_guid
+            ad_obj["smc_container_dn"] = container_dn
 
             yield ad_obj
 
@@ -615,14 +699,24 @@ def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
             logger.error(f"Failed to process GenericAll principal {sid_str}: {ex}")
 
 
-def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited: set[str]) -> None:
+def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any],
+                           visited: set[str]) -> list[dict[str, Any]]:
     """Recursively register computer members of a group that holds GenericAll on the
-    System Management container (ope-e191). Users are logged (modeled elsewhere via the
-    caller's yield), nested groups recurse; visited guards circular nesting."""
+    System Management container (ope-e191), and (Task 12) return a MemberOf row for
+    every member -> containing-group hop the walk visits, at every nesting level.
+
+    The recursion already descends nested groups (to register their computer
+    members as scan targets), so accumulating one row per (member, its immediate
+    parent group) at each level yields the full nested MemberOf chain for free —
+    we already pay for the walk. Users are logged (modeled elsewhere via the
+    caller's yield), nested groups recurse; visited guards circular nesting.
+    """
+    rows: list[dict[str, Any]] = []
     group_dn = group_obj.get("distinguished_name")
+    group_sid = group_obj.get("object_sid")
     if not group_dn or group_dn in visited:
         logger.debug("System Management container ACL group expansion: skipping visited/empty group %s", group_dn)
-        return
+        return rows
     visited.add(group_dn)
     grp = next(ctx.ad.paged_search("(objectClass=*)", ["member"], base=group_dn, scope=BASE), None) or {}
     members = grp.get("member") or []
@@ -640,25 +734,41 @@ def _expand_group_targets(ctx: SourceContext, group_obj: dict[str, Any], visited
             group_dn)
     if not members:
         logger.debug("System Management container ACL group expansion: group %s has no members", group_dn)
-        return
+        return rows
     for member_dn in members:
         member = ctx.resolve_principal(member_dn)
         if not member:
             logger.warning("System Management container ACL group expansion: could not resolve member %s", member_dn)
             continue
+        member_sid = member.get("object_sid")
         oc = member.get("object_class", [])
         oc = [oc] if isinstance(oc, str) else oc
         ocl = [c.lower() for c in oc]
+        if group_sid and member_sid:
+            rows.append({
+                "group_sid": group_sid,
+                "member_sid": member_sid,
+                "member_type": oc[-1].lower() if oc else "unknown",
+            })
+        else:
+            # No SID on one side means no MemberOf row can be keyed -- log and move
+            # on rather than emit an unusable row (mirrors the existing "could not
+            # resolve member" skip just above).
+            logger.debug(
+                "System Management container ACL group expansion: %s has no resolvable "
+                "SID pair (group=%s member=%s); skipping MemberOf row",
+                member_dn, group_sid, member_sid)
         if "computer" in ocl:
             ctx.register_target(identifier=member.get("dns_host_name"),
                                 source="LDAP-GenericAllSystemManagement", ad_object=member)
         elif "group" in ocl:
-            _expand_group_targets(ctx, member, visited)
+            rows.extend(_expand_group_targets(ctx, member, visited))
         elif "user" in ocl:
             logger.info("System Management container ACL group expansion: user member %s controls the container (modeled, not a scan target)",
                         member.get("sam_account_name"))
         else:
             logger.warning("System Management container ACL group expansion: member %s has unhandled objectClass %s", member_dn, ocl)
+    return rows
 
 
 def _parse_sd_generic_all(sd_bytes: bytes) -> list[str]:

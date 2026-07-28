@@ -1,20 +1,47 @@
 [project]
-name = "sccm"
-version = "0.0.1"
-description = "OpenGraph collector for sccm using OpenHound"
+# The PyPI distribution is "configmanbearpig" — this collector IS ConfigManBearPig 2.0,
+# the Python successor to ConfigManBearPig.ps1. Three names are in play, deliberately:
+#   distribution  configmanbearpig   what users install  (uv tool install openhound --with configmanbearpig)
+#   import pkg    openhound_sccm     what the code imports
+#   CLI verb      sccm               what users type     (openhound collect sccm)
+# The verb names the data source, matching every other OpenHound collector (jamf, okta, github).
+name = "configmanbearpig"
+# Version comes from the git tag via hatch-vcs (see [tool.hatch.version] below).
+dynamic = ["version"]
+description = "ConfigManBearPig 2.0 — OpenHound/BloodHound OpenGraph collector for Microsoft Configuration Manager (SCCM/MECM)"
 readme = "README.md"
 requires-python = "<3.15,>=3.13"
 authors = [
   {name = "Chris Thompson (@_Mayyhem)", email = "cthompson@specterops.io"}
 ]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["sccm", "mecm", "configmgr", "bloodhound", "opengraph", "openhound", "attack-paths"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Information Technology",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+]
+# NOTE: `openhound` is required at runtime but is deliberately NOT declared here. The
+# framework is the host environment, not a library this package pulls in — users install
+# it as the tool (`uv tool install openhound --with configmanbearpig`), and every other
+# OpenHound collector does the same (openhound-jamf declares no dependencies at all).
+# Declaring a range here could only ever conflict with the version the user chose.
 dependencies = [
     # Shared pure-Python collector infrastructure (TDS/NTLM/Kerberos/EPA, LDAP/AD,
     # WMI, DNS discovery, duckdb-safe, DLT source bridge, logging, graph base).
-    # Carries impacket/ldap3/dnspython/pywin32/winkerberos/cryptography transitively
-    # (see ../../openhound-collector-common). SCCM migrates onto it module-by-module
-    # per docs/superpowers/specs/2026-07-02-sccm-shared-lib-migration-design.md; the
-    # direct deps below are pruned as each SCCM module stops importing them directly.
-    "openhound-collector-common",
+    # Carries impacket/ldap3/dnspython/pywin32/winkerberos/cryptography transitively.
+    # Published from https://github.com/Mayyhem/openhound-collector-common.
+    #
+    # Capped below 0.2 because a 0.x library makes no API-stability promise — an
+    # uncapped floor would let a breaking 0.2 land silently in users' installs.
+    #
+    # Do NOT add a [tool.uv.sources] path entry for this: it would break `uv sync`
+    # for anyone who clones this repo without the sibling checkout. To develop
+    # against a live copy, run `just dev` (see DEVELOPMENT.md).
+    "openhound-collector-common>=0.1.0,<0.2.0",
     # LDAP client used by the LDAP collection phase (clients/ad.py).
     # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
     # TLS_CHANNEL_BINDING constants, required for NTLM sign-and-seal and
@@ -46,12 +73,6 @@ dependencies = [
     "cryptography>=42.0.0",
 ]
 
-[tool.uv.sources]
-# Editable local path dep: SCCM and MSSQL share one live copy of the library in a
-# single checkout. The library is a read-only contract to extension work — changes
-# to it are a separate, user-gated shared-lib task (see the migration spec).
-openhound-collector-common = { path = "../../openhound-collector-common", editable = true }
-
 [tool.uv]
 # Prefer system / official Pythons over uv-managed (python-build-standalone) on
 # Windows: their libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim,
@@ -60,11 +81,30 @@ openhound-collector-common = { path = "../../openhound-collector-common", editab
 python-preference = "only-system"
 
 [build-system]
-requires = ['hatchling']
+requires = ['hatchling', 'hatch-vcs']
 build-backend = 'hatchling.build'
 
+[project.urls]
+Homepage = "https://github.com/SpecterOps/ConfigManBearPig"
+Repository = "https://github.com/SpecterOps/ConfigManBearPig"
+Issues = "https://github.com/SpecterOps/ConfigManBearPig/issues"
+
+# Only this directory ships in the wheel. Any data file the collector reads at runtime
+# (extension.yaml, schema_SCCM.json, schema_MSSQL.json) MUST live inside it — a path
+# resolved above the package works in a checkout and vanishes once installed.
 [tool.hatch.build.targets.wheel]
 packages = ["src/openhound_sccm"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# PyPI rejects versions with a local segment (+g1a2b3c), which setuptools-scm adds by
+# default on any non-tag commit.
+local_scheme = "no-local-version"
+# Keeps `uv build` working in a tagless or shallow checkout. CI asserts the built version
+# matches the tag, so a stray 0.0.0 can never reach PyPI.
+fallback_version = "0.0.0"
 
 [dependency-groups]
 dev = [

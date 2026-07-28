@@ -155,6 +155,58 @@ def test_node_site_server_and_sql_identity():
     assert row[5] == "S-1-5-21-1-2-3-1500"      # SQLServiceAccountDomainSID (resolved by name)
 
 
+def test_node_site_type_falls_back_to_site_hierarchy_inference():
+    """A CAS is never typed directly by any of node_site's own (privileged) arms --
+    a CAS has no management point, the one low-priv source that carries an explicit
+    site_type (site_type_inference_test.py). site_hierarchy now infers it (CAS-from-
+    Primary-parent), so node_site.site_type must fall back to that inferred value
+    rather than staying NULL. Mirrors the live 2026-07-28 low-priv run exactly:
+    site_hierarchy = [('CAS', None, 4, 'CAS'), ('PS1', 'CAS', 2, 'CAS'), ('SEC', None, None, 'CAS')].
+    """
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    # Only LDAP MP capabilities collected (low-priv): PS1's MP states its own type +
+    # parent; nothing states the CAS's type directly -- _site_hierarchy must infer it.
+    con.execute(
+        "CREATE TABLE sccm.ldap_management_points_raw "
+        "(site_code VARCHAR, site_type VARCHAR, parent_site_code VARCHAR, root_site_code VARCHAR)"
+    )
+    con.execute(
+        "INSERT INTO sccm.ldap_management_points_raw VALUES "
+        "('PS1', 'Primary Site', 'CAS', 'CAS')"
+    )
+    con.execute(
+        "CREATE TABLE sccm.ldap_sites AS SELECT * FROM "
+        "(VALUES ('PS1', NULL, 'CAS'), ('CAS', NULL, 'Undetermined'), ('SEC', NULL, 'Undetermined')) "
+        "AS t(site_code, site_guid, parent_site_code)"
+    )
+
+    transforms(con)
+
+    rows = {r[0]: r[1] for r in con.execute(
+        "SELECT site_code, site_type FROM sccm.node_site").fetchall()}
+    assert rows["CAS"] == 4, f"CAS site_type must fall back to site_hierarchy's inferred value, got {rows}"
+    assert rows["PS1"] == 2
+
+
+def test_node_site_type_privileged_source_wins_over_site_hierarchy_fallback():
+    """When node_site's own (privileged) arm already states a site_type, that value
+    must win -- the site_hierarchy fallback only fills genuine gaps."""
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE SCHEMA IF NOT EXISTS sccm")
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions AS SELECT * FROM "
+        "(VALUES ('CAS', NULL, 4), ('PS1', 'CAS', 2)) "
+        "AS t(site_code, parent_site_code, site_type)"
+    )
+
+    transforms(con)
+
+    rows = {r[0]: r[1] for r in con.execute(
+        "SELECT site_code, site_type FROM sccm.node_site").fetchall()}
+    assert rows == {"CAS": 4, "PS1": 2}
+
+
 def test_node_site_ldap_distinguished_name_and_source_forest():
     """distinguished_name and source_forest from ldap_sites land in node_site."""
     con = duckdb.connect(":memory:")

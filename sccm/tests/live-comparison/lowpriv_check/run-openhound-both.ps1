@@ -32,6 +32,13 @@ function Invoke-OpenHoundRun {
         "--dc","dc.mayyhem.com",
         "-u","lowpriv",
         "-p","password",
+        # MANDATORY here: this script reuses openhound\<tag> across runs, and dlt APPENDS a
+        # new load package beside the old ones rather than replacing them. Preprocess reads
+        # every .jsonl.gz per table, so without --clean the previous run's rows are UNIONed
+        # into this run's graph -- and any table this run finds empty keeps the OLD rows
+        # entirely. Measured 2026-07-28: 11 of 24 raw tables held rows from two different
+        # dates, with exit code 0 and fresh graph/ timestamps hiding it completely.
+        "--clean",
         "--run-integration-tests"
     )
     if ($cmbpZip) { $args += @("--compare-to-zip", $cmbpZip.FullName) }

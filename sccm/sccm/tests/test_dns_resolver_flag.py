@@ -1,4 +1,6 @@
 """Tests for --dns-resolver flag behaviour in main.py and collectors/dns.py."""
+from types import SimpleNamespace
+
 import dns.resolver as _dns_resolver
 from unittest.mock import MagicMock, patch
 
@@ -116,4 +118,72 @@ def test_dns_management_points_uses_default_resolver_when_dns_resolver_not_set()
         list(dns_management_points(ctx))
 
         mock_cls.assert_called_once_with()
+
+
+def _raw(resource):
+    """Return the undecorated generator behind an ``@app.resource`` DltResource.
+
+    Calling the DltResource object itself (as the two tests above do) runs it
+    through dlt's own pipe/extraction iteration, which -- since this resource
+    declares ``columns=raw_table_asset(...)`` with ``return_validated_models:
+    True`` -- validates each yielded dict into a pydantic model instance rather
+    than handing back the plain dict. Reaching the wrapped function (any level
+    of the ``functools.wraps`` chain works identically; the wrapping layers are
+    transparent pass-throughs) and calling it directly with a stub ctx bypasses
+    that, so assertions can index the plain dict as written by the collector.
+    Same technique as local_resources_state_test.py's ``_raw()``.
+    """
+    return resource._pipe.gen.__wrapped__
+
+
+def test_dns_management_points_emits_uppercased_role_and_site_code():
+    """A DNS SRV-discovered MP's role and site_code are uppercased even when
+    --site-codes was passed lowercase (source.py:39 does not uppercase it) --
+    matching Task 1's uppercase invariant and every other role string (review
+    fix round 1, MINOR-4). Also pins the collector->transform column-name
+    contract (object_sid/site_code/sccm_site_system_roles) the transform arm
+    depends on (MINOR-7)."""
+    import dns.resolver as _dns_resolver_mod
+    from openhound_sccm.collectors.dns import dns_management_points
+
+    ad = {"object_sid": "S-1-5-21-1-2-3-9", "dns_host_name": "mp1.corp.local", "name": "MP1"}
+    ctx = _make_ctx(dns_resolver=None, site_codes={"ps1"})
+    ctx.register_target = MagicMock(return_value=SimpleNamespace(ad_object=ad))
+
+    mock_answer = MagicMock()
+    mock_answer.target.__str__ = lambda self: "mp1.corp.local."
+    mock_resolver_instance = MagicMock()
+    mock_resolver_instance.resolve.return_value = [mock_answer]
+
+    with patch.object(_dns_resolver_mod, "Resolver", return_value=mock_resolver_instance):
+        rows = list(_raw(dns_management_points)(ctx))
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["object_sid"] == "S-1-5-21-1-2-3-9"
+    assert row["site_code"] == "PS1"
+    assert row["sccm_site_system_roles"] == "SMS Management Point@PS1"
+    assert row["sccm_infra"] is True
+
+
+def test_dns_management_points_skips_unresolved_target_without_crashing():
+    """register_target can return a target whose ad_object is None (host
+    registered as a probe target but not yet resolved in AD); spreading
+    **target.ad_object on that would raise TypeError. Confirms the
+    `if target and target.ad_object` guard added alongside the row-emission
+    change."""
+    from openhound_sccm.collectors.dns import dns_management_points
+
+    ctx = _make_ctx(dns_resolver=None, site_codes={"PS1"})
+    ctx.register_target = MagicMock(return_value=SimpleNamespace(ad_object=None))
+
+    mock_answer = MagicMock()
+    mock_answer.target.__str__ = lambda self: "unresolved.corp.local."
+    mock_resolver_instance = MagicMock()
+    mock_resolver_instance.resolve.return_value = [mock_answer]
+
+    with patch.object(_dns_resolver, "Resolver", return_value=mock_resolver_instance):
+        rows = list(_raw(dns_management_points)(ctx))
+
+    assert rows == []
 

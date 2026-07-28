@@ -15,6 +15,8 @@ from openhound_collector_common.integration_testing.cases import CountSpec, Node
 from openhound_collector_common.integration_testing.graph import Graph
 from openhound_collector_common.integration_testing.results import FAIL, PASS, Result
 
+from openhound_sccm.integration.fixtures import SCCMNodeCase
+
 ROOT_SITE = "CAS"
 
 MAYYHEM_NODE_CASES: list[NodeCase] = [
@@ -36,20 +38,25 @@ MAYYHEM_NODE_CASES: list[NodeCase] = [
     ###################
     # SCCM_Collection #
     ###################
-    NodeCase(id="node-collection-count", description="At least 10 SCCM collections across the hierarchy",
-             kinds=["SCCM_Collection"], count=CountSpec(at_least=10)),
+    # Tier D (design spec S:5): collections have no AD/LDAP/RemoteRegistry
+    # representation, so this count can only be checked against a privileged
+    # (AdminService/WMI) collection.
+    SCCMNodeCase(id="node-collection-count", description="At least 10 SCCM collections across the hierarchy",
+                 kinds=["SCCM_Collection"], count=CountSpec(at_least=10), requires_privilege=True),
 
     #################
     # SCCM_AdminUser #
     #################
-    NodeCase(id="node-adminuser-count", description="At least 3 SCCM admin users across the hierarchy",
-             kinds=["SCCM_AdminUser"], count=CountSpec(at_least=3)),
+    # Tier D: SCCM admin-user objects live in the site database's RBAC tables only.
+    SCCMNodeCase(id="node-adminuser-count", description="At least 3 SCCM admin users across the hierarchy",
+                 kinds=["SCCM_AdminUser"], count=CountSpec(at_least=3), requires_privilege=True),
 
     #####################
     # SCCM_SecurityRole #
     #####################
-    NodeCase(id="node-securityrole-count", description="At least 17 SCCM security roles across the hierarchy",
-             kinds=["SCCM_SecurityRole"], count=CountSpec(at_least=17)),
+    # Tier D: security roles are likewise site-database RBAC objects.
+    SCCMNodeCase(id="node-securityrole-count", description="At least 17 SCCM security roles across the hierarchy",
+                 kinds=["SCCM_SecurityRole"], count=CountSpec(at_least=17), requires_privilege=True),
 
     ################################################
     # MSSQL_ node kinds (bonus coverage, not SCCM) #

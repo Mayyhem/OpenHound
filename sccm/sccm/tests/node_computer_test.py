@@ -328,6 +328,132 @@ def test_node_computer_site_system_roles_augmented_from_sysresuse():
     assert "SMS Component Server@PS1" in roles, roles
 
 
+def test_node_computer_backfills_bare_role_from_same_host_single_site():
+    """A bare role ('SMS Provider') on a host that also carries an @-suffixed role
+    of a DIFFERENT type gets stamped with that same site (D6: same-host evidence,
+    not cross-host guessing). Mirrors ps1-sms in the live 2026-07-28 low-priv run:
+    ['SMS Component Server@PS1', 'SMS Provider'] -> both entries @PS1.
+    """
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3000' AS object_sid, 'PS1-SMS' AS name, "
+        "'ps1-sms.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "'SMS Provider' AS sccm_site_system_roles, true AS sccm_infra, "
+        "false AS smb_signing_required, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3000' AS object_sid, 'PS1-SMS' AS name, "
+        "'ps1-sms.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "NULL AS distinguished_name, 'SMS Component Server@PS1' AS sccm_site_system_roles"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT list_sort(site_system_roles) FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-3000'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == ["SMS Component Server@PS1", "SMS Provider@PS1"], row
+
+
+def test_node_computer_backfill_does_not_duplicate_existing_suffixed_role():
+    """If '<Role>@<site>' is already present alongside the bare '<Role>', the
+    backfill must not produce two entries for the same role."""
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3001' AS object_sid, 'PS1-DP' AS name, "
+        "'ps1-dp.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "'SMS Distribution Point' AS sccm_site_system_roles, true AS sccm_infra, "
+        "false AS smb_signing_required, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3001' AS object_sid, 'PS1-DP' AS name, "
+        "'ps1-dp.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "NULL AS distinguished_name, 'SMS Distribution Point@PS1' AS sccm_site_system_roles"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT site_system_roles FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-3001'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == ["SMS Distribution Point@PS1"], row
+
+
+def test_node_computer_backfill_leaves_bare_role_when_sites_ambiguous():
+    """When the host's other @-suffixed roles span more than one site, the bare
+    role must NOT be guessed at -- it stays bare (D6: never guess across sites)."""
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3002' AS object_sid, 'MULTI' AS name, "
+        "'multi.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "'SMS Provider' AS sccm_site_system_roles, true AS sccm_infra, "
+        "false AS smb_signing_required, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+    con.execute(
+        "CREATE TABLE sccm.adminservice_site_definitions_computers ("
+        "object_sid VARCHAR, name VARCHAR, dns_host_name VARCHAR, sam_account_name VARCHAR, "
+        "distinguished_name VARCHAR, sccm_site_system_roles VARCHAR)"
+    )
+    con.executemany(
+        "INSERT INTO sccm.adminservice_site_definitions_computers VALUES (?, ?, ?, ?, ?, ?)",
+        [["S-1-5-21-1-2-3-3002", "MULTI", "multi.mayyhem.com", None, None, "SMS Site Server@CAS"],
+         ["S-1-5-21-1-2-3-3002", "MULTI", "multi.mayyhem.com", None, None, "SMS Component Server@PS1"]],
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT list_sort(site_system_roles) FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-3002'"
+    ).fetchone()
+    assert row is not None
+    assert "SMS Provider" in row[0], row
+    assert not any(r.startswith("SMS Provider@") for r in row[0]), row
+
+
+def test_node_computer_backfill_leaves_bare_role_when_no_suffixed_role_exists():
+    """A host with only bare roles (no @-suffixed role to infer a site from) is
+    left untouched."""
+    con = duckdb.connect(":memory:")
+    _seed_base(con)
+
+    con.execute(
+        "CREATE TABLE sccm.smb_computers AS SELECT "
+        "'S-1-5-21-1-2-3-3003' AS object_sid, 'LONE' AS name, "
+        "'lone.mayyhem.com' AS dns_host_name, NULL AS sam_account_name, "
+        "'SMS Provider' AS sccm_site_system_roles, true AS sccm_infra, "
+        "false AS smb_signing_required, "
+        "NULL AS sccm_hosts_content_library, NULL AS sccm_is_pxe_support_enabled"
+    )
+
+    transforms(con)
+
+    row = con.execute(
+        "SELECT site_system_roles FROM sccm.node_computer "
+        "WHERE sid = 'S-1-5-21-1-2-3-3003'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == ["SMS Provider"], row
+
+
 def test_node_computer_distinguished_name_any_value_wins():
     """When smb_computers and remoteregistry_computers both have distinguished_name
     for the same SID, any_value picks the first non-null (idempotent)."""

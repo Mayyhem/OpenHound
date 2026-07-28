@@ -1,6 +1,6 @@
 import duckdb
 
-from openhound_sccm.transforms import _graph_edges_init, _edge_coerce_relay_smb
+from openhound_sccm.transforms import COERCE_RELAY_SOURCE, _graph_edges_init, _edge_coerce_relay_smb
 
 
 def _seed(con, target_ntlm):
@@ -23,10 +23,15 @@ def _seed(con, target_ntlm):
     _graph_edges_init(con, "sccm")
 
 
-def test_smb_relay_default_emits():
+def test_smb_relay_emits_with_null_ntlm():
+    # An unset RestrictReceivingNTLMTraffic is the Windows default (0 = allow all inbound
+    # NTLM) = genuinely vulnerable, so this edge is emitted regardless of
+    # --disable-possible-edges. The builder deliberately takes no flag: BOTH its gates are
+    # flag-independent, the confirmed one being smb_signing_required = false. Matches CMBP,
+    # which also emits this confirmed edge under its own flag.
     con = duckdb.connect()
     _seed(con, target_ntlm=None)  # NTLM unknown -> assume vulnerable
-    _edge_coerce_relay_smb(con, "sccm", disable_possible=False)
+    _edge_coerce_relay_smb(con, "sccm")
     rows = con.execute(
         "SELECT start_id, end_id, kind, collection_source, coercion_victim_hostnames "
         "FROM sccm.graph_edges"
@@ -36,19 +41,10 @@ def test_smb_relay_default_emits():
     assert start == "MAYYHEM.COM-S-1-5-11"
     assert end == "S-1-5-21-1-2-3-7001"          # the vulnerable site system
     assert kind == "SCCM_CoerceAndRelayToSMB"
-    assert csrc == ["SMB-Negotiate"]
+    # Task 5/D3: unconditionally assumed -- the existing SMB-signing-probe tag is
+    # preserved (Task 3's append semantics), not replaced.
+    assert csrc == ["SMB-Negotiate", COERCE_RELAY_SOURCE]
     assert victims == ["SS01.mayyhem.com"]        # the coerced site server
-
-
-def test_smb_relay_flag_keeps_null_ntlm():
-    # New semantics: an unset RestrictReceivingNTLMTraffic is the Windows default (0 = allow all
-    # inbound NTLM) = genuinely vulnerable, so the confirmed edge (target signing NOT required)
-    # survives --disable-possible-edges. NTLM is flag-independent; the confirmed gate is
-    # smb_signing_required = false. Matches CMBP, which emits this confirmed edge under its flag.
-    con = duckdb.connect()
-    _seed(con, target_ntlm=None)
-    _edge_coerce_relay_smb(con, "sccm", disable_possible=True)
-    assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1
 
 
 def test_smb_relay_drops_explicit_ntlm_restricted():
@@ -56,12 +52,12 @@ def test_smb_relay_drops_explicit_ntlm_restricted():
     # relayed NTLM, so no edge -- regardless of the flag.
     con = duckdb.connect()
     _seed(con, target_ntlm="DenyAll")
-    _edge_coerce_relay_smb(con, "sccm", disable_possible=True)
+    _edge_coerce_relay_smb(con, "sccm")
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 0
 
 
-def test_smb_relay_flag_keeps_confirmed():
+def test_smb_relay_emits_with_confirmed_ntlm_off():
     con = duckdb.connect()
     _seed(con, target_ntlm="Off")  # confirmed NTLM not restricted + signing off
-    _edge_coerce_relay_smb(con, "sccm", disable_possible=True)
+    _edge_coerce_relay_smb(con, "sccm")
     assert con.execute("SELECT count(*) FROM sccm.graph_edges").fetchone()[0] == 1

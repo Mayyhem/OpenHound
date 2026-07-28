@@ -22,7 +22,7 @@ def _seed(con):
         "sccm_resource_ids VARCHAR[], fallback_domain_sid VARCHAR)"
     )
     _graph_edges_init(con, "sccm")
-    _edge_coerce_relay_adminservice(con, "sccm", disable_possible=False)
+    _edge_coerce_relay_adminservice(con, "sccm")
 
 
 def test_authenticated_users_node_built_for_relay_domain():
@@ -77,11 +77,12 @@ def test_authenticated_users_built_from_non_adminservice_relay_kind():
     )
     _graph_edges_init(con, "sccm")
     # Seed a MSSQL relay edge whose start_id is the AuthUsers form for corp.example.com.
-    # Trailing NULL is sccm_infra (unrelated to this test; only SCCM_IsMappedTo populates it).
+    # Trailing NULLs are sccm_infra/assumed/assumption_basis (unrelated to this test;
+    # only SCCM_IsMappedTo populates sccm_infra, and no builder here stamps assumed).
     con.execute(
         f"INSERT INTO sccm.graph_edges VALUES "
         f"('CORP.EXAMPLE.COM-S-1-5-11', 'some-login-id', '{MSSQL_COERCE_AND_RELAY_TO_MSSQL}', "
-        f"['MSSQL-ScanForEPA'], ['Coerce DB01.corp.example.com, relay to db01:1433'], NULL, NULL)"
+        f"['MSSQL-ScanForEPA'], ['Coerce DB01.corp.example.com, relay to db01:1433'], NULL, NULL, NULL, NULL)"
     )
     _node_authenticated_users(con, "sccm")
     row = con.execute(

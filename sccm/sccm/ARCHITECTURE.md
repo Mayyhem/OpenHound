@@ -993,7 +993,7 @@ In OpenHound the list lives in `TRAVERSABLE_EDGE_KINDS` in [kinds/edges.py](src/
 
 All edges — regardless of kind — are emitted by the single generic [`GraphEdge`](src/openhound_sccm/models/graph_edge.py) model. It reads the `graph_edges` preproc table and sets both `SCCMEdgeProperties.traversable = kind in TRAVERSABLE_EDGE_KINDS` and `SCCMEdgeProperties.collectionSource` from the row's `collection_source` array (defaulting to `[]`). The `collection_source` column is a typed `VARCHAR[]` array — **not** a JSON string. Storing it as JSON was a Stage-2 bug (DuckDB returns JSON columns as plain strings, which would have required manual parsing in convert); the typed array avoids that entirely. This keeps the edge model trivially thin and `graph_edges` a uniform table — new edge kinds only require rows in the table plus an entry in the allow-list if they should be traversable.
 
-**`graph_edges` columns (as of Stage 6):**
+**`graph_edges` columns (as of the low-priv-assumed-edges plan, §11l):**
 
 | Column | Type | Description |
 |---|---|---|
@@ -1003,6 +1003,9 @@ All edges — regardless of kind — are emitted by the single generic [`GraphEd
 | `collection_source` | `VARCHAR[]` | Provenance tags array-unioned across duplicate rows |
 | `coercion_victim_and_relay_target_pairs` | `VARCHAR[]` | Human-readable `"Coerce <victim>, relay to <target>"` strings; populated only by the three `CoerceAndRelay*` builders; `NULL` (coalesced to `[]` by dedup) for every other edge kind. |
 | `coercion_victim_hostnames` | `VARCHAR[]` | FQDNs of coercion victim hosts; populated only by `_edge_coerce_relay_smb`; `NULL` (coalesced to `[]` by dedup) for all other kinds. |
+| `sccm_infra` | `BOOLEAN` | Flags the start-node principal as SCCM infrastructure; populated only by `_edge_is_mapped_to` (`SCCM_IsMappedTo` only, CMBP parity); `NULL` for every other kind. |
+| `assumed` | `BOOLEAN` | D3 provenance (§11l): `true` on a templated/inferred edge, `NULL` (no stamp) on a confirmed one. Populated by the MSSQL site-DB-scaffolding edges (basis-derived, via `_site_db_provenance_cols`) and the Tier-B SCCM permission/coerce/local-admin edges (unconditionally `true`, flag-independent). |
+| `assumption_basis` | `VARCHAR` | Human-readable explanation of the inference; non-NULL only when `assumed` is `true`. |
 
 The three `CoerceAndRelay*` edge kinds carry additional context via the `SCCMRelayEdgeProperties` subclass of `SCCMEdgeProperties` (defined in [graph.py](src/openhound_sccm/graph.py)), which adds `coercionVictimAndRelayTargetPairs` and `coercionVictimHostnames` fields. `GraphEdge` emits these relay-only properties when the edge's kind is one of the three relay kinds; every other edge uses the lean base `SCCMEdgeProperties` with only `collectionSource` and `traversable`. Field names in both classes mirror ConfigManBearPig's exact casing.
 
@@ -1163,12 +1166,24 @@ No change to `_graph_edges_split` is needed — MSSQL node ids are deliberately 
 
 Stage 6 adds three new edge kinds (`SCCM_CoerceAndRelayToAdminService`, `MSSQL_CoerceAndRelayToMSSQL`, `SCCM_CoerceAndRelayToSMB`) and one new synthetic node type. No new framework divergence categories are introduced; Stage 6 extends the existing preproc-only pattern from §11c and the output-split routing from §11f.
 
-**Surgical `--disable-possible-edges` semantics.** The `disable_possible_edges` flag (persisted in `collection_settings`, read by `_read_disable_possible`) already gated Stage 3–4 possible-client nodes. Stage 6 extends it to the three relay builders with a *surgical* two-level gate:
+**`--disable-possible-edges` semantics, as originally shipped (superseded below).** The
+`disable_possible_edges` flag (persisted in `collection_settings`, read by `_read_disable_possible`)
+already gated Stage 3–4 possible-client nodes. Stage 6, as first written, extended it to all three relay
+builders with a *surgical* two-level gate: default (flag off) treated a null/absent NTLM restriction as
+*assumed vulnerable* (matching ConfigManBearPig's behavior at `ps1:6618`, `ps1:6712`, `ps1:6762`), and the
+flag required an *explicitly confirmed* `Off` for each condition.
 
-- **Default (flag off):** a null or absent NTLM restriction is treated as *assumed vulnerable* — matching ConfigManBearPig's behavior at `ps1:6618`, `ps1:6712`, `ps1:6762`. A known EPA setting other than `Off` always disqualifies the server, but a null EPA is also treated as vulnerable.
-- **Flag on:** only *explicitly confirmed* `Off` values qualify for each relay condition. A null NTLM restriction or null EPA causes the relay row to be dropped rather than assumed safe.
-
-This gives operators a single flag to choose between a speculative-complete view (default) and a confirmed-only view without changing the collection. The three builders each implement this via a conditional SQL expression for the `ntlm_ok` (and `epa_ok` for MSSQL) predicate.
+> **Superseded (2026-07-28, low-priv-assumed-edges plan, §11l).** Auditing the actual builders found that
+> only `MSSQL_CoerceAndRelayToMSSQL`'s **EPA** condition is genuinely flag-gated. `SCCM_CoerceAndRelayToAdminService`'s
+> and `SCCM_CoerceAndRelayToSMB`'s NTLM conditions (and `MSSQL_CoerceAndRelayToMSSQL`'s own NTLM condition)
+> are **flag-independent** in both today's code and CMBP's actual behavior: an unset NTLM restriction
+> genuinely **is** the Windows default (0 = allow all inbound NTLM), so treating it as vulnerable is a
+> measured fact, not a topology guess, in **both** modes — and CMBP itself emits these families under its
+> own `-DisablePossibleEdges` switch. `SCCM_CoerceAndRelayToSMB`'s SMB-signing condition was never
+> assumed either way (always required a confirmed `false`). See §11l for the full ruling, the dead-parameter
+> cleanup this caused (`_edge_coerce_relay_adminservice`/`_edge_coerce_relay_smb` no longer take a
+> `disable_possible_edges` parameter at all), and the D3 provenance stamp that replaced this section's
+> original flag-gating as the way these families are marked to an operator.
 
 `_read_disable_possible` combines the collect-time `collection_settings` value with the `SOURCES__SCCM__DISABLE_POSSIBLE_EDGES` env var (tightening-only OR), so preproc can re-tighten existing raw without a re-collect.
 
@@ -1293,6 +1308,265 @@ so it may be absent on some runs. `_derive_ad_props` treats it like any other op
 leaving `ad_props` created-but-empty rather than raising, so `_join_ad_props`'s LEFT JOINs always
 bind — a missing or partial `ldap_resolved_principals` degrades to "no AD-attribute enrichment this
 run," never a preproc failure.
+
+### 11k. Tier A+ low-priv additions: the System Management container, nested `MemberOf`, and the `MSSQLSvc` SPN service account
+
+Low-priv-assumed-edges plan Tasks 11-14 (2026-07-28). No new framework divergence categories — an
+extension of the node-coalesce design (§9), the split-output routing (§11f), and the MSSQL topology
+inference (§11g). All four are **confirmed** (LDAP/AD-derived), so they emit in both
+`--disable-possible-edges` modes with no `assumed` stamp.
+
+**`Container` node + `GenericAll` edges (Task 11).** `ldap_system_management_dacl` was collected but
+read by no transform. `collectors/ldap.py`'s `ldap_system_management_dacl` resource now also captures
+the System Management container's own `objectGUID`/`name`, uppercases it to SharpHound's canonical
+GUID form (`_format_guid`), and stamps it on every yielded GenericAll-principal row
+(`smc_container_guid`/`smc_container_dn`). `transforms._node_smc_container` builds one `Container`+
+`Base` node keyed by that GUID — a **standard BloodHound base kind**, not in `schema_SCCM.json`, so it
+merges with SharpHound's own node for the same AD object — and `_edge_generic_all_smc` builds one
+`GenericAll` edge per principal. Both new kinds (`Container` in `kinds/nodes.py`, `GenericAll` in
+`kinds/edges.py`) are added to `TRAVERSABLE_EDGE_KINDS` alongside the pre-existing `MemberOf`/
+`HasSession` base kinds. `node_container` is registered in `AD_NODE_SPECS` (§11f), emitted untagged.
+
+**Full nested `MemberOf` chain (Task 12).** `collectors/ldap.py::_expand_group_targets` already
+recursed every DACL Full-Control group's nested membership (to register computer members as scan
+targets); it now also *returns* a `(group_sid, member_sid, member_type)` row for every member →
+containing-group hop it visits, at every nesting level. The resource routes those rows to a second
+destination table, `ldap_smc_group_members`, via `dlt.mark.with_table_name` — the same
+`@app.resource` generator feeding two tables, since the membership walk is a side effect of the
+already-registered DACL-principal resource rather than its own resource. `_edge_member_of_smc` reads
+that table into base-kind `MemberOf` edges; BloodHound de-dupes against an equivalent SharpHound edge.
+One incidental effect: a DACL group with members that had no `node_group` row of its own before (e.g.
+it was never independently discovered by another SCCM source) now gets a `Group` stub node via the
+pre-existing `_node_backfill`/`BACKFILL_END_KIND["MemberOf"] = "Group"` mechanism, since its SID is now
+referenced as a `MemberOf` edge endpoint. Confirmed live-DB-augmented (see the Task 11-14 report,
+`.sdd/2026-07-23-low-priv-assumed-edges/tasks-11-14-report.md`) to newly produce a `Group` node for
+"Domain Admins" that the graph previously carried none for.
+
+**`MSSQLSvc` SPN service account (Task 13).** `clients/ad.py::ADClient.find_mssql_spns` (D2a's mere
+existence check) discards *who* holds the SPN. A new module-level `_find_mssql_spn_entries` helper
+factors out the shared search + host-pinning logic; `find_mssql_spns` keeps its old signature/tests,
+and a new `find_mssql_spn_holder` additionally surfaces the holder's `objectSid`/`sAMAccountName`/
+`objectClass`. `collectors/mssql.py::collect_mssql` calls it when the target computer's own SPN list
+lacks `MSSQLSvc` (the domain-service-account case), and adds `service_account_sid`/
+`service_account_is_computer` to the `mssql_server_instances` row. `node_mssql_server` carries these as
+new columns, **distinct from** the privileged `service_account_domain_sid` (SMS_SCI_SysResUse) pair —
+when both resolve the same real account on the same server, the pre-existing `_graph_edges_dedup` pass
+(run once, after every edge builder) collapses the resulting duplicate edge triple into one, so neither
+builder needs to know about the other. `_edge_mssql_service_account_spn` emits `MSSQL_ServiceAccountFor`
+(not traversable, matching CMBP); a third arm added to `_edge_has_session` emits `HasSession` (host →
+service account), skipped when `service_account_is_computer` (no distinct session).
+
+**Kerberoasting from the SPN account (Task 14).** `_edge_mssql_kerberoast_spn` joins the low-priv
+service account to Task 4's site-server/provider sysadmin logins (`node_mssql_login`) — every row
+there is, by construction, a domain sysadmin login, so "a login exists for this server" already
+implies `MSSQL_GetAdminTGS`, and each login is a `MSSQL_GetTGS` target. Both edges copy
+`assumed`/`assumptionBasis`/`collectionSource` straight from the login row rather than recomputing
+them — the edge is exactly as confirmed/assumed as the login it rests on, and needs no
+`disable_possible_edges` parameter of its own because Task 2 already removed the assumed logins
+upstream when the flag is set.
+
+### 11l. The rest of the low-priv-assumed-edges plan: `site_hierarchy` fed from every source, D6 attribution, and the assumption/provenance engine
+
+Low-priv-assumed-edges plan Tasks 1, 1b, 1c, and 2-6 (2026-07-27/28). Documented after §11k above because that
+section was written first, mid-plan — chronologically these tasks landed *before* Tasks 11-14, and
+everything in §11k builds on the `site_hierarchy`/provenance machinery described here. No new framework
+divergence category: this extends the preproc node-coalesce design (§9) and the assumed/possible-edges
+gate already established in §11b/§11h.
+
+#### The linchpin: `site_hierarchy` fed from every site-code source (D5)
+
+Before this work, `_site_hierarchy` (`transforms.py`) INSERTed only from `adminservice_site_definitions`
+and `wmi_site_definitions` — both AdminService/WMI-only. When AdminService was unreachable,
+`site_hierarchy` was empty, `_root_code`/`_first_primary_code` returned `None`, and every builder that
+joins the `nonsec` CTE derived from `site_hierarchy` emitted zero rows — regardless of what LDAP,
+RemoteRegistry, HTTP, SMB, or DNS had actually collected. A 2026-07-23 live low-priv run measured the
+consequence directly: ConfigManBearPig emitted 106-146 edges from the same collection; OpenHound emitted 9.
+
+The collector learns a site code in **ten** distinct ways across ~16 raw tables. Two of them are
+*hierarchy-shaped* (they carry `site_type`/`parent_site_code`, and — for LDAP management-point
+capabilities only — a directly observed `root_site_code`); the rest are *bare-code* (a table has a
+`site_code` column and nothing else). `_site_hierarchy` now feeds from all of them:
+
+- **Hierarchy-shaped arms** — `adminservice_site_definitions`, `wmi_site_definitions` (unchanged), plus a
+  new arm for `ldap_management_points_raw` (LDAP MP capabilities, low-priv reachable), which maps the
+  string `site_type` (`"Central Administration Site"`/`"Primary Site"`/`"Secondary Site"`) onto the
+  existing `1`=Secondary/`2`=Primary/`4`=CAS INTEGER contract.
+- **Bare-code arms, discovered rather than hardcoded (D5).** `_bare_site_code_tables` queries
+  `information_schema.columns` for every table in the schema that has a `site_code` column, minus the
+  three hierarchy-shaped ones already loaded and the derived `node_*`/`edge_*`/`site_hierarchy`/
+  `assumed_site_dbs` tables. Each discovered table registers its bare site code with `NULL` type/parent; the
+  collapse step below (`GROUP BY site_code`, `max(site_type)`, `any_value(parent_site_code)`) lets any
+  richer row for the same code win, so widening the net this way can never degrade a stronger source — it
+  can only rescue a code that would otherwise be missing entirely. **Rationale for discovery over a
+  hardcoded list:** a hardcoded list goes stale the moment a new collector learns a site code; querying
+  `information_schema` means "all sources" stays true by construction, and a genuinely absent table is
+  simply not in the result set (no `_safe` guard needed for it).
+- **Sentinel normalization, one place.** `'None'`/`'Undetermined'`/`''` are placeholders several
+  collectors emit for an unknown parent or root (`ldap_sites` emits the literal `'Undetermined'`,
+  ps1-parity). `_norm_site_code` (formerly `_norm_parent`, generalized once it needed to normalize
+  `root_site_code` too) centralizes the sentinel list and casts to `VARCHAR` before `upper()` — without
+  the cast, an all-NULL column for a run with no non-NULL value can be inferred as `INTEGER` by DuckDB,
+  and a bare `upper()` on it raises a `BinderException` that `_safe` silently swallows as a dropped arm.
+  This exact failure mode recurred **four times** across this plan's review cycles (site_hierarchy's own
+  arms, `_node_computer`'s new arms, `_assumed_site_dbs`, and `_read_disable_possible`) — see
+  [§10](#10-dlt-loads-whatever-the-data-contains-our-sql-expects-fixed-columns) for the general pattern; a
+  second, distinct failure mode in the same family is dlt **dropping** an all-NULL column outright rather
+  than typing it wrong, which only `_ensure_columns` (not the `CAST`) protects against — every hierarchy-
+  shaped arm's source table is now run through `_ensure_columns` before being read.
+
+**Root resolution, strongest evidence first.** Three steps, tried in order, each only consulted if the
+previous one found nothing:
+
+- **Step A — the directly observed root.** `ldap_management_points_raw.root_site_code` is the site the MP
+  capabilities XML itself names as root (D4) — read straight off the wire, not derived, so it applies in
+  **both** flag modes. Multiple distinct values mean a multi-hierarchy environment; picked deterministically
+  (`min`) with a WARNING naming all of them.
+- **Step B — CAS, else parentless Primary.** The pre-existing `site_type = 4` / parentless `site_type = 2`
+  query, also observed (not guessed), also both modes.
+- **Step C — the guess, gated.** Only when A and B found nothing: among the remaining
+  parentless/untyped-or-Primary candidates (a Secondary is **excluded outright** — it reports to something
+  above it by definition, so it can never be a root), a **single** candidate is deduction (there is only
+  one possible answer) and resolves in both modes; **two or more** candidates means picking one is a real
+  assumption, so `--disable-possible-edges` declines and leaves `root_site_code` NULL (WARNING, naming the
+  candidates and that SCCM-native ids will be minted without their `@<root>` scope), while default mode
+  picks alphabetically (WARNING, naming the pick and the alternatives).
+
+**Site-type inference for the CAS and Secondary sites.** Because a CAS has no management point, LDAP MP
+capabilities — the *only* low-priv source of `site_type` — can never observe a CAS's type directly: a
+live low-priv run produced `ldap_management_points_raw = [('PS1','Primary Site','CAS','CAS')]` and nothing
+for `CAS` itself, which silently cost every `SCCM_AdminsReplicatedTo` edge (`_edge_replication` joins on
+`site_type = 2 AND site_type = 4`). Two deduction rules (not guesses — they fire unconditionally in both
+flag modes, and only when the type is currently unknown) close this: a site is inferred CAS-typed if it is
+the recorded parent of a site already typed Primary; a site is inferred Secondary-typed if its recorded
+parent is already typed Primary. The blind spot this leaves: a Secondary whose parent was never recorded
+in this run (a `SEC`-style site with no parent observed) has no parent to key either rule off, so it stays
+untyped and outside `SCCM_AdminsReplicatedTo`'s Primary↔Secondary edge — documented in the README
+Limitations, not silently misclassified.
+
+#### D6: site-code attribution is per-host and never guessed, plus its one sanctioned exception
+
+A host may only be tagged `<Role>@<site>` from a source that actually knows *that host's* site — never
+backfilled from "the only site in the hierarchy" or a similar heuristic. Three previously-orphaned role
+signals (collected, registered in the preprocess table map, loaded into DuckDB, and then read by nothing)
+are now wired into `_node_computer`, each honoring D6 differently:
+
+- **`http_site_servers` (the site-signing-certificate probe) — the one sanctioned cross-host exception.**
+  The probe reads an MP endpoint (`/SMS_MP/.sms_aut?sitesigncert`) *before* MPKEYINFORMATION has set
+  `self.site_code` (ps1:8611 ordering, which this plan does not reorder), so the row's own site code is
+  usually `NULL`. But a valid cert response proves the probed host is an MP, and the cert's issuer is by
+  definition the site server of *that MP's* site — so the collector stamps the probed MP's hostname
+  (`mp_host`, mirroring `http_site_versions.mp_host`) and the transform **joins** it to that MP's
+  `http_management_points` row for the site code. The join (rather than a coalesced default) keeps the
+  inference visible in the raw data. Guarded against a subtle trap found in review: `http_management_points`
+  can legitimately hold two rows for the same host with *different* site codes (`collectors/http.py`'s
+  MPLIST1 enumeration stamps the *probing* MP's own site code onto every sibling it enumerates), so the
+  join only trusts a site code when `count(DISTINCT site_code) = 1` for that host — otherwise the role
+  falls back to bare with a WARNING naming the competing codes, never a coin flip.
+- **`ldap_management_points_raw.fsp_hostname`/`fsp_sid` (the Fallback Status Point)** — the FSP's SID was
+  already resolved in the collector (`fsp_sid = fsp_target.ad_object.get("object_sid")`) but only used to
+  build a log-message suffix; hoisted into the yielded row. The site code here is the naming MP's own,
+  which the collector already attributes directly to the FSP it names — not a cross-host guess.
+- **`dns_management_points` (SRV-discovered MPs)** — the SRV query key (`_mssms_mp_<site>._tcp.<domain>`)
+  **is** the site code, authoritative by construction; the collector now emits it plus the role string
+  directly instead of a bare AD object.
+
+All three are **confirmed** (observed evidence), not assumed, so they land in `node_computer` in **both**
+flag modes with no `assumed` stamp — this is a data-completeness fix, not a new inference. A fourth
+signal, `smb_sites`, was folded into the D5 bare-code loop above rather than needing its own
+`_node_computer` arm (it only ever fed `site_hierarchy`, never a role).
+
+#### The assumption/provenance engine (D2, D3)
+
+Every assumed node/edge in this plan shares one stamp — `assumed: bool`, `assumptionBasis: str`, and an
+`Assumed-<Family>` tag folded into `collectionSource` — added as three new columns on `graph_edges`
+(alongside `sccm_infra`) and as fields on the six `*Properties` dataclasses for the MSSQL scaffolding
+nodes (`graph.py`). Two constructors produce it:
+
+- **`_mark_assumed(props, basis)`** — a Python-side helper for any row built outside raw SQL; mutates a
+  property dict in place and de-duplicates the `Assumed-*` tag so re-stamping an already-stamped dict is
+  idempotent.
+- **`_site_db_provenance_cols(is_assumed_sql)`** — the SQL-side equivalent, used by every MSSQL
+  scaffolding-node builder. Takes a boolean SQL predicate ("this row rests on the `SPN+SCCM` inference")
+  and returns the `assumed, assumption_basis, collection_source` column trio as one SQL fragment, so every
+  builder that templates a piece of the MSSQL default schema stays byte-for-byte consistent in its
+  provenance wording. Confirmed rows get `collection_source = ['SCCM-SiteDBDefaultSchema']` (replacing the
+  old unconditional `'SCCM_Add-MSSQLServerNodesAndEdges'`/`'SCCM_Invoke-ProcessMssqlNodesAndEdgesForSysadminComputer'`
+  literals for these specific rows) — the schema SCCM requires there is still templated, not read out of
+  SQL, so the source tag documents that, but it is no longer a guess once the site DB is confirmed.
+
+**`_assumed_site_dbs` — the single gate.** A new preproc table, `{schema}.assumed_site_dbs(host_sid,
+site_code, basis)`, identifies which hosts get treated as *the* SCCM site database (D2), from two
+independent signals:
+
+- **`basis = 'RemoteRegistry'`** — `node_computer.site_system_roles` already carries a merged
+  `'SMS SQL Server@<site>'` tag, however it was collected (RemoteRegistry, AdminService, or WMI all feed
+  the same array). Confirmed, both flag modes.
+- **`basis = 'SPN+SCCM'`** — a host with an AD-readable `MSSQLSvc` SPN (`mssql_server_instances.has_mssql_spn`,
+  Task 1c) that is *also* SCCM-related (carries some SMS role, or `sccm_infra`). A co-located SQL host need
+  not be *the* site database, so this is a deliberate tightening of CMBP's "any host reachable on 1433"
+  rule — an inference, not a confirmation.
+
+`--disable-possible-edges` drops the `SPN+SCCM` rows here, **once**, at the source — every downstream
+consumer (starting with `_mssql_sql_servers`, then the six MSSQL scaffolding node builders, then
+`_edge_mssql_structural`/`_edge_mssql_membership`) inherits the filter with no builder repeating the check.
+Site-code attribution follows D6 here too: a host whose `'SMS SQL Server@%'`-role or SPN-relatedness spans
+more than one distinct site is dropped (WARNING, naming the host and the competing codes) rather than
+picking arbitrarily. Nothing confirmed is lost by the flag: a `MSSQLSvc`-SPN host still gets its bare
+`MSSQL_Server`/`Computer`/`HostFor`/`ExecuteOnHost` set (D2a, unconditional — see §11g) from the
+independent EPA/SPN arm of `_node_mssql_server`; the flag removes only the *site-database
+characterization* (`SCCMSite`, `SCCMInfra = true`, `CM_<site>`, and the scaffolding templated off it) that
+the `SPN+SCCM` basis would otherwise add. A confirmed site database (`RemoteRegistry` basis, or
+AdminService/WMI) keeps its **full** scaffolding in **both** flag modes with **no** `assumed` stamp — the
+schema SCCM requires there follows from the confirmed fact, not a guess.
+
+**Ruling: the code was right, the design spec was wrong (2026-07-28).** The design spec originally claimed
+`--disable-possible-edges` tightens `SCCM_AssignAllPermissions`, `SCCM_LocalAdminRequired`, and the two
+non-MSSQL `CoerceAndRelay*` edges (`SCCM_CoerceAndRelayToAdminService`, `SCCM_CoerceAndRelayToSMB`) to
+require an explicitly confirmed `Off`/grant. Auditing the actual builders found none of the four ever
+read the flag — `_edge_assign_all_permissions` and `_edge_local_admin_required` never took a
+`disable_possible_edges` parameter at all, and `_edge_coerce_relay_adminservice`/`_edge_coerce_relay_smb`
+used to accept one and never read it (dead parameters, removed). The owner ruled the **code**, not the
+spec, was correct, for three reasons: (1) each of these four builders' gates are **measured evidence about
+a Windows/protocol default**, not a topology guess — an unset `RestrictReceivingNtlmTraffic` genuinely
+**is** vulnerable (Windows default 0 = allow all inbound NTLM), and `SCCM_CoerceAndRelayToSMB`'s SMB-signing
+requirement was always a confirmed `false`, never assumed; (2) a live CMBP-vs-OpenHound comparison run
+under `--disable-possible-edges` showed CMBP itself emits these same four families under its own
+`-DisablePossibleEdges` switch, so gating them here would make OpenHound *stricter* than the tool it ports;
+(3) `edge_coerce_relay_smb_test.py::test_smb_relay_flag_keeps_null_ntlm` predates this plan and already
+pinned the opposite (flag-independent) behavior deliberately. All four families still carry the
+unconditional `assumed = true` stamp (D3) — they template a permission/relay conclusion from role topology
+rather than reading it from an ACL, which is worth flagging to an operator even though the flag never
+removes them — but the stamp itself is unconditional, not flag-gated. (§11h below, written before this
+ruling, is corrected accordingly.)
+
+**The one MSSQL relay edge with a genuinely conditional stamp.** `MSSQL_CoerceAndRelayToMSSQL` is
+different from its three siblings above in two ways: its **NTLM** gate follows the same
+Windows-default-vulnerable reasoning (flag-independent, both modes), but its **Extended Protection** gate
+is a real, flag-gated assumption (default: null/uncollected EPA treated as vulnerable; flag: EPA must be
+explicitly `Off`) — and its `assumed`/`assumptionBasis` stamp is therefore a **per-row `CASE`**
+(`s.extended_protection IS NULL`), not the unconditional literal `true` its siblings use. A row where EPA
+was actually measured `Off` is evidence, not an assumption, and correctly carries no stamp even in default
+mode; marking the whole family assumed would have libeled those measured rows, and marking none of it
+would have hidden the genuine inference for the rows where EPA was never measured at all.
+
+**`--clean` (a small, separately user-requested addition during this pass).** `collect` now accepts
+`--clean`, which removes the reusable output artifacts (`sccm/`, `graph/`, `lookup.duckdb`) before
+collecting; it always keeps timestamped per-run logs and integration/compare reports. Without it, `dlt`
+appends a new load package beside any already present and `preprocess` UNIONs every package's rows into
+one graph — invisibly, since the exit code and `graph/`'s file timestamps look identical either way, and a
+table the new run finds empty simply keeps the old run's rows. `_clean_previous_collection` (`main.py`)
+runs deliberately **outside** the collection's own try/except, so a locked artifact (e.g. `lookup.duckdb`
+open in another tool) aborts the run rather than silently collecting onto stale data; without the flag it
+still warns (naming the prior load-package count and the oldest package's date) instead of staying silent.
+See the README's [`--clean`](README.md#--clean-and-re-running-into-a-used-output-directory) section.
+
+**Known gap, surfaced not fixed.** `_edge_mssql_db_assign_all` (the `SCCM_AssignAllPermissions`
+Database→Site configuration, §11g) was not brought into this provenance system — it still emits only the
+literal `collection_source = ['SCCM_Add-MSSQLServerNodesAndEdges']` with no `assumed`/`assumption_basis`
+columns, even when built from an `SPN+SCCM`-inferred `node_mssql_database` row that itself carries the
+stamp. Every other MSSQL scaffolding edge builder (`_edge_mssql_structural`, `_edge_mssql_membership`)
+does propagate the stamp from the node it attaches to; this one edge shape is the one place that doesn't.
+Documented as a known gap in the README rather than silently glossed over.
 
 ---
 
@@ -1674,6 +1948,8 @@ it as part of that work.
 
 | Date | Change |
 |---|---|
+| 2026-07-28 | **Added §11l — the rest of the low-priv-assumed-edges plan (Tasks 1, 1b, 1c, 2-6), plus Task 8 doc-truth pass.** Documents the D5 all-sources `site_hierarchy` wiring (the `information_schema` bare-code discovery loop, the observed-root-first resolution order, and the CAS/Secondary `site_type` deduction rules), the D6 site-code attribution rule and its one sanctioned cross-host exception (the `mp_host` join resolving the site-signing-certificate probe's site server), the assumption/provenance engine (`_mark_assumed`, `_site_db_provenance_cols`, `_assumed_site_dbs`'s gate-once RemoteRegistry-vs-SPN+SCCM basis), and the owner's ruling that `SCCM_AssignAllPermissions`/`SCCM_LocalAdminRequired`/`SCCM_CoerceAndRelayToAdminService`/`SCCM_CoerceAndRelayToSMB` are unconditionally assumed but **not** flag-gated (superseding §11h's original two-level-gate description, corrected in place) — leaving `MSSQL_CoerceAndRelayToMSSQL`'s EPA condition as the one genuinely flag-gated relay assumption. Also notes the small `--clean` CLI addition and one known gap (`_edge_mssql_db_assign_all` doesn't yet propagate the `assumed` stamp). Updated the `graph_edges` columns table (§11c) to include `sccm_infra`/`assumed`/`assumption_basis`. README gained a full assumed-vs-confirmed catalog, a collection-privilege-tier table, a `Container`/`GenericAll` Node/Edge Reference, and corrected the `--disable-possible-edges` documentation to match the ruling above. No new framework divergence category — extends §9 and §11b/§11h. No code changed by this pass (documentation only). |
+| 2026-07-28 | **Added §11k — Tier A+ low-priv additions (low-priv-assumed-edges plan Tasks 11-14).** `Container`+`GenericAll` from the previously-unread `ldap_system_management_dacl` (id = SharpHound-matching uppercase objectGUID, standard base kinds, not in `schema_SCCM.json`); the full nested `MemberOf` chain from the same DACL's recursive group walk, routed to a new `ldap_smc_group_members` table via `dlt.mark.with_table_name` from the same resource; `ADClient.find_mssql_spn_holder` (a new sibling of `find_mssql_spns`, sharing its search/host-pinning via `_find_mssql_spn_entries`) resolving the low-priv `MSSQLSvc` SPN holder for `MSSQL_ServiceAccountFor`/a third `HasSession` arm, distinct from and deduped against the privileged `SMS_SCI_SysResUse` pair via the pre-existing `_graph_edges_dedup`; and `MSSQL_GetAdminTGS`/`MSSQL_GetTGS` from that service account to Task 4's site-server sysadmin logins, inheriting the login's confirmed/assumed stamp. All four confirmed (both flag modes, no `assumed` stamp). No new framework divergence category. 46 new/updated targeted tests + the `lowpriv_end_to_end_test.py` guard all pass; live-DB-augmented verification (see `.sdd/2026-07-23-low-priv-assumed-edges/tasks-11-14-report.md`) confirmed a DACL group ("Domain Admins") now gets a `Group` stub node it previously had none for. |
 | 2026-07-24 | **Added `--dc-only` recon mode** (Ope-4tdt) — forces `--collection-methods` to `LDAP,DNS` and skips the Stage-2 per-host pass (§4). No new divergence category; it reuses the existing `--collection-methods` gate and the `per_host_expected` Stage-2 gate. |
 | 2026-07-24 | **Added §15 — direct BloodHound CE upload + hand-registered `convert sccm`** (ope-8c44, implementing the pivoted [Ope-8wi2](.tickets/Ope-8wi2.md)). New shared `openhound_collector_common.bloodhound` subpackage (`auth.py` HMAC/Bearer signing, `client.py` retrying HTTP client over the BH CE schema/file-upload endpoints, `uploader.py` orchestration + credential resolution, `zip_bundle.py`, `schema.py::disable_possible_edges`) plus a new `openhound-collector-common` `requests` dependency; 25 offline tests. SCCM adds `bloodhound_schemas.py` (loads + mutates `schema_SCCM.json` **and** `schema_MSSQL.json` — this collector emits `MSSQL_*` kinds too) and `bloodhound_upload.py::run_upload` (single dispatch shared by both CLI commands). An identical **BloodHound Upload** panel (`-B`/`--bloodhound`, `--bloodhound-url`/`--token-id`/`--token-key` + env vars, `--upload-schema-only`/`--upload-results-only`, `--skip-collection`, `--upload-dir`) was added to both `collect sccm` (uploads after a `--run-all` chain, or schema-only via `--skip-collection`) and `convert sccm`. Landing the `convert sccm` flags required **hand-registering** `convert sccm` on the framework's `convert` Typer group — replacing the `@app.convert(lookup=SCCMLookup)` decorator with a manual `app.converter = _run_convert` assignment + `_convert_typer.command`, the same seam `collect sccm` already used — because the decorator exposes no flag-carrying seam. Updated the README Quick Start (direct-upload examples) and added a "BloodHound Upload" Command Line Options subsection. Full SCCM suite: 731 pass. Live validation against `bloodhound.mayyhem.com` is the remaining step (offline tests use fakes for the HTTP layer). |
 | 2026-07-24 | **Added §11j — AD-object attribute capture via the per-host resolution cache** (ope-c141, Phase A of a broader CMBP-parity property effort; also documents Phase B, ope-fb99, and the ope-c0c0 bug fix). `Computer`/`User`/`Group` nodes gain `Domain`, `Enabled`, `IsDomainPrincipal`, `Type`, `objectClass`, `servicePrincipalName`, `CN` (`graph.py` `ComputerProperties`/`UserProperties`/`GroupProperties`), sourced from AD attributes captured whenever `SourceContext.resolve_principal` freshly resolves a principal during collection (`context.py::_record_resolved_principal`), persisted by a new `ldap_resolved_principals` DLT resource run at the end of the per-host stage (`source.py`), and joined onto the three AD node tables in preproc via new `transforms._derive_ad_props`/`_join_ad_props`. Deliberately **resolved-principals-only** — not a domain-wide LDAP sweep; a principal never resolved during a run stays bare. No new framework divergence category — extends the existing collect-side-table + preproc-join pattern (§11a/§11b). Also (Phase B, ope-fb99): `SCCM_Site.siteSystemRoles` (per-site aggregation of `Computer.SCCMSiteSystemRoles`, empty on Secondary Sites); six new `SCCM_ClientDevice` telemetry-extra properties (`currentManagementPoint`, `currentManagementPointSID`, `previousSMSID`, `previousSMSIDChangeDate`, `userName`, `userDomainName`); and `SCCM_IsMappedTo` now carries `SCCMInfra = true` (the only edge kind that does). And a bug fix (ope-c0c0): `SCCM_ClientDevice.lastOnlineTime`/`lastOfflineTime` were always empty due to a `c_n_*` vs `cn_*` raw-column-name typo in `_node_client_device`; both now populate. Updated the README Node Reference (Computer/User/Group/SCCM_Site/SCCM_ClientDevice tables + Limitations) and Edge Reference (`SCCM_IsMappedTo`). |

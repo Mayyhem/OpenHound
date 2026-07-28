@@ -34,12 +34,12 @@ def test_gate_suppresses_2509_keeps_older_and_unknown():
     con.execute(f"CREATE TABLE {s}.node_site (site_code VARCHAR, version VARCHAR)")
     con.execute(f"CREATE TABLE {s}.graph_edges (start_id VARCHAR, end_id VARCHAR, kind VARCHAR, "
                 f"collection_source VARCHAR[], coercion_victim_and_relay_target_pairs VARCHAR[], "
-                f"coercion_victim_hostnames VARCHAR[])")
+                f"coercion_victim_hostnames VARCHAR[], assumed BOOLEAN, assumption_basis VARCHAR)")
     _seed(con, s, "P09", "5.00.9141.1015")   # 2509 -> suppressed
     _seed(con, s, "P03", "5.00.9135.1013")   # 2503 -> kept
     _seed(con, s, "PNK", None)               # unknown -> kept (fail open)
 
-    _edge_coerce_relay_adminservice(con, s, disable_possible=False)
+    _edge_coerce_relay_adminservice(con, s)
 
     assert "SCCM_CoerceAndRelayToAdminService" not in _kinds_for_site(con, s, "P09")
     assert "SCCM_CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "P03")
@@ -60,7 +60,7 @@ def test_gate_no_node_site_table_fails_open():
     con.execute(f"CREATE TABLE {s}.site_hierarchy (site_code VARCHAR, site_type INTEGER)")
     con.execute(f"CREATE TABLE {s}.graph_edges (start_id VARCHAR, end_id VARCHAR, kind VARCHAR, "
                 f"collection_source VARCHAR[], coercion_victim_and_relay_target_pairs VARCHAR[], "
-                f"coercion_victim_hostnames VARCHAR[])")
+                f"coercion_victim_hostnames VARCHAR[], assumed BOOLEAN, assumption_basis VARCHAR)")
     con.execute(
         f"INSERT INTO {s}.node_computer VALUES "
         f"('SID-PROV-X', 'prov-x.lab', ['SMS Provider@X'], NULL), "
@@ -68,6 +68,6 @@ def test_gate_no_node_site_table_fails_open():
     )
     con.execute(f"INSERT INTO {s}.site_hierarchy VALUES ('X', 2)")
 
-    _edge_coerce_relay_adminservice(con, s, disable_possible=False)
+    _edge_coerce_relay_adminservice(con, s)
 
     assert "SCCM_CoerceAndRelayToAdminService" in _kinds_for_site(con, s, "X")

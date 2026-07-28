@@ -22,6 +22,8 @@ class MSSQLLogin(BaseAsset):
     sccm_site: str | None = None
     sysadmin_computer_sid: str | None = None
     collection_source: list[str] = Field(default_factory=list)
+    assumed: bool = False
+    assumption_basis: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -39,6 +41,7 @@ class MSSQLLogin(BaseAsset):
                 collectionSource=list(self.collection_source),
                 loginType="Windows", memberOfRoles=roles,
                 SCCMInfra=True, SCCMSite=self.sccm_site, SQLServer=self.sql_server,
+                assumed=self.assumed or None, assumptionBasis=self.assumption_basis,
             ),
         )
 

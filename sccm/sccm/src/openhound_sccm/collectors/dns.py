@@ -105,11 +105,26 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                     site_code=site_code
                 )
 
-                if target:
+                # Only emit a graph row when the target resolved in AD; an
+                # unresolved MP is still a probe target (register_target added
+                # it) but has no AD identity to spread into a row. register_target
+                # already logged why it skipped a filtered/empty host.
+                if target and target.ad_object:
                     logger.info("Found management point: %s:%s (site: %s)", target_host, port, site_code)
-                    yield target.ad_object
-                # No else: register_target logs why it skipped (filtered host or
-                # empty name), so a None return isn't a failure here.
+                    # The SRV query key IS the site code, so this attribution is
+                    # authoritative (D6) -- emit it plus the role rather than a
+                    # bare AD object, so _node_computer can tag the host.
+                    yield {
+                        **target.ad_object,
+                        "source": f"DNS-SRV-{site_code}",
+                        "sccm_infra": True,
+                        # site_codes can come from user-supplied --site-codes (not
+                        # uppercased -- source.py:39), so upper() it here to keep the
+                        # role/column consistent with every other arm's uppercase
+                        # invariant (Task 1).
+                        "sccm_site_system_roles": f"SMS Management Point@{site_code.upper()}",
+                        "site_code": site_code.upper(),
+                    }
 
     else:
         # ADIDNS fallback via LDAP — searches dnsNode objects under MicrosoftDNS.
@@ -134,9 +149,19 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
                             site_code=site_code
                         )
 
-                        if target:
+                        # Same AD-resolution guard as the SRV branch above: a
+                        # target with no AD object is still a real probe target
+                        # but has nothing to spread into a row.
+                        if target and target.ad_object:
                             logger.info("Found management point via ADIDNS: %s (site: %s)", name, site_code)
-                            yield target.ad_object
+                            yield {
+                                **target.ad_object,
+                                "source": f"DNS-ADIDNS-{site_code}",
+                                "sccm_infra": True,
+                                # Same upper() reasoning as the SRV branch above.
+                                "sccm_site_system_roles": f"SMS Management Point@{site_code.upper()}",
+                                "site_code": site_code.upper(),
+                            }
                         # No else: register_target logs why it skipped (filtered
                         # host or empty name), so a None return isn't a failure.
 

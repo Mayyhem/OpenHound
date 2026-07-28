@@ -25,6 +25,8 @@ class MSSQLDatabaseUser(BaseAsset):
     sql_server: str | None = None
     sccm_site: str | None = None
     collection_source: list[str] = Field(default_factory=list)
+    assumed: bool = False
+    assumption_basis: str | None = None
 
     @property
     def as_node(self) -> SCCMNode | None:
@@ -42,6 +44,7 @@ class MSSQLDatabaseUser(BaseAsset):
                 collectionSource=list(self.collection_source),
                 database=self.database, login=self.login_name, memberOfRoles=roles,
                 SCCMInfra=True, SCCMSite=self.sccm_site, SQLServer=self.sql_server,
+                assumed=self.assumed or None, assumptionBasis=self.assumption_basis,
             ),
         )
 

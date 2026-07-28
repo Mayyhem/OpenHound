@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from openhound_collector_common.integration_testing.cases import CountSpec, EdgeCase, NodePattern
 
+from openhound_sccm.integration.fixtures import SCCMEdgeCase
+
 # Every *-S-1-5-11 source in the PS kit is the "Authenticated Users" domain-local group.
 _AUTH_USERS = NodePattern(kinds=["Group", "Base"], properties={"id": "*-S-1-5-11"})
 
@@ -490,7 +492,7 @@ MAYYHEM_EDGE_CASES: list[EdgeCase] = [
     #######################
     # SCCM_AllPermissions #
     #######################
-    EdgeCase(
+    SCCMEdgeCase(
         # SCCM admin user has all permissions in CAS and PS1
         id="edge-allpermissions-domainadmin-all-sites",
         kind="SCCM_AllPermissions",
@@ -498,6 +500,10 @@ MAYYHEM_EDGE_CASES: list[EdgeCase] = [
         source=NodePattern(kinds=["SCCM_AdminUser"], properties={"id": "mayyhem\\domainadmin@*"}),
         target=NodePattern(kinds=["SCCM_Site"]),
         count=CountSpec(exact=2),
+        # Tier D (design spec S:5): SCCM RBAC has no AD/LDAP/RemoteRegistry
+        # representation, so this case can only be checked against a privileged
+        # (AdminService/WMI) collection.
+        requires_privilege=True,
     ),
 
     #############################
@@ -562,13 +568,15 @@ MAYYHEM_EDGE_CASES: list[EdgeCase] = [
     ##########################
     # SCCM_FullAdministrator #
     ##########################
-    EdgeCase(
+    SCCMEdgeCase(
         id="edge-fulladministrator-domainadmin-client-devices",
         kind="SCCM_FullAdministrator",
         description="The domainadmin SCCM admin user has the Full Administrator security role over all client devices in the hierarchy",
         source=NodePattern(kinds=["SCCM_AdminUser"], properties={"id": "mayyhem\\domainadmin@*"}),
         target=NodePattern(kinds=["SCCM_ClientDevice"], properties={"id": "GUID:*"}),
         count=CountSpec(exact=14),
+        # Tier D (design spec S:5): AdminService/WMI-only RBAC fan-out.
+        requires_privilege=True,
     ),
 
     ###########################
@@ -634,32 +642,39 @@ MAYYHEM_EDGE_CASES: list[EdgeCase] = [
     ###################
     # SCCM_IsAssigned #
     ###################
-    EdgeCase(
+    SCCMEdgeCase(
         id="edge-isassigned-domainadmin-full-admin-role",
         kind="SCCM_IsAssigned",
         description="The domainadmin SCCM admin user is assigned the Full Administrator security role in the CAS root site (plus one dupe that BloodHound dedupes)",
         source=NodePattern(kinds=["SCCM_AdminUser"], properties={"id": "mayyhem\\domainadmin@*"}),
         target=NodePattern(kinds=["SCCM_SecurityRole"], properties={"id": "SMS0001R@*"}),  # Full Administrator role ID
         count=CountSpec(exact=2),
+        # Tier D (design spec S:5): security-role assignment is AdminService/WMI-only.
+        requires_privilege=True,
     ),
 
     ###################
     # SCCM_IsMappedTo #
     ###################
-    EdgeCase(
+    SCCMEdgeCase(
         id="edge-ismappedto-sccm-domainadmin-adminuser",
         kind="SCCM_IsMappedTo",
         description="The domainadmin user is mapped to an SCCM admin user in the CAS primary site (plus one dupe that BloodHound dedupes)",
         source=NodePattern(kinds=["User", "Base"], properties={"id": "S-1-5-21-*", "samAccountName": "domainadmin"}),
         target=NodePattern(kinds=["SCCM_AdminUser"], properties={"id": "mayyhem\\domainadmin@*"}),
         count=CountSpec(exact=2),
+        # Tier D (design spec S:5): admin-user-to-domain-account mapping is
+        # AdminService/WMI-only. Not to be confused with MSSQL_IsMappedTo, an
+        # unrelated (low-priv reachable) MSSQL scaffolding edge kind.
+        requires_privilege=True,
     ),
-    EdgeCase(
+    SCCMEdgeCase(
         id="edge-ismappedto-sccm-negative-domainuser-not-mapped",
         kind="SCCM_IsMappedTo",
         description="The domainuser user is NOT mapped to an SCCM admin user in any primary site",
         source=NodePattern(kinds=["User", "Base"], properties={"id": "S-1-5-21-*", "samAccountName": "domainuser"}),
         target=NodePattern(kinds=["SCCM_AdminUser"], properties={"id": "domainuser@*"}),
         negative=True,
+        requires_privilege=True,
     ),
 ]

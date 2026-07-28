@@ -76,6 +76,32 @@ def test_group_well_known_sid_without_fallback_returns_none():
     ).as_node is None
 
 
+def test_group_ad_attributes_mapped():
+    """sam_account_name/distinguished_name (from ad_props) surface as CMBP-verbatim
+    SamAccountName/distinguishedName -- casing confirmed against a real CMBP Group
+    node (bloodhound-sccm-20260728-113941.zip groups.json): CMBP uses PascalCase
+    'SamAccountName' here, unlike the camelCase 'samAccountName' Computer/User use.
+    """
+    node = GroupNode(
+        sid="S-1-5-21-1-2-3-512",
+        name="MAYYHEM\\Domain Admins",
+        domain="mayyhem.com",
+        enabled=True,
+        is_domain_principal=True,
+        type="Group",
+        sam_account_name="Domain Admins",
+        distinguished_name="CN=Domain Admins,CN=Users,DC=mayyhem,DC=com",
+    ).as_node
+
+    assert node is not None
+    assert node.properties.Domain == "mayyhem.com"
+    assert node.properties.Enabled is True
+    assert node.properties.IsDomainPrincipal is True
+    assert node.properties.Type == "Group"
+    assert node.properties.SamAccountName == "Domain Admins"
+    assert node.properties.distinguishedName == "CN=Domain Admins,CN=Users,DC=mayyhem,DC=com"
+
+
 def test_group_sid_uppercased():
     """The node id is always uppercase regardless of the input SID casing."""
     node = GroupNode(
