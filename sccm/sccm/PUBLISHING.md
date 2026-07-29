@@ -472,9 +472,10 @@ It also means no `.venv` / `dist` cleanup afterwards — untracked files were ne
 tracked here, so it comes along; that is fine, since a lock file affects only development environments
 and never reaches the wheel.
 
-Expect 63 files: the 61 tracked today, plus the `.gitignore` and the `ci.yml` you committed in step 3.
-(2a's `[tool.uv]` and 2d's `[dependency-groups]` edit `pyproject.toml`, which is already tracked, so they
-add no file.)
+Expect **51 files**: the 61 tracked before this run, plus the `.gitignore` and the `ci.yml` committed in
+step 3, minus the 12 the BloodHound upload removal took out (6 modules under `bloodhound/`, 6 tests).
+2a's `[tool.uv]` and 2d's `[dependency-groups]` edit `pyproject.toml`, which is already tracked, so they
+add no file.
 
 Then prove the repo stands on its own — the point of 2d, and something that could not be checked while the
 package lived inside the collector's venv:

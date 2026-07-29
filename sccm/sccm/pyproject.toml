@@ -134,7 +134,11 @@ fallback_version = "0.0.0"
 dev = [
     "pre-commit>=4.5.1",
     "pytest>=9.0.1",
-    "ruff>=0.15.5",
+    # Capped below 0.16: that release widened ruff's DEFAULT rule selection well past
+    # E4/E7/E9/F. The shared library went from clean to 173 findings on that bump with no
+    # code change, and this package has the same exposure — a fresh `uv lock` would turn
+    # CI red. Adopting the wider set is a deliberate modernization pass, not a surprise.
+    "ruff>=0.15.5,<0.16",
     "mypy>=1.19.1",
     "zensical>=0.0.27",
     # Type stubs for the three untyped runtime deps that HAVE published stubs.

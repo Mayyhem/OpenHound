@@ -305,7 +305,7 @@ dev = [
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "pre-commit", specifier = ">=4.5.1" },
     { name = "pytest", specifier = ">=9.0.1" },
-    { name = "ruff", specifier = ">=0.15.5" },
+    { name = "ruff", specifier = ">=0.15.5,<0.16" },
     { name = "types-ldap3", specifier = ">=2.9" },
     { name = "types-pyasn1", specifier = ">=0.6" },
     { name = "types-pywin32", specifier = ">=306" },
@@ -1046,10 +1046,13 @@ source = { editable = "../../openhound-collector-common" }
 dependencies = [
     { name = "cryptography" },
     { name = "dnspython" },
+    { name = "duckdb" },
     { name = "impacket" },
     { name = "ldap3" },
+    { name = "openhound" },
     { name = "pyasn1" },
     { name = "pyasn1-modules" },
+    { name = "pydantic" },
     { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "winkerberos", marker = "sys_platform == 'win32'" },
 ]
@@ -1058,10 +1061,13 @@ dependencies = [
 requires-dist = [
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "dnspython", specifier = ">=2.4.0" },
+    { name = "duckdb", specifier = ">=1.0" },
     { name = "impacket", specifier = ">=0.13.1" },
     { name = "ldap3", specifier = ">=2.10.2rc4" },
+    { name = "openhound", specifier = ">=0.2.12" },
     { name = "pyasn1" },
     { name = "pyasn1-modules" },
+    { name = "pydantic", specifier = ">=2.0" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
     { name = "winkerberos", marker = "sys_platform == 'win32'", specifier = ">=0.10.0" },
 ]
@@ -1070,7 +1076,7 @@ requires-dist = [
 dev = [
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "pytest", specifier = ">=9.0.1" },
-    { name = "ruff", specifier = ">=0.15.5" },
+    { name = "ruff", specifier = ">=0.15.5,<0.16" },
     { name = "types-ldap3", specifier = ">=2.9" },
     { name = "types-pyasn1", specifier = ">=0.6" },
     { name = "types-pywin32", specifier = ">=306" },
