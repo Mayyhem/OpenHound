@@ -659,11 +659,22 @@ This builds the real wheel, discovers the entry point, and loads the data files 
 install would — the shared library even comes from PyPI. The only thing a release adds is where the
 filename came from, which is why there is no release-candidate step.
 
-**Expect the installed version to read `0.0.0`, and do not treat it as a failure.** The only tag on the
-repo at this point is `v1.2-powershell` (step 7), which is not a PEP 440 version, so `hatch-vcs` cannot
-derive anything from it and falls back to `fallback_version = "0.0.0"`. That fallback exists precisely so
-a tagless or unparseable-tag checkout still builds. It cannot leak into a release: `release.yml` asserts
-the built version equals the tag before it publishes, so a `0.0.0` would abort the job.
+**Expect the installed version to read `0.0.0`.** With no `v2.0.0` tag yet, `hatch-vcs` falls back to
+`fallback_version`. That cannot leak into a release: `release.yml` asserts the built version equals the tag
+before publishing, so a `0.0.0` aborts the job.
+
+> **Corrected 2026-07-29.** An earlier version of this note claimed the `v1.2-powershell` tag from step 7
+> would simply produce that same `0.0.0` fallback. It does not — it makes the repository **unbuildable**:
+>
+> ```
+> ValueError: Error getting the version from source `vcs`: Can't parse version from tag 'v1.2-powershell'
+> ```
+>
+> `fallback_version` applies when there is **no** tag, not when the nearest tag is unparseable; there,
+> setuptools-scm raises, and `uv lock` / `uv sync` / `uv build` all fail. Step 9 therefore adds a
+> `git_describe_command` to `[tool.hatch.version.raw-options]` restricting the match to
+> `v[0-9]*.[0-9]*.[0-9]*`, so only MAJOR.MINOR.PATCH tags are considered and the PowerShell archive tag is
+> ignored. Note a plain `--match v[0-9]*` would **not** work: `v1.2-powershell` matches that glob.
 
 ### 11. ⚠ IRREVERSIBLE — publish
 
@@ -759,7 +770,8 @@ effect immediately — no reinstall. When ready, tag the library, and raise the 
 | *"Trusted publishing exchange failure"* | Owner / repo / workflow filename / environment do not match the PyPI form exactly | Re-read the pending-publisher entry; every field is literal and case-sensitive |
 | CI: *"No interpreter found for Python >=3.13,<3.15 in virtual environments, search path, or registry"* | `python-preference = "only-system"` forbids uv from downloading one, and the runner's system Python is 3.12 | The `actions/setup-python@v5` step from 2a is missing from that workflow. Do not "fix" it by loosening the preference — that reintroduces the Windows TLS abort |
 | Published version is `0.0.0` or `0.1.dev4+g1a2b3c` | Shallow checkout — no tags for `hatch-vcs` to see | `fetch-depth: 0` is already set; the workflow's version check should have failed the job first |
-| Step 10's git-URL install reports version `0.0.0` | Expected, not a fault: the repo's only tag is `v1.2-powershell`, which is not a PEP 440 version, so `hatch-vcs` uses `fallback_version` | Nothing. The rehearsal tests the entry point and data files, not the version. `release.yml` asserts version-equals-tag, so this cannot reach PyPI |
+| Step 10's git-URL install reports version `0.0.0` | Expected: no `v2.0.0` tag yet, so `hatch-vcs` uses `fallback_version` | Nothing. The rehearsal tests the entry point and data files, not the version. `release.yml` asserts version-equals-tag, so this cannot reach PyPI |
+| `ValueError: Can't parse version from tag 'v1.2-powershell'` — `uv lock` / `uv sync` / `uv build` all fail | The PowerShell archive tag is the nearest tag and is not PEP 440. `fallback_version` does not cover this: it applies to a *tagless* checkout, not an unparseable tag | The `git_describe_command` from step 9 must be present in `[tool.hatch.version.raw-options]`, matching `v[0-9]*.[0-9]*.[0-9]*`. A plain `v[0-9]*` does not work — the archive tag matches it |
 | `TICKETS-BY-STATUS.md` still produces merge conflicts | The `merge=ours` attribute is present but `ours` is not a built-in git merge driver | `git config merge.ours.driver true` in that clone (step 8). The `.gitattributes` line cannot work alone |
 | *"File already exists"* on upload | That version was already published; filenames are immutable | Bump to the next patch and tag again. Never overwrite |
 | Installs, but `openhound collect sccm` does not exist | Entry point missing from the wheel | Step 2's CI assertion covers this — it must find `sccm = openhound_sccm.main:app` |

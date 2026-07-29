@@ -125,6 +125,16 @@ local_scheme = "no-local-version"
 # Keeps `uv build` working in a tagless or shallow checkout. CI asserts the built version
 # matches the tag, so a stray 0.0.0 can never reach PyPI.
 fallback_version = "0.0.0"
+# Only consider MAJOR.MINOR.PATCH tags when deriving the version.
+#
+# This repository also carries `v1.2-powershell`, which archives the final PowerShell
+# release. Without this filter setuptools-scm picks that tag up, fails to parse it, and
+# raises -- so `uv lock`, `uv sync` and every build break outright. Note that
+# `fallback_version` does NOT cover this: it applies when there is no tag at all, not when
+# the nearest tag is unparseable.
+git_describe_command = [
+    "git", "describe", "--dirty", "--tags", "--long", "--match", "v[0-9]*.[0-9]*.[0-9]*",
+]
 
 [dependency-groups]
 # `openhound` is deliberately absent here: it is declared in [project.dependencies] as a
