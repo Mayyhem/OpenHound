@@ -45,19 +45,17 @@ remains available.
 """
 from __future__ import annotations
 
-import logging
 import socket
 import ssl
-import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from impacket import ntlm, tds
 
 from . import auth as auth_mod
-from ..logging import log_context  # noqa: F401  (registers logger.verbose)
+from ..logging.log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # MS-TDS PRELOGIN encryption byte values (mirror impacket.tds.TDS_ENCRYPT_*).
 ENCRYPT_OFF = tds.TDS_ENCRYPT_OFF        # 0
@@ -687,7 +685,10 @@ class _Tds(tds.MSSQL):
         token_buf = win32security.PySecBufferType(
             client.auth.pkg_info["MaxToken"], sspicon.SECBUFFER_TOKEN
         )
-        token_buf.Buffer = bytes(server_challenge)
+        # Writing .Buffer is how pywin32 fills a security buffer, but types-pywin32
+        # declares the property read-only and str-typed. Both are wrong for this API:
+        # the setter exists and takes bytes.
+        token_buf.Buffer = bytes(server_challenge)  # type: ignore[misc,assignment]
         sec_buffer_in.append(token_buf)
 
         bindings = self._resolve_sspi_channel_binding(cbt_mode)
@@ -695,7 +696,7 @@ class _Tds(tds.MSSQL):
             cbt_buf = win32security.PySecBufferType(
                 len(bindings), sspicon.SECBUFFER_CHANNEL_BINDINGS
             )
-            cbt_buf.Buffer = bindings
+            cbt_buf.Buffer = bindings  # type: ignore[misc,assignment]  # see token_buf above
             sec_buffer_in.append(cbt_buf)
         else:
             # "missing" mode (or no tls-unique) -> send no channel-binding buffer.
@@ -900,6 +901,10 @@ class MssqlConnection:
         variants share the same login call — the strategy ordering matters for
         the reverse-DNS remoteName and short-host SPN, which are set on ``client``.
         """
+        if self._target is None:
+            # Set by connect() before any login attempt; a None here means a login was
+            # driven without connecting, which is a caller bug worth naming.
+            raise RuntimeError("login attempted before connect() parsed a target")
         spn = auth.spn or default_spn(strat.remote_name, self._target.port)
         if auth.kerberos_ticket:
             # Pass-the-ticket: Kerberos only (no NTLM fallback) — design D12.
@@ -939,6 +944,10 @@ class MssqlConnection:
 
         from impacket.krb5.ccache import CCache
 
+        if not auth.kerberos_ticket:
+            # The caller reaches this method only after testing auth.kerberos_ticket, but
+            # asserting it here keeps the precondition with the code that depends on it.
+            raise ValueError("_kerberos_login requires auth.kerberos_ticket")
         ccache = CCache()
         ccache.fromKRBCRED(base64.b64decode(auth.kerberos_ticket, validate=True))
         fd, path = tempfile.mkstemp(suffix=".ccache")

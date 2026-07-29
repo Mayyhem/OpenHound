@@ -11,8 +11,6 @@ here — they must stay as real LDAP names and are left untouched by this fix.
 from __future__ import annotations
 
 import struct
-from types import SimpleNamespace
-from typing import Any
 
 
 # ---------------------------------------------------------------------------

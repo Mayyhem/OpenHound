@@ -66,7 +66,10 @@ class SCCMCollection(BaseAsset):
                 displayname=display,
                 environmentid=root or cid,
                 collectionID=cid,
-                collectionType=_COLLECTION_TYPE.get(self.collection_type),
+                # dict.get(None) happens to return None rather than raising, but the
+                # int-keyed map has no None key -- say so instead of relying on that.
+                collectionType=(_COLLECTION_TYPE.get(self.collection_type)
+                                if self.collection_type is not None else None),
                 memberCount=self.member_count,
                 comment=self.comment,
                 isBuiltIn=self.is_built_in,

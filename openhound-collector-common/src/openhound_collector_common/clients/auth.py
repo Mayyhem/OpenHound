@@ -40,10 +40,9 @@ import base64
 import datetime
 import importlib
 import ipaddress
-import logging
 import struct
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 from impacket.krb5 import constants
 from impacket.krb5.asn1 import AP_REQ, TGS_REP, Authenticator, seq_set
@@ -69,9 +68,9 @@ from impacket.spnego import (
 from pyasn1.codec.der import decoder, encoder
 from pyasn1.type.univ import noValue
 
-from ..logging import log_context  # noqa: F401  (registers logger.verbose)
+from ..logging.log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # The conventional empty LM hash, prepended to a bare NT hash so impacket
 # receives the LMHASH:NTHASH form it expects (identical to the SCCM source).
@@ -434,7 +433,8 @@ class SspiClient:
         scflags: Optional[int] = None,
     ) -> None:
         import sspi  # Windows-only; imported lazily so the module loads anywhere
-        kwargs = {"targetspn": target_spn or None}
+        # dict[str, Any]: the values are heterogeneous (a str|None SPN and an int flag set).
+        kwargs: dict[str, Any] = {"targetspn": target_spn or None}
         if scflags is not None:
             # Caller controls ISC_REQ_* flags (e.g. INTEGRITY|CONNECTION for NTLM).
             kwargs["scflags"] = scflags

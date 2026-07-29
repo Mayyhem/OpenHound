@@ -282,9 +282,11 @@ def install_filter() -> None:
                 handler.addFilter(_FILTER_SINGLETON)
             if _EXC_INFO_FILTER_SINGLETON not in handler.filters:
                 handler.addFilter(_EXC_INFO_FILTER_SINGLETON)
-            # Duck-typed Rich-handler tidy-up so we need not import rich here.
+            # Duck-typed Rich-handler tidy-up so we need not import rich here. The getattr
+            # guard is the type check; logging.Handler has no `markup`, which is exactly
+            # why the attribute is probed rather than assumed.
             if getattr(handler, "markup", False):
-                handler.markup = False
+                handler.markup = False  # type: ignore[attr-defined]
             log_render = getattr(handler, "_log_render", None)
             if log_render is not None and hasattr(log_render, "show_path"):
                 log_render.show_path = False

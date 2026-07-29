@@ -16,6 +16,8 @@ Before starting any work, grill me about my prompt thoroughly using the grill-me
 
 Don't use software engineering jargon. Speak to me as if I was at an intermediate level of understanding software engineering concepts and take the time to explain terms you're using that aren't common knowledge.
 
+Don't refer to documented tasks, steps, decisions, etc. only by number in our discussion. Restate what you are talking about. 
+
 ALWAYS use the following plugins/skills for tasks, unless they conflict (listed in descending order of importance):
 - grill-me (sccm\sccm\.agents\skills\openhound\SKILL.md)
 - superpowers

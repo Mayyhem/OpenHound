@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import base64
 import enum
-import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -23,11 +22,11 @@ from urllib.parse import urlparse
 import requests
 import urllib3
 
-from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
+from ..log_context import get_logger
 from . import http_auth
 from .http_auth import AuthMode
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # SCCM site systems routinely use self-signed certs; PS1 disables validation
 # globally (TrustAllCertsPolicy). Match that and silence the per-request warning.
@@ -94,7 +93,12 @@ class HttpClient:
         kerberos_ticket: Optional[str] = None,
         kdc_host: Optional[str] = None,
         verify_ssl: bool = False,
-        timeout: int = 5,
+        # Applies to both connect and read. 10s rather than 5s because the SCCM
+        # AdminService answers some WMI-backed classes slowly when the SMS Provider
+        # is warming up or under load -- SMS_SCI_Reserved was observed exceeding 5s
+        # on every site server in a healthy lab, and a read timeout there is
+        # indistinguishable from "no rows" once the response is lost.
+        timeout: int = 10,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._auth = auth
@@ -125,7 +129,7 @@ class HttpClient:
 
     @classmethod
     def from_context(cls, ctx, target: str, *, auth: AuthMode,
-                     scheme: str = "https", timeout: int = 5) -> "HttpClient":
+                     scheme: str = "https", timeout: int = 10) -> "HttpClient":
         """Build a client for *target*, reading credentials from a SourceContext.
 
         The KDC defaults to the already-resolved domain controller

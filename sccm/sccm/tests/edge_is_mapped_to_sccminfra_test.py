@@ -9,7 +9,6 @@ from openhound_sccm.graph import SCCMEdgeProperties
 from openhound_sccm.kinds.edges import SCCM_HAS_MEMBER, SCCM_IS_MAPPED_TO
 from openhound_sccm.models.graph_edge import GraphEdge
 from openhound_sccm.transforms import (
-    _edge_is_mapped_to,
     _graph_edges_dedup,
     _graph_edges_init,
     _graph_edges_split,

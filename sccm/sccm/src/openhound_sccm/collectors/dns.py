@@ -8,7 +8,6 @@ passed into each resource. All decorators register onto the same
 
 from __future__ import annotations
 
-import logging
 import socket
 import struct
 from typing import Any, Iterable, Optional
@@ -17,9 +16,9 @@ from typing import Any, Iterable, Optional
 from ..context import SourceContext
 from ..main import app
 from ..models.raw_table import raw_table_asset
-from ..log_context import with_log_context
+from ..log_context import get_logger, with_log_context
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @app.resource(name="dns_management_points", parallelized=False, columns=raw_table_asset("dns_management_points"))
@@ -37,9 +36,15 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
     
     logger.info("Starting DNS collection...")
 
+    # `dns_mod` exists so the except clauses further down have a name that is bound on
+    # every path. `import dns.resolver` binds `dns` only when it succeeds, and nothing
+    # connects that binding to `has_dnspython` — not for a reader, and not for a type
+    # checker, which correctly flags a bare `dns.resolver.NXDOMAIN` as possibly undefined.
+    dns_mod: Any = None
     try:
         import dns.exception
         import dns.resolver
+        dns_mod = dns
         has_dnspython = True
     except ImportError:
         logger.warning("dnspython library not available. Install with: uv add dnspython")
@@ -78,13 +83,13 @@ def dns_management_points(ctx: "SourceContext") -> Iterable[dict[str, Any]]:
             logger.info("Querying SRV record: %s", srv_name)
             try:
                 answers = resolver.resolve(srv_name, "SRV")
-            except dns.resolver.NXDOMAIN:
+            except dns_mod.resolver.NXDOMAIN:
                 logger.verbose(f"No SRV record found for {srv_name} (NXDOMAIN)")
                 continue
-            except dns.resolver.NoAnswer:
+            except dns_mod.resolver.NoAnswer:
                 logger.verbose(f"No SRV record found for {srv_name} (NoAnswer)")
                 continue
-            except dns.exception.Timeout:
+            except dns_mod.exception.Timeout:
                 logger.warning(f"DNS query timed out for {srv_name}")
                 continue
             except Exception as ex:
@@ -185,7 +190,9 @@ def _extract_srv_target(dns_record: Any) -> Optional[str]:
             record = record.encode("latin-1")
         if not isinstance(record, (bytes, bytearray)):
             continue
-        hostname = _parse_dns_rpc_record_srv(record)
+        # bytearray is accepted above because ldap3 can hand back either; the parser
+        # indexes and slices, so give it plain bytes.
+        hostname = _parse_dns_rpc_record_srv(bytes(record))
         if hostname:
             return hostname
     return None
@@ -259,7 +266,10 @@ def _resolve_v4(host: str) -> Optional[str]:
     try:
         infos = socket.getaddrinfo(host, None, socket.AF_INET)
         if infos:
-            return infos[0][4][0]
+            # sockaddr for AF_INET is (address, port), so element 0 is the address. The
+            # family is pinned above, but the stdlib types sockaddr as a union across
+            # families, where element 0 can be an int — hence the explicit str().
+            return str(infos[0][4][0])
     except (socket.gaierror, OSError) as ex:
         logger.debug("_resolve_v4: stdlib getaddrinfo for %s failed: %s", host, ex)
     return None

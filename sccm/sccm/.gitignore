@@ -4,6 +4,10 @@ ui_catalog.db
 notebooks
 site/
 output
+# Collector output from live lab runs -- graph JSON, logs and lookup.duckdb for a real
+# environment. Must never reach a public repo. `output` above covers the older default
+# directory name; `out/` is what --run-all examples use now.
+out/
 graph
 logs
 dbt_packages
@@ -217,3 +221,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Subagent-driven-development working files: briefs, diffs, review packages.
+# Kept in-repo (scratchpad access can be denied to subagents mid-session) but never
+# committed -- they contain live lab credentials. Previously covered only by the fork
+# root's .gitignore, which does not survive the repo split.
+.sdd/

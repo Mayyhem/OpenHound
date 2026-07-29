@@ -30,16 +30,15 @@ pulled off the WMI enumerator.
 from __future__ import annotations
 
 import base64
-import logging
 from typing import Any, Iterator, Optional
 
 from openhound_collector_common.clients.wmi import _ImpacketBackend, _PyWin32Backend
 
-from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
+from ..log_context import get_logger
 from . import http_auth
 from .http_auth import format_hashes, split_user_domain
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _build_wql(class_name: str, columns: Optional[tuple] = None, where: Optional[str] = None) -> str:

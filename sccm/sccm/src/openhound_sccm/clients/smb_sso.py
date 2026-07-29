@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import base64
 import importlib
-import logging
 import sys
 from typing import Optional
 
-from .. import log_context  # noqa: F401  (import registers logger.verbose on logging.Logger)
+from ..log_context import get_logger
 from .http_auth import format_hashes  # canonical NT-hash -> "LM:NT" normalizer
 from impacket import crypto
 from impacket.nt_errors import STATUS_MORE_PROCESSING_REQUIRED, STATUS_SUCCESS
@@ -29,7 +28,7 @@ from impacket.smb3structs import (
     SMB2SessionSetup_Response,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _sspi_negotiate_available() -> bool:

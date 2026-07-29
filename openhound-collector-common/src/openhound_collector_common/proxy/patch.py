@@ -133,8 +133,13 @@ def install(proxy: ProxyConfig) -> None:
         logger.error("install: a proxy (%s:%s) is already active", _ACTIVE.host, _ACTIVE.port)
         raise RuntimeError("SOCKS proxy already installed; uninstall first")
     _ACTIVE = proxy
-    _socket.socket = _ProxiedSocket
-    _socket.create_connection = create_connection
+    # Replacing names in the stdlib socket module IS the mechanism here: every library in
+    # the process (ldap3, requests, impacket) resolves socket.socket at call time, so
+    # rebinding it is what makes their traffic tunnel without any of them cooperating.
+    # mypy objects because socket.socket is a type and create_connection has a fixed
+    # signature; both objections are correct and both are the point.
+    _socket.socket = _ProxiedSocket  # type: ignore[misc]
+    _socket.create_connection = create_connection  # type: ignore[assignment]
     _socket.getaddrinfo = getaddrinfo
     logger.info("SOCKS5 proxy installed: all TCP now tunnels via %s:%s", proxy.host, proxy.port)
 
@@ -142,7 +147,7 @@ def install(proxy: ProxyConfig) -> None:
 def uninstall() -> None:
     """Restore the original socket functions."""
     global _ACTIVE
-    _socket.socket = _ORIG_SOCKET
+    _socket.socket = _ORIG_SOCKET  # type: ignore[misc]  # see install(): rebinding a type
     _socket.create_connection = _ORIG_CREATE_CONNECTION
     _socket.getaddrinfo = _ORIG_GETADDRINFO
     if _ACTIVE is not None:

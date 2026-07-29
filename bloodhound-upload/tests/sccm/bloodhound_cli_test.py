@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import openhound_sccm.main as main
+from openhound_collector_common.bloodhound import UploadSummary
 
 
 class RecordingUploader:
@@ -63,7 +64,6 @@ def test_convert_command_registered_with_upload_flags():
 
 
 # --- ope-feb0: _dispatch_bloodhound_upload operator feedback + exit code ---
-from openhound_collector_common.bloodhound import UploadSummary
 
 
 class _FakeUploader:

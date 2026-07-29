@@ -1,6 +1,6 @@
-import json, zipfile
-from pathlib import Path
-from openhound_collector_common.integration_testing.graph import load_graph, Graph, Node, Edge
+import json
+import zipfile
+from openhound_collector_common.integration_testing.graph import load_graph
 
 PAYLOAD_A = {"graph": {"nodes": [
     {"id": "N1", "kinds": ["SCCM_Site", "Base"], "properties": {"siteCode": "PS1"}}],
@@ -25,7 +25,8 @@ def test_load_from_zip(tmp_path):
     d = _write_dir(tmp_path)
     zp = tmp_path / "payload.zip"
     with zipfile.ZipFile(zp, "w") as zf:
-        zf.write(d / "a.json", "a.json"); zf.write(d / "b.json", "b.json")
+        zf.write(d / "a.json", "a.json")
+        zf.write(d / "b.json", "b.json")
     g = load_graph(zp)
     assert len(g.nodes) == 2 and g.node("N2") is not None
 

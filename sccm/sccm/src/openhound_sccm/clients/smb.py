@@ -25,16 +25,15 @@ equivalent PS1 P/Invokes.
 """
 from __future__ import annotations
 
-import logging
 import socket
 import struct
 import uuid
 from typing import Optional
 
-from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
+from ..log_context import get_logger
 from impacket.smb3structs import SMB2_DIALECT_30, SMB2_NEGOTIATE_SIGNING_REQUIRED
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Dialects we advertise in the probe NEGOTIATE (SMB 2.0.2 .. 3.1.1), matching
 # PS1's Get-SMBSigningRequiredViaSMBNegotiate dialect list.

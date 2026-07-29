@@ -28,6 +28,14 @@ jobs:
           # since PyPI filenames are immutable.
           fetch-depth: 0
 
+      # python-preference = "only-system" forbids uv from downloading a managed
+      # interpreter, so a Python satisfying requires-python (>=3.13) must already be on
+      # PATH before uv runs. ubuntu-latest's system Python is 3.12, and the tool-cache
+      # 3.13 is not on PATH until this step puts it there.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 

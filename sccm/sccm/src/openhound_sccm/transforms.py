@@ -8,6 +8,7 @@ skipped (early stages won't have collected everything).
 """
 import logging
 import os
+from typing import Any
 
 import duckdb
 
@@ -137,6 +138,24 @@ def _column_exists(con: duckdb.DuckDBPyConnection, schema: str, table: str, colu
 # list-shaped column to VARCHAR[] whatever physical shape dlt produced). Pure SQL
 # string builder, no logging — alias directly.
 _arr = arr_sql
+
+
+def _scalar(con: duckdb.DuckDBPyConnection, *execute_args: Any) -> Any:
+    """First column of the first row of a scalar query. Same arguments as ``con.execute``.
+
+    DuckDB types ``fetchone()`` as ``tuple[Any, ...] | None``, so the bare
+    ``con.execute(...).fetchone()[0]`` idiom this module used 28 times was 28 type errors —
+    mypy cannot know that a ``count(*)`` always returns a row.
+
+    Raising on a missing row is deliberate rather than returning None: every caller here
+    runs an aggregate (``count``/``min``/``max``) or a ``LIMIT 1`` lookup that always
+    yields exactly one row, so no row means the query is not the one the caller believes
+    it is. Failing here names the query; a ``TypeError`` three frames away does not.
+    """
+    row = con.execute(*execute_args).fetchone()
+    if row is None:
+        raise RuntimeError(f"scalar query returned no row: {execute_args[0]!r}")
+    return row[0]
 
 
 def _principal_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
@@ -394,10 +413,10 @@ def _site_hierarchy(con: duckdb.DuckDBPyConnection, schema: str, disable_possibl
         # unaffected either way -- so a failure here just falls back to
         # "nothing counted" rather than aborting the loop.
         try:
-            site_code_count = con.execute(
+            site_code_count = _scalar(con,
                 f"SELECT count(DISTINCT upper(CAST(site_code AS VARCHAR))) "
                 f"FROM {schema}.{table} WHERE site_code IS NOT NULL"
-            ).fetchone()[0]
+            )
         except duckdb.BinderException as ex:
             logger.debug(
                 "site_hierarchy: could not count distinct site codes in %r for the "
@@ -1196,7 +1215,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         )
 
     _resolved_ss_site = f"coalesce({_norm_site_code('ss.site_code')}, mp.site_code)"
-    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _before = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     _safe(
         con,
         "node_computer<-http_site_servers",
@@ -1220,7 +1239,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"LEFT JOIN _mp_site_by_host mp ON lower(ss.mp_host) = mp.dns_host_name "
         f"WHERE ss.object_sid IS NOT NULL",
     )
-    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _after = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     logger.info("node_computer<-http_site_servers contributed %d row(s)", _after - _before)
 
     # --- ldap_management_points_raw (FSP): the fallback status point is a second
@@ -1232,7 +1251,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     _ensure_columns(con, schema, "ldap_management_points_raw", {
         "fsp_hostname": "VARCHAR", "fsp_sid": "VARCHAR", "site_code": "VARCHAR",
     })
-    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _before = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     _safe(
         con,
         "node_computer<-ldap_management_points_raw(fsp)",
@@ -1255,13 +1274,13 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.ldap_management_points_raw "
         f"WHERE fsp_sid IS NOT NULL",
     )
-    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _after = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     logger.info("node_computer<-ldap_management_points_raw(fsp) contributed %d row(s)", _after - _before)
 
     # --- dns_management_points: the SRV/ADIDNS query key IS the site code
     # (authoritative, D6), and the collector now emits the role string directly,
     # so this is a plain arm -- no join needed, same shape as http_management_points. ---
-    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _before = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     _safe(
         con,
         "node_computer<-dns_management_points",
@@ -1283,7 +1302,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.dns_management_points "
         f"WHERE object_sid IS NOT NULL",
     )
-    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _after = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     logger.info("node_computer<-dns_management_points contributed %d row(s)", _after - _before)
 
     # --- mssql_server_instances: an MSSQLSvc SPN or a probed-open TCP/1433 is
@@ -1292,7 +1311,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # sccm_infra stays false and no role is added; a real SCCM role, if any,
     # arrives from another arm above and merges on sid. ---
     _ensure_columns(con, schema, "mssql_server_instances", {"name": "VARCHAR", "dns_host_name": "VARCHAR"})
-    _before = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _before = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     _safe(
         con,
         "node_computer<-mssql_server_instances",
@@ -1321,7 +1340,7 @@ def _node_computer(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.mssql_server_instances "
         f"WHERE domain_computer_sid IS NOT NULL",
     )
-    _after = con.execute(f"SELECT count(*) FROM {schema}.node_computer").fetchone()[0]
+    _after = _scalar(con, f"SELECT count(*) FROM {schema}.node_computer")
     logger.info("node_computer<-mssql_server_instances contributed %d row(s)", _after - _before)
 
     # Collapse all staging rows into one row per SID. Role lists are array-unioned;
@@ -2086,10 +2105,10 @@ def _coalesce_http_site_version(con: duckdb.DuckDBPyConnection, schema: str) -> 
     with constraints not yet supported" when it tries to ALTER in ``_dlt_id``. So we let
     dlt own creation and only read the table when it exists.
     """
-    exists = con.execute(
+    exists = _scalar(con,
         f"SELECT count(*) FROM information_schema.tables "
         f"WHERE table_schema = '{schema}' AND table_name = 'http_site_versions'"
-    ).fetchone()[0]
+    )
     if not exists:
         logger.debug("http_site_versions absent (no MP fingerprinted); skipping version coalesce")
         return
@@ -2331,7 +2350,7 @@ def _node_smc_container(con: duckdb.DuckDBPyConnection, schema: str) -> None:
           f"FROM {schema}.ldap_system_management_dacl "
           f"WHERE smc_container_guid IS NOT NULL "
           f"GROUP BY upper(smc_container_guid)")
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_container").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_container")
     logger.info("node_smc_container built (%d System Management container node(s)) in schema %r", n, schema)
 
 
@@ -3158,9 +3177,9 @@ def _collection_by_name(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     con.execute(f"CREATE OR REPLACE TABLE {schema}.collection_by_name AS "
                 f"SELECT DISTINCT name, collection_id FROM {schema}.collection_by_name")
 
-    dupes = con.execute(
+    dupes = _scalar(con,
         f"SELECT count(*) FROM (SELECT name FROM {schema}.collection_by_name GROUP BY name HAVING count(*) > 1)"
-    ).fetchone()[0]
+    )
     if dupes:
         # Multiple collection_ids share the same name — edge builders will fan out (correct per CMBP).
         logger.info("collection_by_name: %d collection name(s) map to multiple ids (IsAssigned will fan out)", dupes)
@@ -3304,7 +3323,7 @@ def _assumed_site_dbs(con: duckdb.DuckDBPyConnection, schema: str,
         f"SELECT host_sid, distinct_codes[1] AS site_code, 'RemoteRegistry' AS basis "
         f"FROM _rr_site_candidates WHERE len(distinct_codes) = 1",
     )
-    n_rr = con.execute(f"SELECT count(*) FROM {schema}.assumed_site_dbs").fetchone()[0]
+    n_rr = _scalar(con, f"SELECT count(*) FROM {schema}.assumed_site_dbs")
     if disable_possible_edges:
         logger.info(
             "assumed_site_dbs: --disable-possible-edges set; keeping %d "
@@ -3364,9 +3383,9 @@ def _assumed_site_dbs(con: duckdb.DuckDBPyConnection, schema: str,
             "-- dropping it rather than guessing", _host, len(_codes), _codes,
         )
     try:
-        n_spn_no_site = con.execute(
+        n_spn_no_site = _scalar(con,
             "SELECT count(*) FROM _spn_site_candidates WHERE len(distinct_codes) = 0"
-        ).fetchone()[0]
+        )
     except duckdb.CatalogException:
         # Unreachable now that _spn_site_candidates is unconditionally created
         # above; kept as defense in depth, same rationale as _spn_ambiguous.
@@ -3383,7 +3402,7 @@ def _assumed_site_dbs(con: duckdb.DuckDBPyConnection, schema: str,
         f"SELECT host_sid, distinct_codes[1] AS site_code, 'SPN+SCCM' AS basis "
         f"FROM _spn_site_candidates WHERE len(distinct_codes) = 1",
     )
-    n_total = con.execute(f"SELECT count(*) FROM {schema}.assumed_site_dbs").fetchone()[0]
+    n_total = _scalar(con, f"SELECT count(*) FROM {schema}.assumed_site_dbs")
     logger.info(
         "assumed_site_dbs built: %d RemoteRegistry-confirmed + %d SPN+SCCM-inferred "
         "= %d total in schema %r",
@@ -3471,7 +3490,7 @@ def _mssql_sql_servers(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"LEFT JOIN {schema}.node_site ns ON upper(ns.site_code) = h.site_code "
         f"GROUP BY h.site_code, ns.root_site_code, h.host_sid"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}._mssql_sql_servers").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}._mssql_sql_servers")
     logger.info("_mssql_sql_servers resolved %d (site, SQL-host) pair(s) in schema %r", n, schema)
 
 
@@ -3618,7 +3637,7 @@ def _node_mssql_server(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"FROM {schema}.node_mssql_server WHERE host_sid IS NOT NULL AND port IS NOT NULL "
         f"GROUP BY upper(host_sid), host_sid, port"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_server").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_server")
     logger.info("node_mssql_server built (%d server(s)) in schema %r", n, schema)
 
 
@@ -3646,7 +3665,7 @@ def _node_mssql_database(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"  {_db_provenance} "
         f"FROM {schema}._mssql_sql_servers WHERE host_sid IS NOT NULL AND db_name IS NOT NULL"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_database")
     logger.info("node_mssql_database built (%d database(s)) in schema %r", n, schema)
 
 
@@ -3682,7 +3701,7 @@ def _node_mssql_login(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"        OR upper(x) = 'SMS PROVIDER@' || s.site_code)) > 0 "
         f"WHERE s.host_sid IS NOT NULL"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_login").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_login")
     logger.info("node_mssql_login built (%d login(s)) in schema %r", n, schema)
 
 
@@ -3708,7 +3727,7 @@ def _node_mssql_database_user(con: duckdb.DuckDBPyConnection, schema: str) -> No
         f"FROM {schema}.node_mssql_login l "
         f"JOIN {schema}.node_mssql_database d ON d.server_id = l.server_id"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database_user").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_database_user")
     logger.info("node_mssql_database_user built (%d user(s)) in schema %r", n, schema)
 
 
@@ -3734,7 +3753,7 @@ def _node_mssql_server_role(con: duckdb.DuckDBPyConnection, schema: str) -> None
         f"  {_role_provenance} "
         f"FROM {schema}.node_mssql_server s WHERE s.sccm_infra"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_server_role").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_server_role")
     logger.info("node_mssql_server_role built (%d sysadmin role(s)) in schema %r", n, schema)
 
 
@@ -3757,7 +3776,7 @@ def _node_mssql_database_role(con: duckdb.DuckDBPyConnection, schema: str) -> No
         f"  {_dbrole_provenance} "
         f"FROM {schema}.node_mssql_database d"
     )
-    n = con.execute(f"SELECT count(*) FROM {schema}.node_mssql_database_role").fetchone()[0]
+    n = _scalar(con, f"SELECT count(*) FROM {schema}.node_mssql_database_role")
     logger.info("node_mssql_database_role built (%d db_owner role(s)) in schema %r", n, schema)
 
 
@@ -3862,14 +3881,14 @@ def _edge_has_member(con: duckdb.DuckDBPyConnection, schema: str) -> None:
                        [_src]).fetchone() is None:
             continue  # this transport wasn't collected; _safe already skipped the insert
         try:
-            unresolved = con.execute(
+            unresolved = _scalar(con,
                 f"SELECT count(DISTINCT cm.collection_id || '|' || CAST(cm.resource_id AS VARCHAR)) "
                 f"FROM {schema}.{_src} cm "
                 f"LEFT JOIN {schema}.device_by_resourceid d ON d.resource_key = {key_expr} "
                 f"LEFT JOIN {schema}.principal_by_resourceid p ON p.resource_key = {key_expr} "
                 f"WHERE cm.collection_id IS NOT NULL AND coalesce(d.smsid, p.sid) IS NULL "
                 f"  AND {not_builtin}"
-            ).fetchone()[0]
+            )
         except duckdb.Error as err:
             logger.warning("edge_has_member: unresolved-member audit failed for %s: %s", _src, err)
             unresolved = 0
@@ -4202,11 +4221,11 @@ def _edge_rbac_role_grants(con: duckdb.DuckDBPyConnection, schema: str) -> None:
     # Diagnostic: count custom roles assigned to admins that produce no device edge (CMBP warns per role).
     skip_list = ", ".join(f"'{r}'" for r in (*_ROLE_EDGE_KIND, *_ROLE_KNOWN_NO_EDGE))
     try:
-        cnt = con.execute(
+        cnt = _scalar(con,
             f"SELECT count(DISTINCT role.role_id) FROM {schema}.graph_edges admin_to_role "
             f"JOIN {schema}.node_security_role role ON role.role_id || '@' || role.root_site_code = admin_to_role.end_id "
             f"WHERE admin_to_role.kind = 'SCCM_IsAssigned' AND upper(role.role_id) NOT IN ({skip_list})"
-        ).fetchone()[0]
+        )
     except duckdb.Error as err:
         logger.warning("edge_rbac_role_grants: custom-role audit query failed: %s", err)
         cnt = 0
@@ -4876,9 +4895,9 @@ def _node_authenticated_users(con: duckdb.DuckDBPyConnection, schema: str) -> No
         f"JOIN _domain_to_sid d ON d.fqdn_upper = replace(ge.start_id, '-S-1-5-11', '') "
         f"WHERE ge.kind IN {relay_kinds} AND ge.start_id LIKE '%-S-1-5-11'"
     )
-    n = con.execute(
+    n = _scalar(con,
         f"SELECT count(*) FROM {schema}.node_group WHERE sid LIKE '%-S-1-5-11'"
-    ).fetchone()[0]
+    )
     logger.info("node_authenticated_users: node_group holds %d AUTHENTICATED USERS node(s)", n)
 
 
@@ -4966,7 +4985,7 @@ def _node_backfill(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"WHERE ge.end_id IS NOT NULL "
         f"  AND ge.end_id NOT IN (SELECT id FROM _existing_ids)"
     )
-    cnt = con.execute(f"SELECT count(*) FROM {schema}.node_backfill").fetchone()[0]
+    cnt = _scalar(con, f"SELECT count(*) FROM {schema}.node_backfill")
     if cnt:
         logger.warning(
             "node_backfill: synthesised %d stub node(s) for edge endpoints with no node",
@@ -5018,8 +5037,8 @@ def _graph_edges_split(con: duckdb.DuckDBPyConnection, schema: str) -> None:
         f"WHERE NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.start_id) "
         f"  AND NOT EXISTS (SELECT 1 FROM _ad_ids a WHERE a.id = e.end_id)"
     )
-    ad_cnt = con.execute(f"SELECT count(*) FROM {schema}.graph_edges_ad").fetchone()[0]
-    sccm_cnt = con.execute(f"SELECT count(*) FROM {schema}.graph_edges_sccm").fetchone()[0]
+    ad_cnt = _scalar(con, f"SELECT count(*) FROM {schema}.graph_edges_ad")
+    sccm_cnt = _scalar(con, f"SELECT count(*) FROM {schema}.graph_edges_sccm")
     logger.info("graph_edges split: %d AD-touching, %d SCCM-only", ad_cnt, sccm_cnt)
 
 

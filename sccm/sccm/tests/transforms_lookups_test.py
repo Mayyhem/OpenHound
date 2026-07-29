@@ -15,14 +15,18 @@ def _seed(con):
     con.execute("CREATE TABLE sccm.adminservice_security_roles AS SELECT 'SMS000AR' AS role_id, 'Full Administrator' AS role_name")
 
 def test_lookups_built():
-    con = duckdb.connect(":memory:"); _seed(con); transforms(con)
+    con = duckdb.connect(":memory:")
+    _seed(con)
+    transforms(con)
     assert con.execute("SELECT sid FROM sccm.principal_by_resourceid WHERE resource_key='9@PS1'").fetchone()[0] == "S-1-5-21-1-2-3-1106"
     assert con.execute("SELECT smsid FROM sccm.device_by_resourceid WHERE resource_key='7@PS1'").fetchone()[0] == "GUID-1"
     assert con.execute("SELECT collection_id FROM sccm.collection_by_name WHERE name='ALL SYSTEMS'").fetchone()[0] == "PS100016"
     assert con.execute("SELECT role_id FROM sccm.role_by_name WHERE name='FULL ADMINISTRATOR'").fetchone()[0] == "SMS000AR"
 
 def test_principal_by_name_resolves_unique_user_name():
-    con = duckdb.connect(":memory:"); _seed(con); transforms(con)
+    con = duckdb.connect(":memory:")
+    _seed(con)
+    transforms(con)
     # the DOMAIN\user form resolves to the user's SID (enrichment)
     row = con.execute("SELECT sid FROM sccm.principal_by_name WHERE upper(name)=upper('MAYYHEM\\alice')").fetchone()
     assert row is not None and row[0] == "S-1-5-21-1-2-3-1106"

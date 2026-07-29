@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
 from openhound_sccm.collectors.ldap import _parse_mp_capabilities, ldap_management_points_raw
 
 

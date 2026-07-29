@@ -146,6 +146,9 @@ def build_uploader(
     log = logger_ or logger
     if not url:
         return None
+    # The two auth classes share no base, so the variable needs the union up front --
+    # otherwise it takes HMACAuth's type from the first branch and rejects the second.
+    auth: HMACAuth | BearerAuth
     if token_id and token_key:
         auth = HMACAuth(token_id, token_key)
     elif token_id:

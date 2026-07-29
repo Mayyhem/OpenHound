@@ -1,4 +1,4 @@
-from openhound_collector_common.integration_testing.cases import CountSpec, NodePattern, EdgeCase, NodeCase
+from openhound_collector_common.integration_testing.cases import CountSpec, EdgeCase, NodeCase
 
 def test_countspec_semantics():
     assert CountSpec(exact=3).satisfied_by(3) and not CountSpec(exact=3).satisfied_by(2)

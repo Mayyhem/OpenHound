@@ -6,7 +6,6 @@ Seeds a three-site hierarchy (CAS type 4, PS1 type 2 / parent CAS, SS1 type 1
 and the forbidden row (SS1 -> PS1) is absent.
 """
 import duckdb
-import pytest
 
 from openhound_sccm.transforms import transforms
 

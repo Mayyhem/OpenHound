@@ -25,11 +25,10 @@ from __future__ import annotations
 
 import enum
 import importlib
-import logging
 import sys
 from typing import Any, Optional
 
-from .. import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
+from ..log_context import get_logger
 
 from impacket.krb5.gssapi import (
     GSS_C_INTEG_FLAG,
@@ -59,7 +58,7 @@ from openhound_collector_common.clients.auth import (  # noqa: F401 (re-exported
     split_user_domain,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # GSS checksum flags for the explicit-Kerberos authenticator. Matches impacket's
 # getKerberosType1 set MINUS GSS_C_DCE_STYLE (and GSS_C_CONF, unnecessary here):

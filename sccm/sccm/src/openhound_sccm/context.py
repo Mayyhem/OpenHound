@@ -5,7 +5,6 @@
 provides the lazy-loaded caches that every ``@app.resource`` in
 ``collectors/*`` shares:
 """
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -15,8 +14,9 @@ from openhound_collector_common.discovery.dns import make_resolver
 
 from .clients.ad import ADClient
 from .models.target_entry import TargetEntry
+from .log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _domain_from_dn(dn: str) -> str | None:
@@ -394,7 +394,9 @@ class SourceContext:
 
         # Step 3: Canonical name and dedup key
         sid = ad_object.get("object_sid") if ad_object else None
-        if sid:
+        # `sid` can only be set when ad_object exists, but testing both makes that
+        # dependency visible instead of implied one line up.
+        if ad_object and sid:
             canonical = ad_object.get("dns_host_name") or ad_object.get("name") or identifier
         else:
             canonical = identifier

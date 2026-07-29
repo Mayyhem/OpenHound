@@ -21,7 +21,9 @@ def test_possible_client_attaches_to_primary_not_cas():
     # Inferred client attaches to the first PRIMARY site (PS1), never the CAS. The id
     # keeps the @root (CAS) suffix for stable namespacing; only site_code moves to the
     # Primary, matching CMBP's "first primary site published to AD" (ps1:3253-3254).
-    con = duckdb.connect(":memory:"); _seed(con, disable=False, with_primary=True); transforms(con)
+    con = duckdb.connect(":memory:")
+    _seed(con, disable=False, with_primary=True)
+    transforms(con)
     row = con.execute(
         "SELECT smsid, site_code, name, is_confirmed_active_client, ad_domain_sid, root_site_code "
         "FROM sccm.node_client_device WHERE NOT is_confirmed_active_client").fetchone()
@@ -35,13 +37,17 @@ def test_possible_client_attaches_to_primary_not_cas():
 def test_possible_client_falls_back_to_root_without_primary():
     # Degenerate hierarchy with only a CAS and no primary: preserve the edge by falling
     # back to the root rather than dropping the client entirely.
-    con = duckdb.connect(":memory:"); _seed(con, disable=False, with_primary=False); transforms(con)
+    con = duckdb.connect(":memory:")
+    _seed(con, disable=False, with_primary=False)
+    transforms(con)
     hc = con.execute("SELECT start_id, end_id FROM sccm.graph_edges "
                      "WHERE kind='SCCM_HasClient' AND end_id='S-1-5-21-1-2-3-1104@CAS'").fetchall()
     assert hc == [("CAS", "S-1-5-21-1-2-3-1104@CAS")]
 
 
 def test_possible_client_suppressed_when_disabled():
-    con = duckdb.connect(":memory:"); _seed(con, disable=True, with_primary=True); transforms(con)
+    con = duckdb.connect(":memory:")
+    _seed(con, disable=True, with_primary=True)
+    transforms(con)
     cnt = con.execute("SELECT count(*) FROM sccm.node_client_device WHERE NOT is_confirmed_active_client").fetchone()[0]
     assert cnt == 0

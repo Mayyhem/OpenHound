@@ -21,7 +21,6 @@ beyond the site-server/SQL-server/reserved-account principal lookups the PS1 doe
 inline; node/edge construction is a deferred convert stage.
 """
 import json
-import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, Optional
 
@@ -29,6 +28,7 @@ from ..clients.http import ErrorClass, HttpClient
 from ..clients.http_auth import AuthMode
 from ..clients.wmi import WmiClient
 from ..context import SourceContext
+from ..log_context import get_logger
 from .sms_rows import (
     _prop,
     _row,
@@ -45,7 +45,7 @@ from .sms_rows import (
     USERGROUP_COLUMNS,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _BATCH = 1000
 
@@ -135,14 +135,20 @@ def _reserved_accounts(run: _Run) -> Iterator[tuple[str, dict]]:
     logger.verbose("Collecting stored accounts (SMS_SCI_Reserved) via %s", run.name)
     count = 0
     for account in run.fetch("SMS_SCI_Reserved"):
-        logger.verbose("  %s (site: %s)", account.get("UserName"), account.get("SiteCode"))
+        user_name = account.get("UserName")
+        logger.verbose("  %s (site: %s)", user_name, account.get("SiteCode"))
         logger.debug("    %s", account)
-        ad_object = run.ctx.resolve_principal(account.get("UserName"))
+        if not user_name:
+            # Nothing to resolve or name the row by; previously this reached
+            # resolve_principal(None) and failed there without saying why.
+            logger.warning("Stored account row carries no UserName; skipping: %s", account)
+            continue
+        ad_object = run.ctx.resolve_principal(user_name)
         if not ad_object:
-            logger.warning("Failed to resolve stored account %s to AD object", account.get("UserName"))
+            logger.warning("Failed to resolve stored account %s to AD object", user_name)
             continue
         row = {**ad_object, "source": run.source("SMS_SCI_Reserved"), "sccm_infra": True, **account}
-        row.setdefault("name", account.get("UserName"))
+        row.setdefault("name", user_name)
         yield run.table("reserved_accounts"), row
         count += 1
     logger.info("Collected %d stored accounts via %s", count, run.name)
@@ -243,11 +249,26 @@ _COLLECTIONS = (
 
 # --- transport adapters + identification ----------------------------------
 
-def _http_get_value(client, path: str) -> Optional[list]:
-    """GET an AdminService path; return its JSON ``value`` list, or None on failure."""
+def _http_get_value(client, path: str, *, probing: bool = False) -> Optional[list]:
+    """GET an AdminService path; return its JSON ``value`` list, or None on failure.
+
+    ``probing`` marks a call that is testing *whether* this host is an AdminService
+    provider. A connect failure there is an expected negative -- most candidate hosts
+    are not providers -- so it stays at VERBOSE to avoid a warning per host.
+
+    Once the host is known to be a provider, the same failure means a collection came
+    back short, and that has to be a WARNING: the caller reports it as
+    ``Collected 0 <things>``, which is otherwise indistinguishable from an accurate
+    empty result. A read timeout silently becoming "no rows" is how an incomplete
+    graph looks complete.
+    """
     result = client.get(path)
     if result.error_class is ErrorClass.CONNECT_FAILURE:
-        logger.verbose("AdminService GET %s failed to connect", path)
+        if probing:
+            logger.verbose("AdminService GET %s failed to connect", path)
+        else:
+            logger.warning("AdminService GET %s failed to connect (timeout, refused, or DNS); "
+                           "this collection will be incomplete", path)
         return None
     if result.error_class is not ErrorClass.RESPONSE:
         logger.warning("AdminService GET %s failed: %s", path, result.error_class.value)
@@ -277,12 +298,22 @@ def _http_fetch(client) -> Callable[..., Iterator[dict]]:
             params.append("$filter=" + where)
         base = path + ("?" + "&".join(params) if params else "")
         skip = 0
+        yielded = 0
         while True:
             sep = "&" if "?" in base else "?"
             value = _http_get_value(client, f"{base}{sep}$top={_BATCH}&$skip={skip}")
+            # None means the request failed; [] means it succeeded with no rows. Treating
+            # them alike is what let a timeout be reported as an accurate empty result, so
+            # the failure case says so and names how much it did get -- a partial page
+            # matters more than a total failure, because the caller's count looks plausible.
+            if value is None:
+                logger.warning("AdminService %s: collection incomplete, stopped after %d row(s)",
+                               class_name, yielded)
+                return
             if not value:
-                return  # connect/HTTP/empty — issues logged by _http_get_value
+                return  # genuinely no (more) rows
             yield from value
+            yielded += len(value)
             if len(value) < _BATCH:
                 return  # short (final) page
             skip += _BATCH
@@ -299,7 +330,8 @@ def _wmi_fetch(client, namespace: str) -> Callable[..., Iterator[dict]]:
 
 def _http_identify(client) -> Optional[str]:
     """Gate: this AdminService provider's site code, or None if not reachable."""
-    value = _http_get_value(client, "/AdminService/wmi/SMS_Identification?$select=ThisSiteCode,ThisSiteName")
+    value = _http_get_value(client, "/AdminService/wmi/SMS_Identification?$select=ThisSiteCode,ThisSiteName",
+                            probing=True)
     if not value:
         return None  # issues logged by _http_get_value
     site_code = value[0].get("ThisSiteCode")

@@ -22,7 +22,6 @@ privileged table exists, so the miss stays a WARNING.
 import logging
 
 import duckdb
-import pytest
 
 from openhound_sccm.transforms import _safe
 

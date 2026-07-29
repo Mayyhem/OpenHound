@@ -24,12 +24,17 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Topic :: Security",
 ]
-# NOTE: `openhound` is required at runtime but is deliberately NOT declared here. The
-# framework is the host environment, not a library this package pulls in — users install
-# it as the tool (`uv tool install openhound --with configmanbearpig`), and every other
-# OpenHound collector does the same (openhound-jamf declares no dependencies at all).
-# Declaring a range here could only ever conflict with the version the user chose.
+# Declaring `openhound` diverges from openhound-jamf, which declares no dependencies at
+# all — deliberately: that collector uses only the public decorator surface, whereas this
+# one imports a dozen openhound modules, hand-registers commands on its Typer objects, and
+# assigns `app.converter`. Without the declaration, installing this package yields
+# something that cannot import.
 dependencies = [
+    # The OpenHound framework. The floor is the version this collector is validated
+    # against; there is no upper cap, because an invented bound guarantees a re-release
+    # the day 0.3.0 ships. If a future release breaks the hand-registration, a version
+    # check in main.py with a clear message is more honest than a guessed resolver bound.
+    "openhound>=0.2.12",
     # Shared pure-Python collector infrastructure (TDS/NTLM/Kerberos/EPA, LDAP/AD,
     # WMI, DNS discovery, duckdb-safe, DLT source bridge, logging, graph base).
     # Carries impacket/ldap3/dnspython/pywin32/winkerberos/cryptography transitively.
@@ -37,10 +42,6 @@ dependencies = [
     #
     # Capped below 0.2 because a 0.x library makes no API-stability promise — an
     # uncapped floor would let a breaking 0.2 land silently in users' installs.
-    #
-    # Do NOT add a [tool.uv.sources] path entry for this: it would break `uv sync`
-    # for anyone who clones this repo without the sibling checkout. To develop
-    # against a live copy, run `just dev` (see DEVELOPMENT.md).
     "openhound-collector-common>=0.1.0,<0.2.0",
     # LDAP client used by the LDAP collection phase (clients/ad.py).
     # 2.10.2rc4 is the first ldap3 release that exports ENCRYPT and
@@ -73,11 +74,30 @@ dependencies = [
     "cryptography>=42.0.0",
 ]
 
+[tool.uv.sources]
+# Local development override. `[project.dependencies]` above carries the real,
+# published constraint (that is what lands in the wheel's METADATA); this table
+# redirects it to the live sibling checkout for local work. uv-only and never
+# built into the wheel, so it cannot affect what users resolve.
+#
+# Editable, so edits in the sibling checkout take effect with no reinstall.
+# Also load-bearing until the library is published: without it, `uv lock` /
+# `uv sync` / `uv run` fail with "not found in the package registry".
+#
+# AT SPLIT TIME: the path changes from ../../ to ../ — the collector and the
+# library become siblings rather than nested. See PUBLISHING.md step 9.
+openhound-collector-common = { path = "../../openhound-collector-common", editable = true }
+
 [tool.uv]
-# Prefer system / official Pythons over uv-managed (python-build-standalone) on
-# Windows: their libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim,
-# so any TLS handshake aborts the process. On Linux this preference is harmless
-# (the bug doesn't exist there).
+# Never use a uv-managed (python-build-standalone) interpreter: on Windows its
+# libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim, so any TLS handshake
+# aborts the process — which is every AdminService, LDAPS, and MSSQL code path.
+#
+# The constraint this imposes is NOT Windows-only, and describing it as "harmless on
+# Linux" is what hid a CI failure: uv may not download an interpreter anywhere, so every
+# environment must already have one satisfying requires-python (>=3.13). That is why
+# .github/workflows/*.yml provision Python explicitly — ubuntu-latest's system Python is
+# 3.12 and uv fails outright rather than falling back.
 python-preference = "only-system"
 
 [build-system]
@@ -107,13 +127,23 @@ local_scheme = "no-local-version"
 fallback_version = "0.0.0"
 
 [dependency-groups]
+# `openhound` is deliberately absent here: it is declared in [project.dependencies] as a
+# version range, and a direct git reference would outrank that range during resolution —
+# leaving local runs on an unpublished commit while users resolved the published version.
+# That divergence is what let a packaging bug ship once already.
 dev = [
-    "openhound @ git+https://github.com/SpecterOps/openhound.git",
     "pre-commit>=4.5.1",
     "pytest>=9.0.1",
     "ruff>=0.15.5",
     "mypy>=1.19.1",
     "zensical>=0.0.27",
+    # Type stubs for the three untyped runtime deps that HAVE published stubs.
+    # (impacket, openhound and sspi have none — those get ignore_missing_imports
+    # overrides in [tool.mypy] instead.) Real signatures for ldap3 in particular
+    # are worth having: the LDAP phase is one of the most-used code paths here.
+    "types-ldap3>=2.9",
+    "types-pywin32>=306",
+    "types-pyasn1>=0.6",
 ]
 
 [project.entry-points."openhound.sources"]
@@ -126,6 +156,20 @@ enable_error_code = ["possibly-undefined"]
 # as an untyped import. It's used only in the Windows-only local collector.
 [[tool.mypy.overrides]]
 module = ["win32com.*"]
+ignore_missing_imports = true
+
+# None of these ship a py.typed marker, so mypy can't see their signatures and
+# reports import-untyped for every module we import from them. That is a fact
+# about those distributions, not something fixable here — and the alternative
+# (writing stubs for the parts of impacket and the framework this collector
+# touches) is a far larger surface than the collector itself.
+#   impacket  — the auth/DCOM/TDS/Kerberos stack, imported across clients/
+#   openhound — the framework: Typer groups, assets, preproc/convert, destinations
+#   sspi      — pywin32's SSPI bindings, current-user Windows auth (win32 only)
+# Their call sites are exercised by the offline tests and the live lab run, which
+# is where a signature mismatch actually surfaces.
+[[tool.mypy.overrides]]
+module = ["impacket.*", "openhound.*", "sspi"]
 ignore_missing_imports = true
 
 # The shared library ships no py.typed marker yet (adding one would make mypy

@@ -18,16 +18,28 @@ from typer.testing import CliRunner
 
 from openhound_sccm.main import _FLAG_TO_ENV, collect_sccm
 
-# The six inert CRED-2 / machine-account flags removed during the --help reorg.
-# Kept here so a future CRED-2 implementation that re-adds them makes these
-# tests fail loudly (a reminder to also re-file the panel assignment).
+# Options that once existed on collect_sccm and must stay gone. Listed so that
+# re-adding one makes these tests fail loudly, which is the reminder to also file it
+# into a panel.
 REMOVED_PARAMS = [
+    # The six inert CRED-2 / machine-account flags dropped during the --help reorg.
     "machine_name",
     "machine_pass",
     "client_name",
     "create_machine_account",
     "use_altauth",
     "registration_sleep",
+    # The BloodHound Upload panel, removed 2026-07-29 with the direct-upload feature.
+    # Operators register the shipped schema JSON files and ingest the OpenGraph output
+    # through BloodHound's own File Ingest UI instead.
+    "bloodhound",
+    "bloodhound_url",
+    "token_id",
+    "token_key",
+    "upload_schema_only",
+    "upload_results_only",
+    "skip_collection",
+    "upload_dir",
 ]
 
 # Every surviving option -> the rich_help_panel it must belong to. Keys are the
@@ -53,6 +65,7 @@ EXPECTED_PANEL = {
     # Performance
     "threads": "Performance",
     # Output — what the run produces / how the graph + console present it.
+    "clean": "Output",
     "run_all": "Output",
     "progress": "Output",
     "disable_possible_edges": "Output",
@@ -67,20 +80,11 @@ EXPECTED_PANEL = {
     "verbose": "Logging",
     "silent": "Logging",
     "debug": "Logging",
-    # BloodHound Upload — direct-to-BloodHound-CE schema/results push.
-    "bloodhound": "BloodHound Upload",
-    "bloodhound_url": "BloodHound Upload",
-    "token_id": "BloodHound Upload",
-    "token_key": "BloodHound Upload",
-    "upload_schema_only": "BloodHound Upload",
-    "upload_results_only": "BloodHound Upload",
-    "skip_collection": "BloodHound Upload",
-    "upload_dir": "BloodHound Upload",
 }
 
 # Panel display order in --help follows the order each panel first appears in the
 # parameter list, so this is also the intended source ordering.
-PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Testing", "Logging", "BloodHound Upload"]
+PANEL_ORDER = ["Authentication", "Collection", "Performance", "Output", "Testing", "Logging"]
 
 
 def _option_params():

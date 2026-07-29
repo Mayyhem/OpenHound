@@ -41,8 +41,6 @@ dependencies = [
     "pyasn1-modules",
     # X.509 parsing for the tls-server-end-point channel-binding fallback (TLS 1.3 path).
     "cryptography>=42.0.0",
-    # HTTP client for the BloodHound CE upload + extensions APIs (bloodhound/client.py).
-    "requests>=2.31.0",
     # Windows-only current-user SSPI (passwordless SSO) + Windows SID lookup. Gated by import.
     "pywin32>=306; sys_platform == 'win32'",
     # Windows-only Kerberos backend for ldap3 SASL GSSAPI (bind as current user's TGT via SSPI).
@@ -53,6 +51,46 @@ dependencies = [
 Homepage = "https://github.com/Mayyhem/openhound-collector-common"
 Repository = "https://github.com/Mayyhem/openhound-collector-common"
 Issues = "https://github.com/Mayyhem/openhound-collector-common/issues"
+
+[dependency-groups]
+# This package had no dev group at all until it became its own repo: it was only ever
+# installed into the SCCM collector's venv, which supplied pytest/ruff/mypy. Standing
+# alone, it needs enough to run its own 21 test files and its own checks.
+dev = [
+    "pytest>=9.0.1",
+    "ruff>=0.15.5",
+    "mypy>=1.19.1",
+    # Type stubs for the untyped runtime deps that HAVE published stubs. impacket,
+    # openhound and sspi have none — those get ignore_missing_imports overrides in
+    # [tool.mypy] below.
+    "types-ldap3>=2.9",
+    "types-pywin32>=306",
+    "types-pyasn1>=0.6",
+]
+
+[tool.uv]
+# Never use a uv-managed (python-build-standalone) interpreter: on Windows its
+# libcrypto-3-x64.dll lacks the OPENSSL_Applink cross-CRT shim and any TLS handshake
+# aborts the process — which is every TLS-using code path in clients/ (LDAPS, TDS).
+#
+# The constraint is not Windows-only: uv may not download an interpreter anywhere, so
+# every environment must already have one satisfying requires-python (>=3.13). That is
+# why the CI and release workflows provision Python explicitly.
+python-preference = "only-system"
+
+[tool.mypy]
+enable_error_code = ["possibly-undefined"]
+
+# None of these ship a py.typed marker, so mypy can't see their signatures and reports
+# import-untyped for every module imported from them. That is a fact about those
+# distributions, not something fixable here.
+#   impacket  — the TDS/NTLM/Kerberos/DCOM stack this library is largely a wrapper around
+#   openhound — the framework (assets, progress, dataclass entry models)
+#   sspi      — pywin32's SSPI bindings for current-user Windows auth (win32 only)
+#   win32com  — pywin32's COM bindings, used by the WMI pywin32 backend
+[[tool.mypy.overrides]]
+module = ["impacket.*", "openhound.*", "sspi", "win32com.*"]
+ignore_missing_imports = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openhound_collector_common"]

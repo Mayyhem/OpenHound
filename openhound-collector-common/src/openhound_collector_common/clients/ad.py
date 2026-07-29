@@ -54,7 +54,6 @@ import atexit
 import base64
 import importlib
 import ipaddress
-import logging
 import os
 import socket
 import struct
@@ -62,7 +61,7 @@ import sys
 import tempfile
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from ldap3 import (
     ALL,
@@ -83,18 +82,22 @@ from ldap3.utils.conv import escape_filter_chars
 # Importing the shared logging module registers the VERBOSE level and the
 # ``Logger.verbose`` method we use below (per-search trace). Imported for that
 # side effect; ``noqa`` because the name itself is unused here.
-from ..logging import log_context  # noqa: F401
+from ..logging.log_context import get_logger
 
 # ENCRYPT / TLS_CHANNEL_BINDING were added in ldap3 2.10.2rc4 (our floor). Newer
 # DCs that enforce LDAP signing or channel binding need these constants. Try-
 # import so the file still loads against an older ldap3 in a mid-upgrade venv.
 try:
-    from ldap3 import ENCRYPT, TLS_CHANNEL_BINDING
+    # The suppression below is needed because types-ldap3 targets 2.9.13 while this package
+    # pins ldap3 2.10.2rc4 -- the first release to export these two. They exist at runtime;
+    # the stubs simply lag. Keeping the stubs is still worth it: they type the rest of
+    # ldap3, one of the most-used APIs in this library.
+    from ldap3 import ENCRYPT, TLS_CHANNEL_BINDING  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - belt & braces for older ldap3
     ENCRYPT = "ENCRYPT"
     TLS_CHANNEL_BINDING = "TLS_CHANNEL_BINDING"
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +689,8 @@ class AdClient:
         conn = Connection(
             server, auto_bind=AUTO_BIND_NONE, authentication=NTLM, read_only=True,
             receive_timeout=30, auto_referrals=False,
-            session_security=ENCRYPT if attempt.session_security else None,
+            # session_security likewise postdates the 2.9.13 stubs (see the ENCRYPT import).
+            session_security=ENCRYPT if attempt.session_security else None,  # type: ignore[call-arg]
         )
         conn.open(read_server_info=False)
         if attempt.start_tls and not conn.start_tls(read_server_info=False):
@@ -702,28 +706,39 @@ class AdClient:
     def _bind_current_user_ntlm(self, conn: Connection, controls=None) -> None:
         from ldap3.operation.bind import bind_operation
 
-        conn.last_error = None
+        # ldap3 clears last_error by setting it to None; the stubs declare it `str`.
+        conn.last_error = None  # type: ignore[assignment]
         with conn.connection_lock:
             if conn.sasl_in_progress:
                 return
             conn.sasl_in_progress = True
             try:
-                conn.ntlm_client = _SSPICurrentUserNtlmClient()
+                # Held in a local as well as on the connection: ldap3 reads
+                # conn.ntlm_client internally during these binds (hence the assignment),
+                # while the three bind_operation calls below take it as an argument. One
+                # name for one object, and one suppression instead of four.
+                #
+                # Typed Any deliberately. ntlm_client is an ldap3 internal the stubs do not
+                # declare at all, and bind_operation's stub types its third parameter as
+                # `str` — correct for the ordinary SIMPLE/SASL binds, wrong for the SICILY
+                # NTLM exchange below, which passes the client object itself.
+                ntlm_client: Any = _SSPICurrentUserNtlmClient()
+                conn.ntlm_client = ntlm_client  # type: ignore[attr-defined]
 
-                request = bind_operation(conn.version, "SICILY_PACKAGE_DISCOVERY", conn.ntlm_client)
+                request = bind_operation(conn.version, "SICILY_PACKAGE_DISCOVERY", ntlm_client)
                 response = conn.post_send_single_response(conn.send("bindRequest", request, controls))
                 result = response[0] if conn.strategy.sync else conn.get_response(response)[1]
                 packages = (result.get("server_creds") or b"").decode("ascii", errors="ignore").split(";")
                 if "NTLM" not in packages:
                     raise LDAPBindError("DC did not advertise the NTLM Sicily package")
 
-                request = bind_operation(conn.version, "SICILY_NEGOTIATE_NTLM", conn.ntlm_client)
+                request = bind_operation(conn.version, "SICILY_NEGOTIATE_NTLM", ntlm_client)
                 response = conn.post_send_single_response(conn.send("bindRequest", request, controls))
                 result = response[0] if conn.strategy.sync else conn.get_response(response)[1]
 
                 if result and result.get("result") == RESULT_SUCCESS:
                     request = bind_operation(
-                        conn.version, "SICILY_RESPONSE_NTLM", conn.ntlm_client, result.get("server_creds"),
+                        conn.version, "SICILY_RESPONSE_NTLM", ntlm_client, result.get("server_creds"),
                     )
                     response = conn.post_send_single_response(conn.send("bindRequest", request, controls))
                     result = response[0] if conn.strategy.sync else conn.get_response(response)[1]
@@ -796,7 +811,9 @@ class AdClient:
         search_filter: str,
         attributes: list[str],
         base: Optional[str] = None,
-        scope: str = SUBTREE,
+        # Literal rather than str: ldap3 accepts exactly these three, and naming them puts
+        # the valid set in the signature where a caller sees it.
+        scope: Literal["BASE", "LEVEL", "SUBTREE"] = SUBTREE,
         size_limit: int = 0,
         paged_size: int = 1000,
         controls: Optional[list[str]] = None,
@@ -1040,6 +1057,8 @@ class AdClient:
         classes = entry.get("objectClass")
         classes = classes if isinstance(classes, list) else ([classes] if classes else [])
         lowered = {str(c).lower() for c in classes}
+        # Optional because the final fallback can find no class at all to report.
+        obj_type: Optional[str]
         if "computer" in lowered:
             obj_type = "computer"
         elif "group" in lowered:
@@ -1053,7 +1072,9 @@ class AdClient:
         # Enabled: UAC flag 0x2 (ACCOUNTDISABLE). Absent UAC → treat as enabled.
         uac_raw = entry.get("userAccountControl")
         enabled = True
-        if uac_raw not in (None, ""):
+        # Spelled out rather than `not in (None, "")`: an identity/equality tuple test
+        # tells a type checker nothing, so int() below still saw Any | None.
+        if uac_raw is not None and uac_raw != "":
             try:
                 enabled = not (int(uac_raw) & 0x2)
             except (TypeError, ValueError):

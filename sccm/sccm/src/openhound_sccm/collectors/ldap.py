@@ -5,7 +5,6 @@ The shared :class:`SourceContext` cache is built once in ``source.py`` and
 passed into each resource. All decorators register onto the same
 ``app`` instance created in ``main.py``.
 """
-import logging
 import re
 import struct
 import xml.etree.ElementTree as ET
@@ -16,11 +15,11 @@ from ldap3 import BASE
 
 from ..clients.ad import bytes_to_sid
 from ..context import SourceContext
-from ..log_context import with_log_context
+from ..log_context import get_logger, with_log_context
 from ..main import app
 from ..models.raw_table import raw_table_asset
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _parse_mp_capabilities(capabilities_str: str, mp_site_code: str) -> dict:
@@ -482,9 +481,14 @@ def ldap_network_boot_servers(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 source=f"LDAP-{obj_class}",
             )
 
-            if target:
+            if target and target.ad_object:
                 logger.info(f"Found network boot server: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
+            elif target:
+                # Registered, but with no AD object to emit. Previously this yielded None
+                # into the dlt resource, which fails schema validation downstream with no
+                # indication of which host caused it.
+                logger.warning("Registered network boot server %s carries no AD object; nothing to emit", dn)
             # No else: register_target logs why it skipped (filtered host or
             # empty name), so a None return isn't a failure here.
 
@@ -551,9 +555,14 @@ def ldap_pattern_matches(ctx: SourceContext) -> Iterable[dict[str, Any]]:
                 ad_object=computer,
             )
 
-            if target:
+            if target and target.ad_object:
                 logger.info(f"Found system with SCCM naming pattern: {target.ad_object.get('dns_host_name')} ({target.ad_object.get('object_sid')})")
                 yield target.ad_object
+            elif target:
+                # See ldap_network_boot_servers: yielding a None ad_object breaks dlt
+                # schema validation downstream rather than here.
+                logger.warning("Registered pattern match %s carries no AD object; nothing to emit",
+                               computer.get("name"))
             # No else: register_target logs why it skipped (filtered host or
             # empty name), so a None return isn't a failure here.
 
@@ -576,10 +585,15 @@ def _format_guid(raw_guid: Optional[str]) -> Optional[str]:
 
 @app.resource(name="ldap_system_management_dacl", parallelized=False, columns=raw_table_asset("ldap_system_management_dacl"))
 @with_log_context(phase="LDAP", target_from_ctx_domain=True)
-def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[dict[str, Any]]:
+def ldap_system_management_dacl(ctx: SourceContext) -> Iterable[Any]:
     """
     Check ACLs on the System Management container.
     Looks for GenericAll (Full Control) permissions, which indicate site servers.
+
+    Yields two shapes, hence the loose ``Iterable[Any]``: plain principal dicts for
+    ``ldap_system_management_dacl`` itself, and ``dlt.mark.with_table_name``-wrapped rows
+    routed to ``ldap_smc_group_members``. One resource feeding two tables is what lets the
+    recursive group walk record every member -> group hop without a second LDAP pass.
     """
     if not ctx.method_enabled("LDAP"):
         return

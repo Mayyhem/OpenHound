@@ -1,11 +1,6 @@
-import pytest
 from openhound.core.app import OpenHound
 from dlt.extract.validation import PydanticValidator
 from openhound_sccm.main import app as ext_module
-try:
-    from openhound_sccm.source import source as sccm_source
-except Exception as err:
-    pass
 
 
 def test_extension_is_openhound():
@@ -20,11 +15,14 @@ def test_extensions_contains_collect():
     ), "Extension does not contain @app.collect decorator"
 
 
-@pytest.mark.skip(reason="convert phase not yet implemented; collector is collect+preproc only")
 def test_extensions_contains_convert():
+    # Previously skipped as "convert phase not yet implemented". It is: `convert sccm` is
+    # hand-registered on the framework's convert Typer group and `app.converter` is
+    # assigned in main.py (the decorator exposes no flag-carrying seam, so the BloodHound
+    # upload options forced the manual route). The skip outlived the reason.
     assert (
         ext_module.converter is not None
-    ), "Extension does not contain @app.convert decorator"
+    ), "Extension does not assign app.converter"
 
 
 def test_extension_resources_use_models(subtests):

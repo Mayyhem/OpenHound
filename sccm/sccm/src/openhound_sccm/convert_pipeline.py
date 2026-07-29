@@ -25,22 +25,71 @@ from .opengraph_untagged import opengraph_file_untagged
 logger = logging.getLogger(__name__)
 
 
-def _without_null_properties(content: dict) -> dict:
-    """Drop keys whose value is None from the content's `properties` dict, in place.
+# Array properties whose element order carries meaning and must be preserved.
+# `object_class` arrives straight from LDAP in class-hierarchy order (top, leaf,
+# connectionPoint, serviceConnectionPoint, ...), which is how a reader expects to see it
+# and is already reproducible run to run, so sorting it would destroy information for no
+# gain. Add to this set only for an array whose order a *reader* relies on — not merely
+# one that happens to look tidy today.
+_ORDER_SIGNIFICANT_PROPERTIES = frozenset({"objectClass"})
 
-    BloodHound's OpenGraph schema accepts a property value of string/number/boolean/array
-    but NOT null, so an absent attribute must be omitted entirely rather than emitted as
-    JSON null (missing != null is the BloodHound convention). Our models default optional
-    attributes to None, and the dataclasses.asdict() + json.dumps path the destination uses
-    keeps those as null — unlike the framework's Pydantic exclude_none path — so we prune
-    here, the single point every node and edge flows through before being written.
+
+def _normalize_properties(content: dict) -> dict:
+    """Prepare a node/edge's `properties` dict for emit: drop nulls, sort arrays.
+
+    This is the single point every node and edge flows through before being written, so
+    both normalizations live here rather than at the ~20 places that build arrays.
+
+    **Nulls are dropped** because BloodHound's OpenGraph schema accepts a property value
+    of string/number/boolean/array but NOT null, so an absent attribute must be omitted
+    entirely rather than emitted as JSON null (missing != null is the BloodHound
+    convention). Our models default optional attributes to None, and the
+    dataclasses.asdict() + json.dumps path the destination uses keeps those as null —
+    unlike the framework's Pydantic exclude_none path.
+
+    **Arrays are sorted** because they are aggregated in DuckDB with `list()` /
+    `array_agg()`, which give no ordering guarantee and run multi-threaded: two converts
+    over byte-identical input emit the same elements in different orders. Verified by
+    reprocessing one cached bucket twice, which differed in `collectionIds`,
+    `siteSystemRoles`, `coercionVictimHostnames`, and
+    `coercionVictimAndRelayTargetPairs`. That cost twice over — BloodHound saw a property
+    change on re-ingest when nothing had changed, and any run-to-run graph diff (the basis
+    of a parity check) drowned in false positives. These arrays are unordered sets of facts
+    for an entity panel, so a stable order loses nothing; the exceptions are named in
+    `_ORDER_SIGNIFICANT_PROPERTIES` above.
+
+    Sorting here rather than in the SQL is deliberate: it is one place instead of twenty,
+    it covers any array added later for free, and it cannot be partially applied — a
+    half-sorted set of aggregations is harder to reason about than none.
     """
     props = content.get("properties")
-    if isinstance(props, dict):
-        dropped = [k for k, v in props.items() if v is None]
-        if dropped:
-            content["properties"] = {k: v for k, v in props.items() if v is not None}
-            logger.debug("Omitted null-valued properties before emit: %s", dropped)
+    if not isinstance(props, dict):
+        return content
+
+    dropped = [k for k, v in props.items() if v is None]
+    if dropped:
+        props = {k: v for k, v in props.items() if v is not None}
+        logger.debug("Omitted null-valued properties before emit: %s", dropped)
+
+    # Sort in place on the (already copied or original) mapping. Mixed-type arrays would
+    # make `sorted` raise, so fall back to leaving such an array alone rather than failing
+    # the whole convert over a property nobody sorted before.
+    reordered = []
+    for key, value in props.items():
+        if not isinstance(value, list) or key in _ORDER_SIGNIFICANT_PROPERTIES:
+            continue
+        try:
+            ordered = sorted(value)
+        except TypeError:
+            logger.debug("Left %r unsorted: elements are not mutually comparable", key)
+            continue
+        if ordered != value:
+            props[key] = ordered
+            reordered.append(key)
+    if reordered:
+        logger.debug("Sorted array properties for reproducible output: %s", reordered)
+
+    content["properties"] = props
     return content
 
 
@@ -85,7 +134,7 @@ def emit_graph_from_duckdb(
                 obj._lookup = lookup
                 node = obj.as_node
                 if node is not None:
-                    content = _without_null_properties(asdict(node))
+                    content = _normalize_properties(asdict(node))
                     yield {"graph": {"entity_type": "node", "content": content}}
                 else:
                     # as_node returns None for rows that can't be keyed (no SID, etc.).
@@ -103,7 +152,7 @@ def emit_graph_from_duckdb(
                 obj = model(**row)
                 obj._lookup = lookup
                 # Edge content is a LIST: the destination does edges.extend(content).
-                parts = [_without_null_properties(asdict(e)) for e in obj.edges]
+                parts = [_normalize_properties(asdict(e)) for e in obj.edges]
                 if parts:
                     yield {"graph": {"entity_type": "edge", "content": parts}}
                 else:

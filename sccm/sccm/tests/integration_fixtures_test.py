@@ -1,5 +1,8 @@
 from openhound_sccm.integration.fixtures.edges import MAYYHEM_EDGE_CASES
+from openhound_sccm.integration.fixtures.nodes import MAYYHEM_NODE_CASES, MAYYHEM_INVARIANTS
 from openhound_collector_common.integration_testing.cases import EdgeCase
+from openhound_collector_common.integration_testing.graph import Node, Graph
+from openhound_collector_common.integration_testing.results import PASS, FAIL
 
 
 def test_edge_fixture_count_matches_ps_kit():
@@ -19,9 +22,6 @@ def test_no_old_edge_names_or_typo():
     assert not (banned & {c.kind for c in MAYYHEM_EDGE_CASES})
 
 
-from openhound_sccm.integration.fixtures.nodes import MAYYHEM_NODE_CASES, MAYYHEM_INVARIANTS
-from openhound_collector_common.integration_testing.graph import Node, Graph
-from openhound_collector_common.integration_testing.results import PASS, FAIL
 
 
 def test_node_fixtures_present_and_cover_sccm_site():

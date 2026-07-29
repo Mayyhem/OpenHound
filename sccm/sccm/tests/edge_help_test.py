@@ -45,10 +45,18 @@ def test_native_help_kinds_are_excluded():
         assert kind not in PENDING_HELP_KINDS
 
 
+#: Standard BloodHound base kinds that SharpHound emits and BloodHound documents itself.
+#: This collector emits them so its nodes merge into the native AD graph, but writing our
+#: own entity-panel help for them would duplicate — and eventually contradict —
+#: BloodHound's. GenericAll joined the list when the System Management container DACL work
+#: (Tier A+) started emitting it; the assertion below had gone red unnoticed since, because
+#: nothing was running the full suite.
+NATIVELY_DOCUMENTED_KINDS = {ek.MEMBER_OF, ek.HAS_SESSION, ek.GENERIC_ALL}
+
+
 def test_scope_is_complete():
-    # Authored + pending must cover every real edge kind except the two BloodHound
-    # documents natively (MemberOf, HasSession). This equals 35 kinds today; asserting
-    # against the real kind constants (rather than a hardcoded count) means a newly
-    # added and emitted edge kind fails this test loudly instead of silently getting
-    # no entity-panel help.
-    assert (set(EDGE_HELP) | set(PENDING_HELP_KINDS)) == _valid_kind_strings() - {ek.MEMBER_OF, ek.HAS_SESSION}
+    # Authored + pending must cover every real edge kind except the ones BloodHound
+    # documents natively. Asserting against the real kind constants (rather than a
+    # hardcoded count) means a newly added and emitted edge kind fails this test loudly
+    # instead of silently getting no entity-panel help.
+    assert (set(EDGE_HELP) | set(PENDING_HELP_KINDS)) == _valid_kind_strings() - NATIVELY_DOCUMENTED_KINDS

@@ -8,7 +8,7 @@ spike-based test now that the convert pipeline drives typed models.
 import json
 import duckdb
 from openhound_sccm.lookup import SCCMLookup
-from openhound_sccm.convert_pipeline import emit_graph_from_duckdb
+from openhound_sccm.convert_pipeline import _normalize_properties, emit_graph_from_duckdb
 from openhound_sccm.models.computer import ComputerNode
 
 
@@ -106,6 +106,53 @@ def test_emit_omits_null_properties(tmp_path):
     assert "SCCMClientCertificateRequired" not in props
     # A present value is still emitted.
     assert props["SMBSigningRequired"] is True
+
+
+def test_normalize_sorts_array_properties():
+    """Array properties must be emitted in sorted order so two converts agree.
+
+    DuckDB's list()/array_agg() give no ordering guarantee and run multi-threaded, so
+    before this normalization two converts over byte-identical input emitted the same
+    elements in different orders. That reached the graph: BloodHound saw a property change
+    on re-ingest when nothing had changed, and run-to-run graph diffs (a parity check)
+    filled with false positives. Reproduced live 2026-07-29 on collectionIds,
+    siteSystemRoles, coercionVictimHostnames and coercionVictimAndRelayTargetPairs.
+    """
+    content = _normalize_properties({
+        "properties": {
+            "collectionIds": ["SMS00004@CAS", "SMS00001@CAS"],
+            "siteSystemRoles": ["b: SMS Site System@PS1", "a: SMS Management Point@PS1"],
+            "coercionVictimHostnames": ["ps1-psv.lab", "ps1-pss.lab"],
+        }
+    })
+    props = content["properties"]
+    assert props["collectionIds"] == ["SMS00001@CAS", "SMS00004@CAS"]
+    assert props["siteSystemRoles"] == ["a: SMS Management Point@PS1", "b: SMS Site System@PS1"]
+    assert props["coercionVictimHostnames"] == ["ps1-pss.lab", "ps1-psv.lab"]
+
+
+def test_normalize_preserves_object_class_order():
+    """objectClass keeps LDAP's class-hierarchy order, which sorting would destroy.
+
+    LDAP returns objectClass most-general-first (top, person, organizationalPerson, user,
+    computer). That order is how a reader interprets the value and is already reproducible,
+    so it is exempt from the array sort — the one exception, named in
+    _ORDER_SIGNIFICANT_PROPERTIES.
+    """
+    hierarchy = ["top", "person", "organizationalPerson", "user", "computer"]
+    content = _normalize_properties({"properties": {"objectClass": list(hierarchy)}})
+    assert content["properties"]["objectClass"] == hierarchy
+
+
+def test_normalize_leaves_incomparable_arrays_alone():
+    """A mixed-type array must not fail the whole convert just because it can't be sorted.
+
+    No current property mixes types, but sorted() raises TypeError if one ever does, and
+    losing an entire collection to an unsortable display field would be a bad trade.
+    """
+    mixed = [3, "one", None]
+    content = _normalize_properties({"properties": {"oddball": list(mixed)}})
+    assert content["properties"]["oddball"] == mixed
 
 
 def test_emit_empty_specs_produces_no_nodes(tmp_path):

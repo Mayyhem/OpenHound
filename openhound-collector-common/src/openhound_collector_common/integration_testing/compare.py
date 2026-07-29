@@ -3,9 +3,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Iterable, TypeVar
 
 from openhound_collector_common.integration_testing.graph import Edge, Graph, Node
+
+# _kind_rollup is called once for nodes and once for edges. A `Node | Edge` parameter would
+# force each caller's lambda to handle both, so the accessor could not simply reach for
+# `.kinds` or `.kind`; a type variable ties the items and their accessor together instead.
+# Constrained to the two concrete types rather than left open, because the body reads
+# `.properties` -- which both have, and an unconstrained variable would not guarantee.
+_Item = TypeVar("_Item", Node, Edge)
 
 
 def _canon(v):
@@ -88,7 +95,8 @@ def _diff_props(key: str, kind: str, a_props: dict, b_props: dict) -> PropDiff |
     return d if (d.only_in_a or d.only_in_b or d.changed) else None
 
 
-def _kind_rollup(a_items, b_items, kinds_of: Callable[[Node | Edge], list[str]]) -> dict:
+def _kind_rollup(a_items: Iterable[_Item], b_items: Iterable[_Item],
+                 kinds_of: Callable[[_Item], list[str]]) -> dict:
     """Union of property names seen per kind, separately for side A and side B.
 
     Plain accumulation loop (not a comprehension) so each side's dict is

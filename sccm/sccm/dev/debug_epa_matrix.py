@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import socket
 import sys
 import time
@@ -353,6 +354,15 @@ def _build_auth_specs(args) -> list[AuthSpec]:
             logger.warning("SSPI not available on this platform; skipping SSPI section")
         password = _LAB_PASSWORD
         nt_hash = _LAB_NT_HASH
+        # Warn rather than exit: the SSPI section above needs no credential, so a
+        # credential-less run is still useful. Naming both sources saves guessing
+        # why the explicit-auth sections failed.
+        if not password and not nt_hash:
+            logger.warning("No credential from $SCCM_LAB_PASSWORD/$SCCM_LAB_NT_HASH or "
+                           "--password/--nt-hash; only the SSPI section will run.")
+        else:
+            logger.debug("Lab credential supplied (password=%s, nt_hash=%s)",
+                         bool(password), bool(nt_hash))
     else:
         # An explicit credential flag restricts the run to just that auth
         # method; SSPI and the *other* explicit method are skipped unless
@@ -521,14 +531,19 @@ def print_tables(results_by_auth: dict[str, list[Result]]) -> None:
         print_table(results)
 
 
-#: Lab defaults — this script is intentionally a lab-only debug harness, so
-#: the operator's lab target and AD credentials are baked in for zero-flag
-#: convenience. Override any of them with the corresponding CLI flag.
+#: Lab defaults — this script is a lab-only debug harness, so the target and
+#: account name are baked in for zero-flag convenience. Override any of them
+#: with the corresponding CLI flag.
 _LAB_TARGET = "ps1-db.mayyhem.com"
 _LAB_DOMAIN = "MAYYHEM"
 _LAB_USER = "domainadmin"
-_LAB_NT_HASH = "8846f7eaee8fb117ad06bdd830b7586c"
-_LAB_PASSWORD = "password"
+
+#: Credentials are read from the environment, never hardcoded: this file is
+#: published. `None` when unset rather than a hard failure, because the SSPI
+#: section needs no credential at all — main() warns when neither the
+#: environment nor a CLI flag supplied one.
+_LAB_NT_HASH = os.environ.get("SCCM_LAB_NT_HASH")
+_LAB_PASSWORD = os.environ.get("SCCM_LAB_PASSWORD")
 
 
 def main() -> int:

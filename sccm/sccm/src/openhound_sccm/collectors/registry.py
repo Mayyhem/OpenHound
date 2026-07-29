@@ -1,4 +1,3 @@
-import logging
 import socket
 import time
 from typing import Iterable, Any, Optional
@@ -6,8 +5,9 @@ from typing import Iterable, Any, Optional
 from ..clients.smb import negotiated_signing_required
 from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
+from ..log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def _roles(bases: list[str], site_code: Optional[str]) -> list[str]:
@@ -125,6 +125,13 @@ class _RegistryProbe:
                 # Most common cause: RemoteRegistry service not running, or no perm.
                 logger.verbose("winreg bind on %s failed: %s", self.hostname, ex)
                 return None
+
+        # Unreachable while WINREG_BIND_RETRIES >= 1: every path in the loop body returns,
+        # and the retry branch cannot be taken on the final attempt. Explicit so the
+        # contract does not depend on a constant defined elsewhere staying positive.
+        logger.error("winreg bind on %s made no attempts (WINREG_BIND_RETRIES=%d)",
+                     self.hostname, WINREG_BIND_RETRIES)
+        return None
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         try:
@@ -443,7 +450,7 @@ def collect_registry(target: str, ctx: "SourceContext") -> Iterable[tuple[str, d
     logger.info("Remote Registry collection completed for %s", target)
 
 
-def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list[str]]:
+def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     """
     The logged-in user's domain SID is the data of the value named "UserSID".
     Select it by name (not by enumeration position) so the sibling "Session"
@@ -487,7 +494,7 @@ def get_current_user(probe: _RegistryProbe, ctx: SourceContext) -> Optional[list
             logger.warning("Failed to resolve current user SID: %s", current_user_sid)
 
 
-def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Optional[dict[str, Any]]:
+def get_ntlm_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tuple[str, dict[str, Any]]]:
     # NTLM/MSSQL settings are next because they require local Administrators privileges 
     # to collect but do not require the system to be an SCCM site server
     signing_required = None
@@ -583,12 +590,14 @@ def get_mssql_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tu
                 else:
                     force_encryption = "No"
             
-                extended_protection = probe.read_dword(reg_path, "ExtendedProtection")
-                if extended_protection == 1:
+                # Separate name for the raw DWORD, matching force_encryption above:
+                # reusing one variable for the int and its label makes it int-or-str.
+                extended_protection_value = probe.read_dword(reg_path, "ExtendedProtection")
+                if extended_protection_value == 1:
                     extended_protection = "Allowed"
-                elif extended_protection == 2:
+                elif extended_protection_value == 2:
                     extended_protection = "Required"
-                else:                
+                else:
                     extended_protection = "Off"
 
     if not reg_path_found:
@@ -603,9 +612,12 @@ def get_mssql_settings(probe: _RegistryProbe, ctx: SourceContext) -> Iterable[tu
         logger.info("Found MSSQL TCP port: %s", port)
 
     instance_name_reg = r"SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL"
-    instance_names = probe.read_values(instance_name_reg)
-    if instance_names is not None:
-        instance_names = [name for name, _ in instance_names]
+    # read_values yields (name, data) pairs; only the names are wanted. A separate
+    # variable keeps each one a single type instead of pairs-then-strings.
+    instance_name_values = probe.read_values(instance_name_reg)
+    instance_names: Optional[list[str]] = None
+    if instance_name_values is not None:
+        instance_names = [name for name, _ in instance_name_values]
         logger.info("Found MSSQL instance names: %s", ", ".join(instance_names))
 
     target_entry = ctx.target_hosts_by_hostname[probe.hostname]

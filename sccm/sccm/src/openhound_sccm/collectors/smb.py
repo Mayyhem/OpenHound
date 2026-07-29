@@ -38,7 +38,6 @@ already collected the host (``per_host_phases.should_run_phase`` mirrors PS1's
 """
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
@@ -46,8 +45,9 @@ from typing import Any, Iterable, Optional
 from ..clients.smb import check_smb_signing, list_shares
 from ..clients.smb_sso import connect_smb
 from ..context import SourceContext
+from ..log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Site code lives in a share description as "SMS Site <CODE>" (the DP share spells
 # it "SMS Site <CODE> DP"). The SMS_* share name is "SMS_<CODE>".

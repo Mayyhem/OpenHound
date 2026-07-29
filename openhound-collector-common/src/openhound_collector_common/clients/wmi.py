@@ -37,17 +37,16 @@ DCOM always requires authentication, so there is no anonymous mode.
 from __future__ import annotations
 
 import base64
-import logging
 import re
 import sys
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 
-from ..logging import log_context  # noqa: F401  (registers logger.verbose on logging.Logger)
+from ..logging.log_context import get_logger
 from . import auth as auth_mod
 from .auth import split_hashes, split_user_domain
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Default WMI namespace for stock CIM classes (Win32_Service, Win32_GroupUser,
 # Win32_ComputerSystem, …). Callers may override per query. Written in the

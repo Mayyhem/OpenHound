@@ -138,7 +138,7 @@ def test_mssql_relay_assumed_stamp_is_per_row_not_per_family():
     rows; stamping none of it would hide the inference.
     """
     import duckdb
-    from openhound_sccm.transforms import _graph_edges_init, _edge_coerce_relay_mssql
+    from openhound_sccm.transforms import _edge_coerce_relay_mssql
 
     def _run(epa):
         con = duckdb.connect()

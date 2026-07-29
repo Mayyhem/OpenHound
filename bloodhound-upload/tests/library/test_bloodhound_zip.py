@@ -1,5 +1,4 @@
 import zipfile
-from pathlib import Path
 
 from openhound_collector_common.bloodhound.zip_bundle import bundle_graph_dir
 

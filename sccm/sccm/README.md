@@ -184,33 +184,27 @@ no connection to any SCCM site system or client.
 
 ### 5. Upload to BloodHound
 
-The collector can push the graph straight into BloodHound CE itself — no manual File Ingest step. Create an API token in BloodHound CE (**Administration → API Keys**), then pass it with `-B`:
+Convert writes OpenGraph JSON files into the graph directory (`.\out\graph` in the examples
+above). Upload them through the BloodHound CE UI under **Administration → File Ingest** —
+drag in the whole set, or zip them first.
 
-One command — collect, build the graph, and upload schema + results to BloodHound CE:
+Register the custom kinds once before the first ingest, so the `SCCM_*` and `MSSQL_*` nodes
+and edges render with their own icons and appear in the search and pathfinding menus. Both
+schema files ship inside the package:
 
-```powershell
-uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com `
-  -u "MAYYHEM\lowpriv" -p "Passw0rd!" --run-all `
-  -B "<token-id>:<token-key>@https://bloodhound.mayyhem.com"
-```
+- `schema_SCCM.json` — every `SCCM_*` node and edge kind
+- `schema_MSSQL.json` — the `MSSQL_*` kinds, which this collector also emits (site-server SQL
+  topology), so uploading only the SCCM schema leaves those unrenderable
 
-Re-upload an existing run without recollecting:
-
-```powershell
-uv run openhound convert sccm .\out\sccm .\out\graph --lookup-file .\out\lookup.duckdb `
-  -B "<token-id>:<token-key>@https://bloodhound.mayyhem.com"
-```
-
-Push only the schema (registers the `SCCM_*` and `MSSQL_*` kinds/icons), no data:
+Find them next to the installed package, or in `src/openhound_sccm/` in a checkout:
 
 ```powershell
-uv run openhound collect sccm .\out --skip-collection --upload-schema-only `
-  -B "<token-id>:<token-key>@https://bloodhound.mayyhem.com"
+python -c "import openhound_sccm, pathlib; print(pathlib.Path(openhound_sccm.__file__).parent)"
 ```
 
-See [BloodHound Upload](#bloodhound-upload) under Command Line Options for every flag, the equivalent environment variables, and what each command actually uploads.
-
-If you'd rather upload by hand instead, the OpenGraph files convert writes can also be dragged into the BloodHound UI under **Administration → File Ingest**. Either way, to query the SCCM kinds, BloodHound must use the **PostgreSQL** graph backend (the prebuilt SCCM kinds will not resolve on Neo4j): https://bloodhound.specterops.io/get-started/custom-installation#postgresql
+To query the SCCM kinds at all, BloodHound must use the **PostgreSQL** graph backend — the
+prebuilt SCCM kinds will not resolve on Neo4j:
+https://bloodhound.specterops.io/get-started/custom-installation#postgresql
 
 > **Verbosity tip:** the console shows INFO (step summaries) by default; `-v` raises it to the chattier VERBOSE level (per-resolution / per-node traces, matching the PowerShell tool's `[Verbose]` tier); `--debug` adds the framework's `dlt` and `ldap3` internals; `--silent` mutes the console entirely. Whatever the console level, **every run always writes two files** into the output directory: **`collect_full_<timestamp>.log`** — the complete, human-ordered DEBUG trace of the collector, grouped host-by-host (per-host phases) and resource-by-resource (discovery), so you can always read the full story after the fact without re-running; and **`collect_issues_<timestamp>.log`** — just the warnings and errors, each with a full traceback (a clean run writes no issues file). `--debug` additionally folds `dlt`/`ldap3` internals into the full log.
 
@@ -608,43 +602,6 @@ uv run openhound collect sccm ./out -d mayyhem.com --dc dc01.mayyhem.com -u "MAY
 | `-v`, `--verbose` | Raise the console to VERBOSE (per-resolution / per-node / per-edge traces; PS1 `[Verbose]` parity). Without it the console is INFO (step summaries). |
 | `--silent` | Silence **all** console output. The two on-disk logs (`collect_full_*` = complete DEBUG trace, `collect_issues_*` = warnings/errors with tracebacks) are still written. Also forces `--progress off`. |
 | `--debug` | DEBUG level (very chatty; includes `dlt` and `ldap3` internals). Outranks `-v`. |
-
-### BloodHound Upload
-
-The **same flag surface** is available on both `openhound collect sccm` (add `--run-all` so there's a graph to upload) and `openhound convert sccm` (uploads what that convert run just produced, without recollecting).
-
-| Option | Description |
-|---|---|
-| `-B`, `--bloodhound` | Shorthand for all three credential values: `<token-id>:<token_key>@<url>`. Splits on the *last* `@`, so a URL is safe even if it happens to contain one. |
-| `--bloodhound-url` | BloodHound CE instance URL (env `BLOODHOUND_URL`). Used instead of `-B` when you'd rather pass the token id/key separately. |
-| `--token-id` | BloodHound API token ID (env `BLOODHOUND_TOKEN_ID`). |
-| `--token-key` | BloodHound API token key (env `BLOODHOUND_TOKEN_KEY`). Supplying both an id and a key signs requests with HMAC; supplying only a token id treats it as a Bearer/JWT token instead. |
-| `--upload-schema-only` | Only push the schema definitions (custom node/edge kinds + icons); skip results. Mutually exclusive with `--upload-results-only`. |
-| `--upload-results-only` | Only push the collected graph; skip the schema push. Mutually exclusive with `--upload-schema-only`. |
-| `--skip-collection` | Skip the rest of the command's own work — no collection on `collect sccm`, no conversion on `convert sccm` — and go straight to the upload step. Useless without `-B` and/or `--upload-dir`. |
-| `--upload-dir <dir>` | Upload an existing OpenGraph directory (a prior convert's output) instead of the graph this run just produced. Combine with `--skip-collection` on either command for a pure "just push these files" invocation. |
-
-Precedence for the URL/token-id/token-key triple is: `-B` shorthand wins over the discrete `--bloodhound-url`/`--token-id`/`--token-key` flags, which win over the `BLOODHOUND_*` environment variables. If no URL resolves, upload is silently skipped (nothing was configured); if a URL resolves but no token id, a warning is logged and upload is skipped.
-
-**What gets uploaded.** By default (no `--upload-*-only` flag) both a schema push and a results push happen:
-
-- **Schema** — `PUT /api/v2/extensions`, sent **twice**: once for `schema_SCCM.json` (the `SCCM_*` kinds) and once for `schema_MSSQL.json` (the `MSSQL_*` kinds). Both are needed because this collector emits `MSSQL_*` nodes/edges (site-server SQL topology) alongside its `SCCM_*` ones — uploading only the SCCM schema would leave the MSSQL kinds unrenderable. `--disable-possible-edges` mutates both schemas before the push, flipping the coerce-and-relay ("possible") relationship kinds' `is_traversable` to `false` to match the edges actually being suppressed in the graph itself (see [`--disable-possible-edges`](#--disable-possible-edges-and-the-coerce-and-relay-edges) above).
-- **Results** — every `*.json` OpenGraph file in the graph directory (`sccm_nodes-*`, `sccm_edges-*`, `ad_nodes-*`, `ad_edges-*`) is zipped into one archive and pushed through the file-upload job API: `POST /api/v2/file-upload/start` (get a job id) → `POST /api/v2/file-upload/{id}` (the zip) → `POST /api/v2/file-upload/{id}/end`.
-
-**Network note.** The upload runs as a normal HTTP client call from wherever the collector process is running — it does **not** route through `--proxy`'s SOCKS5 tunnel (that tunnel is only installed around the collection stage). If you're collecting through a pivot, make sure the collector host also has its own, separate line of sight to the BloodHound instance (direct or via VPN) for the upload step to succeed.
-
-```powershell
-# Full run with env-var credentials instead of -B (equivalent to passing -B "id:key@url")
-$env:BLOODHOUND_URL = "https://bloodhound.mayyhem.com"
-$env:BLOODHOUND_TOKEN_ID = "<token-id>"
-$env:BLOODHOUND_TOKEN_KEY = "<token-key>"
-uv run openhound collect sccm .\out -d mayyhem.com --dc dc01.mayyhem.com -u "MAYYHEM\lowpriv" -p "Passw0rd!" --run-all
-
-# Re-push just the results from a previous graph directory, schema already registered
-uv run openhound convert sccm .\out\sccm .\out\graph --lookup-file .\out\lookup.duckdb `
-  --skip-collection --upload-dir .\out\graph --upload-results-only `
-  -B "<token-id>:<token-key>@https://bloodhound.mayyhem.com"
-```
 
 ### Proxying / pivoting
 

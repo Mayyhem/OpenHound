@@ -5,7 +5,6 @@ Each test seeds only the tables that are relevant to what it's checking,
 relying on _safe() to silently skip any missing sources.
 """
 import duckdb
-import pytest
 from openhound_sccm.transforms import transforms
 
 

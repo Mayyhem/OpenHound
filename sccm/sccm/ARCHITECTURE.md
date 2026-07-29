@@ -68,7 +68,6 @@ Every section follows the same spine:
 - [12. One-command end-to-end: a `--run-all` flag, not a new verb](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)
 - [13. Tunneling all collection traffic through a SOCKS5 pivot](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)
 - [14. A shared integration-test and payload-diff engine, invoked off `--run-all`](#14-a-shared-integration-test-and-payload-diff-engine-invoked-off---run-all)
-- [15. Direct BloodHound CE upload, and hand-registering `convert sccm`](#15-direct-bloodhound-ce-upload-and-hand-registering-convert-sccm)
 - [Quick reference: which framework extension point each add-on uses](#quick-reference-which-framework-extension-point-each-add-on-uses)
 - [Maintaining this document](#maintaining-this-document)
 - [Changelog](#changelog)
@@ -295,11 +294,11 @@ thread** without the noise of a 10-way thread pool.
   function — the *decision* to run lives in one pipeline-native place, mirroring CMBP's
   `$CollectionTargets[$target]['Collected']` skip checks.
 
-- **The sequential debug harness** is [`debug_per_host.py`](debug_per_host.py) (one of three lab
+- **The sequential debug harness** is [`debug_per_host.py`](dev/debug_per_host.py) (one of three lab
   harnesses, alongside `debug_epa_matrix.py` and `spike_smb_sso.py`). It seeds the work queue by hand and
   drives `run_pipeline` directly — **no DLT** — so the whole per-host engine can be single-stepped under a
   debugger. Its knobs map 1:1 to CLI flags:
-  - `MAX_WORKERS = 1` ([debug_per_host.py:74](debug_per_host.py#L74)) forces a single worker thread so the
+  - `MAX_WORKERS = 1` ([debug_per_host.py:74](dev/debug_per_host.py#L74)) forces a single worker thread so the
     debugger never jumps between targets — the deterministic-sequential mode. `= 10` reproduces real
     concurrency.
   - `COMPUTERS` mirrors `--computers` (seed + allow-list); `COLLECTION_METHODS` mirrors
@@ -703,7 +702,7 @@ A stock REST collector on Linux CI never meets any of these.
   knob: **relocate the pipeline dir off the indexed profile via the `DLT_DATA_DIR` environment variable**
   (dlt reads it in its run-context resolver and places pipelines under `<DLT_DATA_DIR>/pipelines`). The
   Stage-1 code tour sets it **in-process to a fresh per-run temp dir** before importing dlt
-  ([`tour_driver_stage1.py`](tour_driver_stage1.py)); the real CLI sets it to a stable off-profile path
+  ([`tour_driver_stage1.py`](dev/tour_driver_stage1.py)); the real CLI sets it to a stable off-profile path
   (`C:\dlt-home`) via the `Debug: openhound collect sccm` launch profile's `env` block and/or a user-level
   `setx DLT_DATA_DIR`. A fresh, un-indexed location both dodges the lock and avoids inheriting a stuck
   pending package. `~/.dlt` is fine on Linux CI, so this is Windows-only.
@@ -937,7 +936,7 @@ Given how much SCCM environments vary, the tolerant approach is the safer defaul
   a DEBUG skip) in every normal authenticated run. In an HTTP-only / SMB-only run no privileged table exists,
   so those fallback misses correctly stay a WARNING.
 
-### The downstream consequence: convert must omit null properties on output
+### The downstream consequence: convert must normalize properties on output
 
 The NULL handling above is deliberate — `_ensure_columns` *creates* all-NULL columns on purpose so the SQL
 compiles, and many optional attributes (`disable_loopback_check`, `dNSHostName`, the SCCM client flags) are
@@ -952,9 +951,33 @@ strips nulls via `exclude_none=True`; the dataclass + `asdict` path the convert 
 the responsibility lands here.)
 
 So the convert emit step omits any property whose value is `None` before writing —
-[`_without_null_properties`](src/openhound_sccm/convert_pipeline.py) runs on every node and every edge, the
+[`_normalize_properties`](src/openhound_sccm/convert_pipeline.py) runs on every node and every edge, the
 single point all graph content flows through. This matches BloodHound's convention that an absent attribute
 is *missing*, not `null`. Empty lists are kept (an array is a valid value); only `None` is dropped.
+
+**The same function also sorts array-valued properties, for a second and unrelated reason.** The arrays in
+the graph are built by DuckDB `list()` / `array_agg()` aggregations (about twenty of them across
+`transforms.py`). Neither gives an ordering guarantee, and DuckDB aggregates multi-threaded — so two converts
+over *byte-identical* input emit the same elements in different orders. Measured 2026-07-29 by reprocessing
+one cached bucket twice: 14 node and 6 edge property differences, in `collectionIds`, `siteSystemRoles`,
+`coercionVictimHostnames`, and `coercionVictimAndRelayTargetPairs`. Node and edge counts, kinds, identities
+and triples were all stable — only element order moved.
+
+That cost twice over. BloodHound saw a changed property on re-ingest when nothing had changed, and any
+run-to-run graph diff — which is exactly what the `--compare-to-zip` parity check is — filled with false
+positives that could mask a real regression. Sorting makes the output a function of the input alone: the same
+experiment now reports zero differences.
+
+Two design points worth keeping:
+
+- **Sorted at the emit boundary, not in the SQL.** One place instead of twenty, it covers any array added
+  later for free, and it cannot end up half-applied — a codebase where eight aggregations sort and thirteen
+  do not is harder to reason about than one where none do.
+- **`objectClass` is exempt**, via `_ORDER_SIGNIFICANT_PROPERTIES`. LDAP returns it most-general-first
+  (`top`, `person`, `organizationalPerson`, `user`, `computer`); that order is how a reader interprets the
+  value and is already reproducible, so sorting it would destroy information for no gain. It is the only
+  exemption, and the test for adding another is whether a *reader* relies on the order — not whether it
+  happens to look tidy.
 
 ---
 
@@ -1714,7 +1737,7 @@ would leave four other protocols leaking traffic straight from the outside box.
 - **The `getaddrinfo` pass-through is aggressive** — it returns an unresolved
   hostname for anything that isn't loopback/bypassed rather than attempting
   resolution and falling back. Validated offline against `ldap3`, `requests`,
-  and `impacket` (see [`spike_socks_proxy.md`](spike_socks_proxy.md) — all three
+  and `impacket` (see [`spike_socks_proxy.md`](dev/spike_socks_proxy.md) — all three
   funnel through the patched stdlib entry points with no bypass found); a
   live-lab run against a real SOCKS5 pivot is the remaining confirmation.
 
@@ -1806,152 +1829,17 @@ took a separate, manual step outside `openhound collect sccm`.
 
 ---
 
-## 15. Direct BloodHound CE upload, and hand-registering `convert sccm`
-
-### The framework baseline
-
-OpenHound's `convert` step writes OpenGraph JSON files to disk and stops there — getting them into
-BloodHound is the operator's own job (drag them into the UI's **File Ingest**, or script it separately).
-Each pipeline verb also gets exactly one flag-carrying entry point: the `@app.collect()`/`@app.convert()`
-convenience decorators auto-register a **fixed** CLI signature (`input_path`, `output_path`, `lookup_file`,
-`progress`, and nothing else) and, as a side effect, set the app's `collector`/`converter` in-process
-callables that `run_end_to_end` ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) calls
-directly. There is no seam on the decorator to add extra flags to the command it generates.
-
-### Why it breaks for SCCM
-
-The operator workflow this feature targets — one command from credentials to a queryable BloodHound
-graph, and a second command to re-push an existing run without recollecting — needs BloodHound API
-credentials and upload-mode switches on **both** `collect --run-all` and `convert`. `collect sccm` already
-had room to grow: it was hand-registered directly on the framework's `collect` Typer group from the start
-(so it could carry the CMBP-style flag surface — see
-[§5](#5-an-active-directory-cli-surface-and-context-auto-detection)). `convert sccm`, however, had always
-used the `@app.convert(lookup=SCCMLookup)` convenience decorator, which meant there was nowhere to attach
-`-B`/`--upload-dir`/etc.
-
-### The add-on
-
-**(a) A shared uploader, `openhound_collector_common.bloodhound`.** A new, framework-agnostic subpackage —
-no `openhound`/`dlt` import, so it is reusable by the MSSQL collector later (per the design's D2 decision:
-wired into SCCM only for now):
-
-- `auth.py` — `HMACAuth` (BloodHound CE's chained HMAC-SHA256 signing over method+URI / hour / body) and
-  `BearerAuth` (a plain JWT header).
-- `client.py` — `BloodHoundClient`, retrying HTTP 429/5xx with exponential backoff over the four BH CE
-  endpoints: `PUT /api/v2/extensions` (schema) and the `POST /api/v2/file-upload/{start,{id},end}` job flow
-  (results).
-- `uploader.py` — `BloodHoundUploader` (push N schemas / push N files under one job, returning an
-  `UploadSummary`), plus the credential plumbing: `parse_bloodhound_shorthand` (`<id>:<key>@<url>`),
-  `resolve_credentials` (merges `-B` shorthand > discrete flags > `BLOODHOUND_*` env vars), `build_uploader`
-  (picks HMAC vs. Bearer, or `None` if nothing was configured).
-- `zip_bundle.py` — `bundle_graph_dir`, zips a convert output directory's `*.json` files (no `seed_data.json`
-  — the schema `PUT` already registers every kind).
-- `schema.py` — `disable_possible_edges`, a port of the Go tool's `SchemaJSONWithDisabledPossibleEdges`:
-  flips named relationship kinds' `is_traversable` to `false` in a schema blob before it's uploaded.
-
-**SCCM's own two files** sit on top of that shared package:
-
-- [`bloodhound_schemas.py`](src/openhound_sccm/bloodhound_schemas.py) — `load_sccm_schemas(disable_possible)`
-  reads and, if asked, mutates **both** `schema_SCCM.json` and `schema_MSSQL.json`. Both are loaded because
-  this collector emits `MSSQL_*` kinds ([§11g](#11g-stage-5-mssql-node-merge-and-topology-inference))
-  alongside its `SCCM_*` ones — pushing only the SCCM schema would leave the MSSQL nodes/edges without a
-  registered kind to render under. `SCCM_POSSIBLE_EDGE_KINDS` / `MSSQL_POSSIBLE_EDGE_KINDS` name the
-  coerce-and-relay ([§11h](#11h-stage-6-coerce-and-relay-possible-edges-and-the-synthetic-authenticated-users-node))
-  kinds each schema mutation targets.
-- [`bloodhound_upload.py`](src/openhound_sccm/bloodhound_upload.py) — `run_upload(...)` is the single
-  dispatch point both CLI commands call, so the "which of schema/results to push, and from where" decision
-  logic lives in exactly one place rather than being duplicated per command.
-
-**CLI surface.** An identical **BloodHound Upload** help panel is added to both `collect sccm` and
-`convert sccm` ([`main.py`](src/openhound_sccm/main.py)): `-B`/`--bloodhound`, `--bloodhound-url` /
-`--token-id` / `--token-key` (+ matching `BLOODHOUND_*` env vars), `--upload-schema-only` /
-`--upload-results-only` (mutually exclusive — `_resolve_upload_mode` raises `typer.BadParameter` if both are
-set), `--skip-collection`, `--upload-dir`. A module-level `_dispatch_bloodhound_upload` helper (build the
-uploader via `build_uploader`, load schemas via `load_sccm_schemas` if requested, call `run_upload`) is the
-one call site both commands use — `collect_sccm` calls it from three places (the `--skip-collection`
-short-circuit, after a `--run-all` chain finishes, and the "no `--run-all`, but `-B` was still given"
-else-branch), `convert_sccm` from two (its own `--skip-collection` short-circuit, and after a normal
-convert).
-
-**(b) Hand-registering `convert sccm`.** Replaced the `@app.convert(lookup=SCCMLookup)` decorator with the
-same manual-registration pattern `collect sccm` already used: the actual conversion logic stays a plain
-function (`_sccm_convert_hook`, unchanged); a new `_run_convert(...)` replicates the ~10-line closure the
-decorator used to generate on your behalf (open the lookup DB read-only, build a `Converter`, call the
-hook, run it) and is assigned directly to `app.converter` — so `run_end_to_end`'s `--run-all` chain
-([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) keeps calling it exactly as before,
-unaware anything changed; and the CLI command itself is hand-registered with the extra flags via
-`_convert_typer.command(name="sccm")` on the framework's own `convert` Typer group (imported as
-`_convert_typer` alongside `_collect_typer`). This is not a new pattern — it is the exact seam
-`collect sccm` has used from the start — just the second place it was needed.
-
-### Trade-offs
-
-- `convert sccm`'s CLI signature and `_run_convert`'s body are now two related-but-separate things a future
-  change to the framework's own convert-closure shape would require updating by hand — the decorator used
-  to keep them in sync for free.
-- The upload step runs with a bare `requests`-based HTTP transport that has no proxy wiring, and — in
-  `collect --run-all` — it runs **after** the `socks_proxy_installed` context ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot))
-  has already exited. So a `--proxy`-tunneled collection still uploads over the collector host's own local
-  DNS/network path, not through the SOCKS5 pivot; an operator collecting through a pivot needs separate,
-  direct (or VPN) reachability to the BloodHound instance for the upload step to succeed.
-- `--skip-collection` means something different per command by design (skip collection entirely vs. skip
-  just the conversion step) but shares one flag name and help panel across both, so it is only useful paired
-  with `-B` and/or `--upload-dir` — on its own it is a no-op that does nothing and uploads nothing.
-
----
-
-## Quick reference: which framework extension point each add-on uses
-
-| Divergence | Framework extension point used | Where it would edit core (but doesn't) |
-|---|---|---|
-| Per-host phased pipeline | DLT "emit" resources draining the shared `StreamBridge`'s queues; `pipeline.run` + `extract_workers_for` | A native per-target scheduler |
-| Recursive discovery | Custom `WorkQueue` + `register_target` funnel | A "collection discovers more work" primitive |
-| Include-only targeting | Allow-list checked in `register_target` | A target-scoping config |
-| AD CLI surface | Typer command registered on the framework's `collect` group + flag→env bridge | A richer `@app.collect()` signature |
-| Windows auth (×5 protocols) | `clients/*` auth stacks — implementation in shared `openhound_collector_common.clients.*`, SCCM `clients/*` are thin adapters | Framework Negotiate/Kerberos/SMB/DCOM support |
-| Logging & diagnostics | Filters + extra handlers + runtime mutation of live handlers — `log_context` machinery in shared `openhound_collector_common.logging`, SCCM re-exports + owns the file handlers | A pluggable logging/formatting API |
-| Windows log-rollover fix | Runtime monkey-patch of core's handler instances | A Windows-safe `doRollover` in core |
-| Convert from DuckDB | `preproc` coalesced tables + a second `convert`-time `dlt.pipeline` (Convert2-Read-DB) | `read_from="duckdb"` on `@app.convert` (proposed) |
-| Tolerant coalesce vs. pinned load schema | `_safe` + `_ensure_columns` + `_arr` in the preproc transforms | Pinning full per-table schemas/types at load (rejected — brittle; it caused the `ldap_sites` freeze crash) |
-| Persist-at-collect / gate-in-preproc (`disable_possible_edges`) | `collection_settings` one-row table written at collect; `_read_disable_possible` reads it in preproc | A first-class CLI flag shared across pipeline phases |
-| Traversable allow-list + collection source | `TRAVERSABLE_EDGE_KINDS` frozenset in `kinds/edges.py`; `GraphEdge` sets `traversable` from it and `collection_source` from the `graph_edges` typed `VARCHAR[]` column; dedup pass array-unions `collection_source` per `(start_id, end_id, kind)` group | A graph-model-level traversability attribute; a typed array column on edges |
-| Edge-endpoint stub-node backfill | `_node_backfill` + `StubNode` synthesise bare nodes for unresolved edge endpoints | An `Upsert-Node`-equivalent that creates nodes on demand |
-| Split output (untagged AD payload) | A second `convert`-time emit pass through an extension `opengraph_file_untagged` destination (no `metadata`); preproc `_graph_edges_split` partitions edges | A `source_kind=None` / multi-source option on `@app.convert` |
-| MSSQL node merge + topology inference | `_mssql_sql_servers` temp table + three-source `UNION`/`GROUP BY` coalesce in `_node_mssql_server`; Login/DatabaseUser inferred from SCCM sysadmin-computer topology in `_node_mssql_login` / `_node_mssql_database_user`; MSSQL nodes in `SCCM_NODE_SPECS`; edges auto-routed by the existing `_graph_edges_split` | No new framework extension point — extends the existing Convert2-Read-DB pipeline and output-split (§11f) |
-| Coerce-and-relay possible edges + synthetic Authenticated Users node | Three relay edge builders in `_edge_coerce_relay_*`; `_node_authenticated_users` inserts lazily after relay builders; `SCCMRelayEdgeProperties` subclass for relay-only props; surgical `--disable-possible-edges` gate; `graph_edges` gains two `VARCHAR[]` coercion columns | No new framework extension point — extends §11b (persist-at-collect/gate-in-preproc), §11c (graph_edges + GraphEdge), and §11f (output-split routing) |
-| One-command end-to-end ([§12](#12-one-command-end-to-end-a---run-all-flag-not-a-new-verb)) | A flag on the hand-registered `collect` Typer command + in-process calls to the app's registered `preproc`/`convert` hooks | A new top-level `run` verb in core (extensions load inside the root app's constructor and never get a reference to it, so they cannot mount a new verb) |
-| SOCKS5 pivot ([§13](#13-tunneling-all-collection-traffic-through-a-socks5-pivot)) | Runtime mutation of the stdlib `socket` module (`socket.socket`/`create_connection`/`getaddrinfo`), installed only for the `collect` run | No extension point — there is no framework notion of tunneling traffic through a pivot at all, since a stock collector talks to one already-reachable REST endpoint |
-| Integration testing + payload diff ([§14](#14-a-shared-integration-test-and-payload-diff-engine-invoked-off---run-all)) | Two flags on the hand-registered `collect` Typer command (`--run-integration-tests`, `--compare-to-zip`), both forcing `--run-all` and calling the shared engine in-process after convert | No extension point — there is no framework notion of asserting or diffing a collected graph at all |
-| Direct BloodHound CE upload ([§15](#15-direct-bloodhound-ce-upload-and-hand-registering-convert-sccm)) | A new framework-agnostic `bloodhound` subpackage in `openhound-collector-common` (HTTP client + auth + zip bundler + schema mutation), invoked from an identical BloodHound Upload panel on both hand-registered CLI commands | A built-in "push to BloodHound" step on core's `Converter`/`Collector` |
-| `convert sccm` hand-registration ([§15](#15-direct-bloodhound-ce-upload-and-hand-registering-convert-sccm)) | Manual `app.converter` assignment + `_convert_typer.command`, the same seam `collect sccm` already used | A flag-carrying seam on the `@app.convert()` decorator |
-
----
-
-## Maintaining this document
-
-**This file must stay true to the code, like the README.** When you change any of the subsystems above —
-the phased pipeline, the auth stacks, the logging layer, the discovery/allow-list funnel, the Windows
-fixes, or the preproc/convert design — **update the relevant section here in the same change**, and fix any
-code references (`file:line`) you invalidate.
-
-If you add a *new* category of divergence from a stock OpenHound collector (a new protocol, a new
-framework workaround, a new platform fix), add a section for it following the same
-*baseline → why it breaks → the add-on → trade-offs* spine.
-
-This document is required reading per [`AGENTS.md`](AGENTS.md) and the project
-[`CLAUDE.md`](../../CLAUDE.md): read it before working on any cross-cutting collector subsystem, and update
-it as part of that work.
-
----
-
 ## Changelog
 
 | Date | Change |
 |---|---|
+| 2026-07-29 | **First green `ruff` + `mypy` across both packages** (ope-60fe step 2e), prerequisite for the new `ci.yml` in each repo. Neither tool had ever passed despite both being declared dev dependencies and documented commands — the pre-commit config runs `black` and the standard hooks only. Starting point: **273 mypy errors** (206 collector / 67 library) and **50 ruff** (27 / 23); end state zero of each, with the offline suites green and a live `--run-all` collect producing a graph identical to the pre-session baseline (148 nodes / 454 edges, same kinds, identities, triples and property population). Four root causes covered nearly all the mypy count: **88 `logger.verbose` errors** fixed by routing 18 modules through the shared `get_logger()` (which already returned a `VerboseLogger` declaring the custom level) instead of `logging.getLogger` — this also retired five side-effect-only `from .. import log_context  # noqa: F401` imports whose sole job was installing the monkeypatch; **85 `import-untyped`** resolved with `ignore_missing_imports` overrides for `impacket`/`openhound`/`sspi`, none of which ship `py.typed`; **three missing stub packages** added (`types-ldap3`, `types-pywin32`, `types-pyasn1`), which surfaced three real library issues — noting `types-ldap3` targets 2.9.13 while this project pins ldap3 2.10.2rc4, so `ENCRYPT` / `TLS_CHANNEL_BINDING` / `session_security` need a narrow version-gap suppression rather than losing ldap3 checking; and **28 `fetchone()[0]`** sites replaced by a `transforms._scalar()` helper that raises a query-naming error instead of indexing `tuple | None` (rewritten with a paren-matching scan, not a regex — the file has 130 `con.execute(` calls and only 28 with that suffix, so a forward non-greedy match runs across newlines into the next query; verified behaviour-preserving by reprocessing one cached bucket and diffing the graph). Several findings were real defects rather than annotation noise: `registry.py`'s `get_current_user` / `get_ntlm_settings` were annotated `Optional[list[str]]` / `Optional[dict]` but are generators yielding `(table, row)` tuples; two sites in `ldap.py` yielded a possibly-`None` `target.ad_object` into a dlt resource, which fails schema validation downstream without naming the host; `dns.py` referenced `dns.resolver.NXDOMAIN` in an `except` clause where `dns` binds only on a successful import, correlated to a separate boolean; `test_extension_methods.py` carried a bare `try/except` that swallowed every exception around an unused import, plus a skip claiming "convert phase not yet implemented" (false — `app.converter` is assigned and the test passes); and one library test asserted a public API purely by importing eight names, seven of which read as unused, so `ruff --fix` would have deleted them and left a green test checking nothing (rewritten to assert the export list as data; that test was retired with the upload feature later the same day, but the lesson — an unused import can be a contract — outlives it). Deliberate suppressions are confined to genuine duck-typing and stub defects, each naming its reason: the SOCKS `socket`-module patch (§13), the per-instance dnspython `resolve` override, pywin32's read-only-typed `PySecBuffer.Buffer`, ldap3's undeclared `ntlm_client`, and core's `RotatingFileHandler` — the last replaced by a `_RotatingHandler` Protocol in `main.py` that documents which six attributes (two private) the Windows rollover fix depends on. No new divergence category. |
+| 2026-07-29 | **Adopted the published `openhound` 0.2.12 and fixed two bugs the validation exposed** (ope-60fe, during the PyPI publishing run). The framework dependency moved from an unpinned `git+` dev reference to a declared `openhound>=0.2.12` — 0.2.12 being what PyPI actually serves, versus the 0.1.4 commit this collector was built against. Equivalence was proven by reprocessing one cached bucket under both versions rather than by comparing two live collects: identical 148 nodes / 454 edges, kinds, node identities, edge triples, and property population. (Two live collects are *not* comparable — the pre-existing baseline had accumulated three dlt load packages for want of `--clean`, inflating its raw AdminService counts 3×, and the fresh run hit 5-second AdminService read timeouts. Neither is a framework effect.) **Bug 1 — nondeterministic array ordering (§10).** The ~20 DuckDB `list()`/`array_agg()` aggregations feeding graph arrays give no ordering guarantee and run multi-threaded, so two converts over byte-identical input emitted the same elements in different orders (measured: 14 node + 6 edge property diffs in `collectionIds`, `siteSystemRoles`, `coercionVictimHostnames`, `coercionVictimAndRelayTargetPairs`). BloodHound saw property changes on re-ingest that had not happened, and the `--compare-to-zip` parity diff filled with false positives. Fixed at the single emit boundary — `_without_null_properties` became `_normalize_properties`, which now sorts array properties as well as dropping nulls — rather than in twenty SQL expressions, because one place cannot end up half-applied and covers future arrays for free. `objectClass` is exempt via `_ORDER_SIGNIFICANT_PROPERTIES`: LDAP returns it in class-hierarchy order (`top`, `person`, …), which is meaningful and already reproducible. Same experiment now reports zero differences. Three offline tests in `convert_pipeline_test.py`. **Bug 2 — a read timeout reported as zero rows (§7).** `_http_get_value` logged `ErrorClass.CONNECT_FAILURE` (which covers timeouts) at VERBOSE while every other failure class logged WARNING, so a timed-out AdminService query surfaced only as `Collected 0 stored accounts` at INFO with nothing in the issues log — a silently incomplete graph indistinguishable from an accurate one, and it dropped two `SCCM_HasStoredAccount` edges. The level is now WARNING when collecting, with a new `probing=True` parameter keeping it at VERBOSE for `_http_identify`, whose whole job is testing whether a host is a provider at all (a connect failure there is an expected negative, and warning per candidate host would be noise). The paging loop also now distinguishes `None` (request failed) from `[]` (no rows) and reports how many rows it did get. The HTTP client's connect/read timeout was raised 5s → 10s, since `SMS_SCI_Reserved` exceeded 5s on every site server in a healthy lab. No new divergence category — extends §7 and §10. |
 | 2026-07-28 | **Added §11l — the rest of the low-priv-assumed-edges plan (Tasks 1, 1b, 1c, 2-6), plus Task 8 doc-truth pass.** Documents the D5 all-sources `site_hierarchy` wiring (the `information_schema` bare-code discovery loop, the observed-root-first resolution order, and the CAS/Secondary `site_type` deduction rules), the D6 site-code attribution rule and its one sanctioned cross-host exception (the `mp_host` join resolving the site-signing-certificate probe's site server), the assumption/provenance engine (`_mark_assumed`, `_site_db_provenance_cols`, `_assumed_site_dbs`'s gate-once RemoteRegistry-vs-SPN+SCCM basis), and the owner's ruling that `SCCM_AssignAllPermissions`/`SCCM_LocalAdminRequired`/`SCCM_CoerceAndRelayToAdminService`/`SCCM_CoerceAndRelayToSMB` are unconditionally assumed but **not** flag-gated (superseding §11h's original two-level-gate description, corrected in place) — leaving `MSSQL_CoerceAndRelayToMSSQL`'s EPA condition as the one genuinely flag-gated relay assumption. Also notes the small `--clean` CLI addition and one known gap (`_edge_mssql_db_assign_all` doesn't yet propagate the `assumed` stamp). Updated the `graph_edges` columns table (§11c) to include `sccm_infra`/`assumed`/`assumption_basis`. README gained a full assumed-vs-confirmed catalog, a collection-privilege-tier table, a `Container`/`GenericAll` Node/Edge Reference, and corrected the `--disable-possible-edges` documentation to match the ruling above. No new framework divergence category — extends §9 and §11b/§11h. No code changed by this pass (documentation only). |
 | 2026-07-28 | **Added §11k — Tier A+ low-priv additions (low-priv-assumed-edges plan Tasks 11-14).** `Container`+`GenericAll` from the previously-unread `ldap_system_management_dacl` (id = SharpHound-matching uppercase objectGUID, standard base kinds, not in `schema_SCCM.json`); the full nested `MemberOf` chain from the same DACL's recursive group walk, routed to a new `ldap_smc_group_members` table via `dlt.mark.with_table_name` from the same resource; `ADClient.find_mssql_spn_holder` (a new sibling of `find_mssql_spns`, sharing its search/host-pinning via `_find_mssql_spn_entries`) resolving the low-priv `MSSQLSvc` SPN holder for `MSSQL_ServiceAccountFor`/a third `HasSession` arm, distinct from and deduped against the privileged `SMS_SCI_SysResUse` pair via the pre-existing `_graph_edges_dedup`; and `MSSQL_GetAdminTGS`/`MSSQL_GetTGS` from that service account to Task 4's site-server sysadmin logins, inheriting the login's confirmed/assumed stamp. All four confirmed (both flag modes, no `assumed` stamp). No new framework divergence category. 46 new/updated targeted tests + the `lowpriv_end_to_end_test.py` guard all pass; live-DB-augmented verification (see `.sdd/2026-07-23-low-priv-assumed-edges/tasks-11-14-report.md`) confirmed a DACL group ("Domain Admins") now gets a `Group` stub node it previously had none for. |
 | 2026-07-24 | **Added `--dc-only` recon mode** (Ope-4tdt) — forces `--collection-methods` to `LDAP,DNS` and skips the Stage-2 per-host pass (§4). No new divergence category; it reuses the existing `--collection-methods` gate and the `per_host_expected` Stage-2 gate. |
-| 2026-07-24 | **Added §15 — direct BloodHound CE upload + hand-registered `convert sccm`** (ope-8c44, implementing the pivoted [Ope-8wi2](.tickets/Ope-8wi2.md)). New shared `openhound_collector_common.bloodhound` subpackage (`auth.py` HMAC/Bearer signing, `client.py` retrying HTTP client over the BH CE schema/file-upload endpoints, `uploader.py` orchestration + credential resolution, `zip_bundle.py`, `schema.py::disable_possible_edges`) plus a new `openhound-collector-common` `requests` dependency; 25 offline tests. SCCM adds `bloodhound_schemas.py` (loads + mutates `schema_SCCM.json` **and** `schema_MSSQL.json` — this collector emits `MSSQL_*` kinds too) and `bloodhound_upload.py::run_upload` (single dispatch shared by both CLI commands). An identical **BloodHound Upload** panel (`-B`/`--bloodhound`, `--bloodhound-url`/`--token-id`/`--token-key` + env vars, `--upload-schema-only`/`--upload-results-only`, `--skip-collection`, `--upload-dir`) was added to both `collect sccm` (uploads after a `--run-all` chain, or schema-only via `--skip-collection`) and `convert sccm`. Landing the `convert sccm` flags required **hand-registering** `convert sccm` on the framework's `convert` Typer group — replacing the `@app.convert(lookup=SCCMLookup)` decorator with a manual `app.converter = _run_convert` assignment + `_convert_typer.command`, the same seam `collect sccm` already used — because the decorator exposes no flag-carrying seam. Updated the README Quick Start (direct-upload examples) and added a "BloodHound Upload" Command Line Options subsection. Full SCCM suite: 731 pass. Live validation against `bloodhound.mayyhem.com` is the remaining step (offline tests use fakes for the HTTP layer). |
+| 2026-07-29 | **Removed direct BloodHound CE upload**, deleting §15 and its 16 CLI options (eight each on `collect sccm` and `convert sccm`), the collector's `bloodhound_schemas.py` / `bloodhound_upload.py`, and the shared library's whole `bloodhound/` subpackage — which also lets the library drop its `requests` dependency, since nothing else there used it. Operators register the two shipped schema JSON files and ingest the OpenGraph output through BloodHound's own **File Ingest** UI; the README's Quick Start covers it. Three things deliberately unchanged: the hand-registered `convert sccm` stays (it still carries `--lookup-file` and `--progress`, and the `@app.convert()` decorator offers no seam for them, so `app.converter` is still assigned and `openhound` is still a declared dependency for that reason); both schema files stay inside the package, because `integration/__init__.py` reads `schema_SCCM.json` at runtime for the test kit's coverage check and `schema_MSSQL.json` ships as an operator deliverable; and `--disable-possible-edges` stays on `collect`, where it changes the graph. It was removed from `convert`, where it was a no-op in all but name — possible edges are gated during preprocess (`transforms._read_disable_possible`), so by convert time the decision is already in the lookup DB and the flag's only remaining effect was on the schema being uploaded. Verified: both commands bind, ruff and mypy clean in both packages, and a live `--run-all` collect produced an unchanged 148-node / 454-edge graph. |
+| 2026-07-24 | ~~**Added §15 — direct BloodHound CE upload**~~ **— the upload half was removed on 2026-07-29; §15 no longer exists. The hand-registered `convert sccm` described below survives, for its own options rather than for upload flags.** Original entry, for the record: **direct BloodHound CE upload + hand-registered `convert sccm`** (ope-8c44, implementing the pivoted [Ope-8wi2](.tickets/Ope-8wi2.md)). New shared `openhound_collector_common.bloodhound` subpackage (`auth.py` HMAC/Bearer signing, `client.py` retrying HTTP client over the BH CE schema/file-upload endpoints, `uploader.py` orchestration + credential resolution, `zip_bundle.py`, `schema.py::disable_possible_edges`) plus a new `openhound-collector-common` `requests` dependency; 25 offline tests. SCCM adds `bloodhound_schemas.py` (loads + mutates `schema_SCCM.json` **and** `schema_MSSQL.json` — this collector emits `MSSQL_*` kinds too) and `bloodhound_upload.py::run_upload` (single dispatch shared by both CLI commands). An identical **BloodHound Upload** panel (`-B`/`--bloodhound`, `--bloodhound-url`/`--token-id`/`--token-key` + env vars, `--upload-schema-only`/`--upload-results-only`, `--skip-collection`, `--upload-dir`) was added to both `collect sccm` (uploads after a `--run-all` chain, or schema-only via `--skip-collection`) and `convert sccm`. Landing the `convert sccm` flags required **hand-registering** `convert sccm` on the framework's `convert` Typer group — replacing the `@app.convert(lookup=SCCMLookup)` decorator with a manual `app.converter = _run_convert` assignment + `_convert_typer.command`, the same seam `collect sccm` already used — because the decorator exposes no flag-carrying seam. Updated the README Quick Start (direct-upload examples) and added a "BloodHound Upload" Command Line Options subsection. Full SCCM suite: 731 pass. Live validation against `bloodhound.mayyhem.com` is the remaining step (offline tests use fakes for the HTTP layer). |
 | 2026-07-24 | **Added §11j — AD-object attribute capture via the per-host resolution cache** (ope-c141, Phase A of a broader CMBP-parity property effort; also documents Phase B, ope-fb99, and the ope-c0c0 bug fix). `Computer`/`User`/`Group` nodes gain `Domain`, `Enabled`, `IsDomainPrincipal`, `Type`, `objectClass`, `servicePrincipalName`, `CN` (`graph.py` `ComputerProperties`/`UserProperties`/`GroupProperties`), sourced from AD attributes captured whenever `SourceContext.resolve_principal` freshly resolves a principal during collection (`context.py::_record_resolved_principal`), persisted by a new `ldap_resolved_principals` DLT resource run at the end of the per-host stage (`source.py`), and joined onto the three AD node tables in preproc via new `transforms._derive_ad_props`/`_join_ad_props`. Deliberately **resolved-principals-only** — not a domain-wide LDAP sweep; a principal never resolved during a run stays bare. No new framework divergence category — extends the existing collect-side-table + preproc-join pattern (§11a/§11b). Also (Phase B, ope-fb99): `SCCM_Site.siteSystemRoles` (per-site aggregation of `Computer.SCCMSiteSystemRoles`, empty on Secondary Sites); six new `SCCM_ClientDevice` telemetry-extra properties (`currentManagementPoint`, `currentManagementPointSID`, `previousSMSID`, `previousSMSIDChangeDate`, `userName`, `userDomainName`); and `SCCM_IsMappedTo` now carries `SCCMInfra = true` (the only edge kind that does). And a bug fix (ope-c0c0): `SCCM_ClientDevice.lastOnlineTime`/`lastOfflineTime` were always empty due to a `c_n_*` vs `cn_*` raw-column-name typo in `_node_client_device`; both now populate. Updated the README Node Reference (Computer/User/Group/SCCM_Site/SCCM_ClientDevice tables + Limitations) and Edge Reference (`SCCM_IsMappedTo`). |
 | 2026-07-22 | **Python integration-test kit + payload diff.** New shared `openhound_collector_common/integration_testing/` engine (graph loader for dir/zip, wildcard matcher, typed EdgeCase/NodeCase with exact/at_least/at_most counts, results+JSON, runner with a whole-graph invariant hook, deep comparator, schema-kind coverage). SCCM adds `openhound_sccm/integration/` fixtures (61 ported edge cases with new SCCM_/MSSQL_ names, node cases, memberOf invariant) and two `collect sccm` **Testing** flags: `--run-integration-tests` (assert vs mayyhem fixtures, non-zero exit on failure) and `--compare-to-zip` (property-level diff of this run vs an arbitrary payload, always exit 0). Both imply `--run-all`. Supersedes the PowerShell kit + `compare_results.py` for the assert/diff workflows. Shared-lib change is additive (new subpackage) so MSSQL can adopt the same engine + flags. |
 | 2026-07-22 | **Renamed five graph edge kinds to match the hand-maintained OpenGraph schema (`schema.json`).** Added the `SCCM_` namespace prefix to `SameHostAs`→`SCCM_SameHostAs`, `LocalAdminRequired`→`SCCM_LocalAdminRequired`, `CoerceAndRelayToAdminService`→`SCCM_CoerceAndRelayToAdminService`, and `CoerceAndRelayToSMB`→`SCCM_CoerceAndRelayToSMB`; moved the SQL relay into the separately maintained MSSQL schema as `CoerceAndRelayToMSSQL`→`MSSQL_CoerceAndRelayToMSSQL` (its end node is an `MSSQL_Login`, so it belongs to the MSSQL schema the operator uploads alongside this one). Reconciled the other direction too: `schema.json` had listed the site-replication edge as `SCCM_SameAdminsAs`, corrected to the code-true `SCCM_AdminsReplicatedTo`. Emission and entity-panel help key off the `kinds/edges.py` constants, so the change centers on the constant *values* + the `TRAVERSABLE_EDGE_KINDS` allow-list, then propagates to the saved cypher queries, README (Edge Reference / TOC / Mermaid), and the offline edge tests. CMBP-history references (the `CoerceAndRelayNTLMtoSMB` allow-list vs `CoerceAndRelayToSMB` emitter mismatch) are left verbatim as historical record. The schema also lists `SCCM_HasNetworkAccessAccount`, which no collector code emits yet — left as a placeholder and tracked in ope-e10b (emit from Local collection, reading the NAA from client WMI). No graph-shape change: same edges, new kind strings. |

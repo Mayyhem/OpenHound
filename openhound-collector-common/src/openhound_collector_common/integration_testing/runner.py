@@ -65,10 +65,14 @@ def run_suite(graph: Graph, edge_cases: list[EdgeCase], node_cases: list[NodeCas
 
     log("\nRunning edge tests...")
     for case in edge_cases:
-        r = run_edge_case(case, graph); summary.results.append(r); log(_line(r))
+        r = run_edge_case(case, graph)
+        summary.results.append(r)
+        log(_line(r))
     log("\nRunning node tests...")
     for ncase in node_cases:
-        r = run_node_case(ncase, graph); summary.results.append(r); log(_line(r))
+        r = run_node_case(ncase, graph)
+        summary.results.append(r)
+        log(_line(r))
     for inv in invariants or []:
         # An invariant is arbitrary caller code; a bug in one must not crash the whole
         # run (the suite never raises on a failing check) — turn an exception into a FAIL.

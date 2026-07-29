@@ -5,7 +5,6 @@ import pytest
 from openhound_collector_common.bloodhound.client import BloodHoundHTTPError
 from openhound_collector_common.bloodhound.uploader import (
     BloodHoundUploader,
-    UploadSummary,
     build_uploader,
     parse_bloodhound_shorthand,
     resolve_credentials,

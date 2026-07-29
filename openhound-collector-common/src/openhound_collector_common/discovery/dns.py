@@ -84,7 +84,9 @@ def make_resolver(
             kwargs.setdefault("tcp", True)
             return _orig_resolve(qname, *args, **kwargs)
 
-        resolver.resolve = _resolve_tcp  # per-instance override
+        # Per-instance override, deliberately: it forces TCP for this resolver only,
+        # leaving dnspython's class untouched for anything else in the process.
+        resolver.resolve = _resolve_tcp  # type: ignore[method-assign]
         logger.debug("make_resolver: forcing DNS over TCP (proxy mode)")
     return resolver
 

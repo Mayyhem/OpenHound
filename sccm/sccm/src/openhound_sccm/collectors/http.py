@@ -34,7 +34,6 @@ Runs only when neither AdminService nor WMI already collected the host
 """
 from __future__ import annotations
 
-import logging
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Iterable, Iterator, Optional
@@ -42,8 +41,9 @@ from typing import Any, Iterable, Iterator, Optional
 from ..clients.http import ErrorClass, HttpClient, HttpResult
 from ..clients.http_auth import AuthMode
 from ..context import SourceContext
+from ..log_context import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # --- transport + XML parsing helpers ---------------------------------------
