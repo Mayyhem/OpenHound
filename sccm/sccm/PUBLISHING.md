@@ -584,6 +584,14 @@ Copy-Item docs\superpowers\specs\* $HOME\Desktop\ConfigManBearPig\docs\superpowe
 
 cd $HOME\Desktop\ConfigManBearPig
 git status --short        # read it: this is exactly what the public repo will contain
+
+# Restore LICENSE. The overlay overwrites it, and the two copies are NOT identical: the
+# fork's is a re-indented Apache-2.0 (555 bytes smaller, leading whitespace stripped from
+# the body), while this repository already carries the canonically formatted text. Same
+# licence either way, but there is no reason to reformat a public repo's LICENSE -- and a
+# whole-file diff on a licence invites a question you do not want to answer.
+git checkout HEAD -- LICENSE
+
 git add -A
 git commit -m "ConfigManBearPig 2.0: Python OpenHound collector; PowerShell 1.2 to powershell_deprecated/"
 ```
