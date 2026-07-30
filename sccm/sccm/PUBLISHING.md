@@ -3,9 +3,22 @@
 How to get `configmanbearpig` and `openhound-collector-common` onto PyPI so a user can run:
 
 ```bash
-uv tool install openhound --with configmanbearpig
+uv tool install openhound --with configmanbearpig --prerelease=allow
 openhound collect sccm .\out --run-all
 ```
+
+> **`--prerelease=allow` is required with `uv`, and is not optional.** The collector needs
+> `ldap3>=2.10.2rc4`: that release candidate is the first to export `ENCRYPT` and
+> `TLS_CHANNEL_BINDING` and to accept `session_security` on a `Connection`, which is what
+> LDAP sign-and-seal and channel binding are built on. ldap3 has **never shipped those in a
+> final release** — its latest stable is 2.9.1, and 2.10.2 exists only as rc2/rc3/rc4 — so a
+> pre-release floor is forced, not sloppy. `pip install` permits it automatically (a
+> specifier naming a pre-release enables pre-releases for that requirement); uv requires the
+> flag and otherwise fails with *"only ldap3<2.10.2rc4 is available"*.
+>
+> Dropping to a stable ldap3 is not an alternative: 2.9.1 has none of the three, so LDAP
+> signing and channel binding would silently stop working against exactly the hardened DCs
+> that require them.
 
 (Targets are discovered from LDAP, and on Windows the domain comes from `$env:USERDNSDOMAIN`, so a
 privileged run needs no flags beyond the output directory. There is no `--site-server` option — an earlier
@@ -67,7 +80,8 @@ because none of it leaves the machine and all of it reverses with `git reset` / 
   (resolvers stop selecting it; pinned installs keep working) and publish `0.1.1`. Deleting the git
   tag afterwards does not unpublish anything.
 - [ ] **Verify from outside any checkout:**
-  `uv run --with openhound-collector-common --no-project python -c "import openhound_collector_common; print('ok')"`
+  `uv run --with openhound-collector-common --prerelease=allow --no-project python -c "import openhound_collector_common; print('ok')"`
+  (`--prerelease=allow` is required — see the note under the headline example.)
 
 ### ConfigManBearPig (`~/Desktop/ConfigManBearPig`, remote `SpecterOps/ConfigManBearPig`)
 
@@ -101,7 +115,7 @@ because none of it leaves the machine and all of it reverses with `git reset` / 
   *Reverse:* **none.** Yank `2.0.0` and ship `2.0.1`. There is no earlier `2.x` for anyone to be
   stranded on, so fixing forward is cheap.
 - [ ] **Verify from a machine that has never seen the source:**
-  `uv tool install openhound --with configmanbearpig` then `openhound collect sccm --help`
+  `uv tool install openhound --with configmanbearpig --prerelease=allow` then `openhound collect sccm --help`
 
 ### One-time local setup in any clone that will merge
 
@@ -613,7 +627,7 @@ git push origin v0.1.0
 Watch the Actions run, then verify from outside any checkout:
 
 ```powershell
-uv run --with openhound-collector-common --no-project python -c "import openhound_collector_common; print('ok')"
+uv run --with openhound-collector-common --prerelease=allow --no-project python -c "import openhound_collector_common; print('ok')"
 ```
 
 PyPI filenames are immutable. If this release is wrong, **yank** it and publish `0.1.1` — never delete
@@ -732,7 +746,7 @@ pre-existing bug worth fixing while you are in there.
 - **`README.md`** — three places assume the fork layout. Quick Start (lines 95, 100) says `uv sync` "from
   this directory (`sccm/sccm/`)"; System Requirements (line 279) says the framework is "pulled from
   `git+https://github.com/SpecterOps/openhound.git`"; and Understanding the Codebase (line 1798) draws
-  the tree rooted at `sccm/sccm/`. Lead with `uv tool install openhound --with configmanbearpig` for
+  the tree rooted at `sccm/sccm/`. Lead with `uv tool install openhound --with configmanbearpig --prerelease=allow` for
   users, keep `uv sync --group dev` as the contributor path, drop the git-URL claim (step 1 replaced it
   with `openhound>=0.2.12`), and reroot the tree diagram.
 - **`CLAUDE.md` and `AGENTS.md`** — this tree carries only `AGENTS.md`. Author both from the fork root's
@@ -754,7 +768,7 @@ git push origin main
 ### 10. Rehearse the real user path — at zero PyPI cost
 
 ```powershell
-uv tool install openhound --with "configmanbearpig @ git+https://github.com/SpecterOps/ConfigManBearPig.git"
+uv tool install openhound --prerelease=allow --with "configmanbearpig @ git+https://github.com/SpecterOps/ConfigManBearPig.git"
 openhound collect sccm --help
 openhound collect sccm .\out --clean --run-all
 ```
@@ -793,7 +807,7 @@ git push origin v2.0.0
 Verify from a machine that has never seen the source:
 
 ```powershell
-uv tool install openhound --with configmanbearpig
+uv tool install openhound --with configmanbearpig --prerelease=allow
 openhound collect sccm --help
 ```
 
