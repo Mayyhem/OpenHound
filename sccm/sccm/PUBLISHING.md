@@ -114,6 +114,12 @@ because none of it leaves the machine and all of it reverses with `git reset` / 
   Publishes `configmanbearpig` 2.0.0 to PyPI. Do this **only after** the step 10 rehearsal passes.
   *Reverse:* **none.** Yank `2.0.0` and ship `2.0.1`. There is no earlier `2.x` for anyone to be
   stranded on, so fixing forward is cheap.
+- [ ] **Cut a GitHub Release from `v2.0.0`.** Not optional housekeeping: `release.yml` publishes to
+  PyPI and never creates a Release, so without this the repo's **"Latest release" stays
+  `v1.2-powershell`** — the deprecated PowerShell tool, presented as current, on the landing page of
+  a repo whose current version is 2.0. Unchecking *Set as the latest release* on the PowerShell one
+  does not fix it, because GitHub computes "latest" itself when there is only one.
+  *Reverse:* delete the Release (the tag survives).
 - [ ] **Verify from a machine that has never seen the source:**
   `uv tool install openhound --with configmanbearpig --prerelease=allow` then `openhound collect sccm --help`
 
