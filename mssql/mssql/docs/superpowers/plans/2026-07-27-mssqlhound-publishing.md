@@ -68,6 +68,13 @@ anyone touches MSSQL. **Until that step runs, the current path is correct — do
 openhound-collector-common = { path = "../../../openhound-collector-common", editable = true }
 ```
 
+> **Do not carry this table into the published MSSQLHound repo.** SCCM shipped it and CI failed on the
+> first push: a committed `path = "..."` redirect breaks every environment without that sibling
+> checkout, and a GitHub runner checks out one repository. Fine here in the fork, where the path really
+> exists; delete it at publish time, when the capped range resolves from PyPI on its own. Verify in a
+> *fresh clone with no sibling*, because the assembled directory sits beside the library and passes
+> either way — that is precisely how SCCM missed it.
+
 - [ ] Declare the framework in `[project.dependencies]`, matching what the SCCM validation settled on:
 
 ```toml

@@ -744,11 +744,24 @@ would have given you, without a branch to manage. The first push is at the end o
 Four fixes: three things that were true in the fork and are false at the root of this repo, plus one
 pre-existing bug worth fixing while you are in there.
 
-- **`[tool.uv.sources]` in `pyproject.toml`** — change `../../openhound-collector-common` to
-  `../openhound-collector-common`. The library is now a sibling of this repo, one level up instead of
-  two. Without this, the `uv lock` below fails with *"not found in the package registry"*, which reads
-  like a PyPI problem and is not. (Deleting the table is the alternative — the library is on PyPI as of
-  step 6 — but then editing it locally means adding the entry back each time.)
+- **`[tool.uv.sources]` in `pyproject.toml`** — **delete the table.** Do not repoint it.
+  Committing a `path = "..."` redirect to a sibling checkout breaks every environment that has no
+  such sibling, and the first one to hit it is CI, whose runner checks out this repository alone:
+
+  ```
+  error: Failed to generate package metadata for
+         `openhound-collector-common @ editable+../openhound-collector-common`
+    Caused by: Distribution not found at: file:///home/runner/work/ConfigManBearPig/...
+  ```
+
+  The redirect was load-bearing only while the library was unpublished; from step 6 it is on PyPI, so
+  the capped range in `[project.dependencies]` resolves by itself. Verify in a *fresh clone with no
+  sibling present*, not in the assembled directory — the assembled one sits next to the library and
+  passes either way, which is exactly how this got through.
+
+  To develop against a live library checkout, override it **without committing the override**:
+  `uv sync --group dev` then `uv pip install -e ../openhound-collector-common`, re-running the second
+  command after any later `uv sync`.
 - **`README.md`** — three places assume the fork layout. Quick Start (lines 95, 100) says `uv sync` "from
   this directory (`sccm/sccm/`)"; System Requirements (line 279) says the framework is "pulled from
   `git+https://github.com/SpecterOps/openhound.git`"; and Understanding the Codebase (line 1798) draws
@@ -890,7 +903,8 @@ effect immediately — no reinstall. When ready, tag the library, and raise the 
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `uv sync` / `uv lock`: *"openhound-collector-common was not found in the package registry"* | Almost always a stale `[tool.uv.sources]` path, not a PyPI problem — uv reports a missing local directory this way | In the new repo the path is `../openhound-collector-common` (step 9); before step 6, `uv run --no-sync` also works |
+| `uv sync` / `uv lock`: *"openhound-collector-common was not found in the package registry"* | A `[tool.uv.sources]` path pointing at a directory that is not there — uv reports a missing local directory this way | Before the library is published, point it at the real checkout. After step 6, delete the table: the published range resolves on its own |
+| CI: *"Failed to generate package metadata … Distribution not found at file:///home/runner/work/…"* | A committed `[tool.uv.sources]` path. The runner checks out one repository, so no sibling checkout exists | Delete the table (step 9). Test in a fresh clone with no sibling — the assembled directory sits beside the library and passes regardless |
 | *"Trusted publishing exchange failure"* | Owner / repo / workflow filename / environment do not match the PyPI form exactly | Re-read the pending-publisher entry; every field is literal and case-sensitive |
 | CI: *"No interpreter found for Python >=3.13,<3.15 in virtual environments, search path, or registry"* | `python-preference = "only-system"` forbids uv from downloading one, and the runner's system Python is 3.12 | The `actions/setup-python@v5` step from 2a is missing from that workflow. Do not "fix" it by loosening the preference — that reintroduces the Windows TLS abort |
 | Published version is `0.0.0` or `0.1.dev4+g1a2b3c` | Shallow checkout — no tags for `hatch-vcs` to see | `fetch-depth: 0` is already set; the workflow's version check should have failed the job first |

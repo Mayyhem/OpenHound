@@ -257,8 +257,29 @@ immediately with no reinstall — and `uv sync` maintains that rather than clobb
 An intermediate design used a `just dev` recipe that ran `uv sync` and then re-applied
 `uv pip install -e` on top, plus `check-dev` / `check-pinned` / `dev-local` helpers and a task runner to
 invoke them. That existed only because the source entry had been removed, which was itself justified by
-"a contributor cloning one repo would fail `uv sync`" — a problem that does not exist with one
-developer. Restoring one line of config deleted a task runner, four recipes, and the rule *"any later
+"a contributor cloning one repo would fail `uv sync`" — dismissed here as "a problem that does not exist
+with one developer."
+
+> **That dismissal was wrong, and CI proved it on its first run (2026-07-29).** The environment that
+> clones one repository without a sibling checkout is not a hypothetical contributor — it is the GitHub
+> runner, on every push:
+>
+> ```
+> error: Failed to generate package metadata for
+>        `openhound-collector-common @ editable+../openhound-collector-common`
+>   Caused by: Distribution not found at: file:///home/runner/work/ConfigManBearPig/...
+> ```
+>
+> So the committed `[tool.uv.sources]` table is deleted from the published collector; the capped range
+> in `[project.dependencies]` resolves from PyPI unaided, which it could not do before the library was
+> published. Local development against a live library checkout is an **uncommitted** override
+> (`uv pip install -e ../openhound-collector-common` after `uv sync`) — which is what the intermediate
+> design was reaching for, minus the task runner.
+>
+> The deeper error was in how it was verified rather than in the reasoning: the check ran in the
+> assembled directory, which sits *next to* the library and therefore passes whether the table is right
+> or wrong. A convenience that only works where it was authored has to be tested somewhere else, and
+> "somewhere else" for a repo means a fresh clone. Restoring one line of config deleted a task runner, four recipes, and the rule *"any later
 `uv sync` silently drops the overlay, so re-run `just dev`."* No task runner is used; plain `uv`
 commands are listed in the runbook.
 
