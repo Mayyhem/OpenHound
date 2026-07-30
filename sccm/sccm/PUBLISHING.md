@@ -46,6 +46,8 @@ because none of it leaves the machine and all of it reverses with `git reset` / 
   *Reverse:* delete the repository (Settings → bottom of the page). Nothing references it yet.
 - [ ] **`git push -u origin main`**
   Uploads the 51-file tree and sets `main` to track `origin/main`. This is what makes the code public.
+  If it appears to hang with no output, the remote is HTTPS and git is waiting on a credential prompt:
+  `git remote set-url origin git@github.com:Mayyhem/openhound-collector-common.git` and retry.
   *Reverse:* delete the repository, or `git push --force origin <sha>:main` to rewind it.
 - [ ] **PyPI pending publisher** — <https://pypi.org/manage/account/publishing/> → *Add a pending
   publisher*. Five literal, case-sensitive fields: project `openhound-collector-common`, owner
@@ -552,7 +554,11 @@ cd $HOME\Desktop\openhound-collector-common
 git init -b main
 git add -A
 git commit -m "Import openhound-collector-common from the OpenHound fork"
-git remote add origin https://github.com/Mayyhem/openhound-collector-common.git
+# SSH, not HTTPS: this machine authenticates to GitHub with a key (the fork's remote is
+# git@github.com:Mayyhem/OpenHound.git). An HTTPS remote has no cached token, so the push
+# blocks waiting for a username/password prompt that never gets answered — it looks like a
+# hang, with no error. Check with `ssh -T git@github.com` if a push ever stalls.
+git remote add origin git@github.com:Mayyhem/openhound-collector-common.git
 git push -u origin main
 ```
 
