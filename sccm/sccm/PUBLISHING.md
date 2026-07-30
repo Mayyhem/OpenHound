@@ -18,6 +18,96 @@ everything you run is here.
 **Only two steps are irreversible: 6 and 11 — the two PyPI publishes.** Everything else is a
 `git revert`, a file move, a tag deletion, or a settings change.
 
+## Execution checklist
+
+Every step below is a single command or a single web form. **What it does** is what changes; **to
+reverse** is how to get back, and where that is blank the action cannot be undone. Only two rows are
+irreversible, both marked ⚠.
+
+Local work — file edits, commits, tag *creation*, archive assembly, verification — is not listed here
+because none of it leaves the machine and all of it reverses with `git reset` / `git checkout`.
+
+### Fork (`~/Desktop/OpenHound`, remote `Mayyhem/OpenHound`)
+
+- [ ] **`git push origin integration`**
+  Publishes the local commits to your own fork's `integration` branch. Nothing else consumes that
+  branch, so this is visible only to you.
+  *Reverse:* `git push --force origin <previous-sha>:integration`
+- [ ] **`git push -f origin pre-split-2026-07-29`**
+  Publishes the recovery tag, so the complete pre-split tree survives branch deletion and garbage
+  collection. `-f` because the tag was moved locally as later commits landed.
+  *Reverse:* `git push origin :refs/tags/pre-split-2026-07-29`
+
+### Shared library (`~/Desktop/openhound-collector-common`)
+
+- [ ] **Create an empty `Mayyhem/openhound-collector-common` on GitHub** — no README, no licence, no
+  `.gitignore`. Any of those creates a commit the local `main` does not have, and the push below then
+  rejects as non-fast-forward.
+  *Reverse:* delete the repository (Settings → bottom of the page). Nothing references it yet.
+- [ ] **`git push -u origin main`**
+  Uploads the 51-file tree and sets `main` to track `origin/main`. This is what makes the code public.
+  *Reverse:* delete the repository, or `git push --force origin <sha>:main` to rewind it.
+- [ ] **PyPI pending publisher** — <https://pypi.org/manage/account/publishing/> → *Add a pending
+  publisher*. Five literal, case-sensitive fields: project `openhound-collector-common`, owner
+  `Mayyhem`, repository `openhound-collector-common`, workflow `release.yml`, environment `pypi`.
+  Tells PyPI to trust an OIDC token from that exact workflow. "Pending" because the project does not
+  exist yet — the first publish creates it and reserves the name.
+  *Reverse:* delete the pending publisher on the same page. No artifact exists yet.
+- [ ] **GitHub → Settings → Environments → New environment `pypi`**
+  The name `release.yml` declares. Leave *Deployment branches and tags* at **No restriction**: the
+  workflow fires on `refs/tags/v*`, and a branch rule would not authorise a tag-triggered run. Adding
+  yourself as a required reviewer makes each release a deliberate click.
+  *Reverse:* delete the environment.
+- [ ] ⚠ **`git tag v0.1.0 && git push origin v0.1.0`**
+  The tag *is* the release: pushing it runs `release.yml`, which builds, asserts the built version
+  equals the tag, then publishes to PyPI over OIDC. `hatch-vcs` reads the version from this tag.
+  *Reverse:* **none.** PyPI filenames are immutable and deletion does not free them. Yank the release
+  (resolvers stop selecting it; pinned installs keep working) and publish `0.1.1`. Deleting the git
+  tag afterwards does not unpublish anything.
+- [ ] **Verify from outside any checkout:**
+  `uv run --with openhound-collector-common --no-project python -c "import openhound_collector_common; print('ok')"`
+
+### ConfigManBearPig (`~/Desktop/ConfigManBearPig`, remote `SpecterOps/ConfigManBearPig`)
+
+- [ ] **`git push origin v1.2-powershell`**
+  Publishes the annotated tag on the *pristine* PowerShell tree, giving the script a permanent raw URL
+  before anything is restructured. Safe to push before the `main` push below — and it must be, because
+  that is the ordering the whole "archive first" argument rests on. It cannot trigger a release: at
+  this point the repository has no `.github/workflows/`, and once it does, `release.yml`'s version step
+  only ever runs for tags it can parse.
+  *Reverse:* `git push origin :refs/tags/v1.2-powershell`
+- [ ] **Cut a GitHub Release from that tag**, titled *ConfigManBearPig 1.2 (PowerShell)*, noting that
+  2.0 is a Python OpenHound collector and the script remains in the repo under
+  `powershell_deprecated/`. Gives the script a human landing page, not just a tag.
+  *Reverse:* delete the Release (the tag survives independently).
+- [ ] **`git push origin main`**
+  The first public push of the restructured repository: the Python collector at the root, PowerShell
+  moved down, 446 files added. **This is the point where the repo visibly changes for anyone watching**
+  — and it must happen before the rehearsal, because the rehearsal installs from this URL.
+  *Reverse:* `git revert <sha>` restores the previous content as a visible commit, or
+  `git reset --hard caf772d && git push --force origin main` erases it (single-writer, unprotected
+  branch, so this is safe though it rewrites public history). Either way `v1.2-powershell` keeps the
+  original tree permanently reachable.
+- [ ] **PyPI pending publisher for `configmanbearpig`** — same form as above but owner `SpecterOps`,
+  repository `ConfigManBearPig`, project `configmanbearpig`, workflow `release.yml`, environment
+  `pypi`.
+  *Reverse:* delete the pending publisher.
+- [ ] **GitHub → Settings → Environments → New environment `pypi`** on that repository.
+  *Reverse:* delete the environment.
+- [ ] ⚠ **`git tag v2.0.0 && git push origin v2.0.0`**
+  Publishes `configmanbearpig` 2.0.0 to PyPI. Do this **only after** the step 10 rehearsal passes.
+  *Reverse:* **none.** Yank `2.0.0` and ship `2.0.1`. There is no earlier `2.x` for anyone to be
+  stranded on, so fixing forward is cheap.
+- [ ] **Verify from a machine that has never seen the source:**
+  `uv tool install openhound --with configmanbearpig` then `openhound collect sccm --help`
+
+### One-time local setup in any clone that will merge
+
+- [ ] **`git config merge.ours.driver true`**
+  Makes `.gitattributes`' `TICKETS-BY-STATUS.md merge=ours` actually work. `ours` is not a built-in git
+  merge driver, and `.git/config` cannot be committed, so each clone needs this once.
+  *Reverse:* `git config --unset merge.ours.driver`
+
 ## Prerequisites
 
 A PyPI account with 2FA enabled. **No API token** — publishing uses Trusted Publishing, where PyPI
