@@ -134,6 +134,32 @@ class BloodHoundClient(ABC):
         response = self.request(method="POST", path=path, body=body.encode())
         return CustomNodes.model_validate(response.json())
 
+    def upsert_extension(self, body: bytes, content_type: str) -> bool:
+        """Install a new OpenGraph extension schema, or update the one with the same name.
+
+        BloodHound calls this operation an "upsert": it creates the extension when the
+        schema name is new and updates it when the name already exists. The request body
+        is either the schema as JSON, or a zip bundle that contains a ``schema.json`` file
+        and optional ``saved_queries.json`` and ``pz_rules.json`` files. The content type
+        tells BloodHound which of the two it is receiving.
+
+        Args:
+            body (bytes): The raw file contents to send.
+            content_type (str): Either ``application/json`` or ``application/zip``.
+
+        Returns:
+            bool: True when an existing extension was updated, False when a new one was created.
+        """
+        path = "/api/v2/extensions"
+        response = self.request(
+            method="PUT",
+            path=path,
+            body=body,
+            extra_headers={"Content-Type": content_type},
+        )
+        # BloodHound answers 200 (OK) for an update and 201 (Created) for a brand new extension.
+        return response.status_code == 200
+
     @property
     def asset_group_tags(self) -> AssetGroupsTags:
         path = "/api/v2/asset-group-tags"
