@@ -16,6 +16,9 @@ from .bhe_version import render_bhe_version
 from .models import (
     AssetGroupsTags,
     CustomNodes,
+    FileUploadJob,
+    FileUploadJobResponse,
+    FileUploadJobsResponse,
     RunCypher,
     SavedQueries,
     SavedQuery,
@@ -169,6 +172,72 @@ class BloodHoundClient(ABC):
         )
         # BloodHound answers 200 (OK) for an update and 201 (Created) for a brand new extension.
         return response.status_code == 200
+
+    def product_edition(self) -> str:
+        """Ask BloodHound which edition it is, for example ``community`` or ``enterprise``.
+
+        The answer comes from the ``product_edition`` field of ``GET /api/version``, which
+        both editions provide to any signed-in caller.
+        """
+        response = self.request(method="GET", path="/api/version")
+        return response.json()["data"]["product_edition"]
+
+    def start_file_upload_job(self) -> FileUploadJob:
+        """Open a new file-upload job and return it.
+
+        Files are attached to the job with :meth:`upload_file_to_job`, and the job is closed
+        with :meth:`end_file_upload_job`. BloodHound only starts reading the files after the
+        job is ended.
+        """
+        path = "/api/v2/file-upload/start"
+        response = self.request(method="POST", path=path)
+        return FileUploadJobResponse.model_validate(response.json()).data
+
+    def upload_file_to_job(
+        self,
+        job_id: int,
+        body: bytes,
+        content_type: str,
+        file_name: str,
+        content_encoding: str | None = None,
+    ) -> None:
+        """Attach one collection file to an open job.
+
+        Args:
+            job_id (int): The job returned by :meth:`start_file_upload_job`.
+            body (bytes): The raw file contents, either an OpenGraph JSON document or a zip
+                of such documents.
+            content_type (str): ``application/json`` or ``application/zip``.
+            file_name (str): The original file name, shown in BloodHound's file ingest page.
+            content_encoding (str | None): ``gzip`` when ``body`` is gzip-compressed, so
+                BloodHound unpacks it before reading. ``content_type`` still names the
+                uncompressed file.
+        """
+        path = f"/api/v2/file-upload/{job_id}"
+        extra_headers = {
+            "Content-Type": content_type,
+            "X-File-Upload-Name": file_name,
+        }
+        if content_encoding:
+            extra_headers["Content-Encoding"] = content_encoding
+        self.request(
+            method="POST",
+            path=path,
+            body=body,
+            extra_headers=extra_headers,
+        )
+
+    def end_file_upload_job(self, job_id: int) -> None:
+        """Close a job so BloodHound starts reading the attached files."""
+        path = f"/api/v2/file-upload/{job_id}/end"
+        self.request(method="POST", path=path)
+
+    def file_upload_job(self, job_id: int) -> FileUploadJob | None:
+        """Fetch the current state of one job, or None when BloodHound no longer lists it."""
+        path = f"/api/v2/file-upload?id=eq:{job_id}"
+        response = self.request(method="GET", path=path)
+        jobs = FileUploadJobsResponse.model_validate(response.json()).data
+        return jobs[0] if jobs else None
 
     @property
     def asset_group_tags(self) -> AssetGroupsTags:

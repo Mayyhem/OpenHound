@@ -4,6 +4,7 @@ import openhound.core.logging  # noqa: F401
 from openhound.cli.collect import collect
 from openhound.cli.convert import convert
 from openhound.cli.create import create_app
+from openhound.cli.graph import graph
 from openhound.cli.override import TyperOverride
 from openhound.cli.preproc import preprocess
 from openhound.cli.privilege_zone import privilege_zone
@@ -21,6 +22,7 @@ app.add_typer(create_app, name="create")
 app.add_typer(saved_searches, name="searches")
 app.add_typer(privilege_zone, name="rules")
 app.add_typer(schema, name="schema")
+app.add_typer(graph, name="graph")
 
 if __name__ == "__main__":
     app()
