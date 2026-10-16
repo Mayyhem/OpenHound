@@ -24,6 +24,12 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# Seconds to wait for BloodHound when installing an extension schema: the first number is for
+# opening the connection, the second for each wait on the reply. Without them a stalled server
+# would block `schema upload` forever.
+EXTENSION_UPLOAD_CONNECT_TIMEOUT_SECONDS = 10
+EXTENSION_UPLOAD_READ_TIMEOUT_SECONDS = 120
+
 
 class BloodHoundHTTPError(DltException):
     def __init__(self, reason: str, code: int):
@@ -156,6 +162,10 @@ class BloodHoundClient(ABC):
             path=path,
             body=body,
             extra_headers={"Content-Type": content_type},
+            timeout=(
+                EXTENSION_UPLOAD_CONNECT_TIMEOUT_SECONDS,
+                EXTENSION_UPLOAD_READ_TIMEOUT_SECONDS,
+            ),
         )
         # BloodHound answers 200 (OK) for an update and 201 (Created) for a brand new extension.
         return response.status_code == 200

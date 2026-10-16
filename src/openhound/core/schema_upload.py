@@ -19,6 +19,7 @@ from importlib import resources
 from importlib.metadata import entry_points
 from pathlib import Path
 
+import requests
 from dlt.common import json
 
 from openhound.core.clients.bloodhound import BloodHoundClient, BloodHoundHTTPError
@@ -208,6 +209,12 @@ def upload_schema_files(
         except BloodHoundHTTPError as error:
             results.append(
                 SchemaUploadResult(path=path, outcome="failed", detail=error.reason)
+            )
+            continue
+        except requests.RequestException as error:
+            # Connection refused, DNS failure, or a timeout: record it and carry on.
+            results.append(
+                SchemaUploadResult(path=path, outcome="failed", detail=str(error))
             )
             continue
 

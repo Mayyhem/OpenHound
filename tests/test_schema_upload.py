@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+import requests
 from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
@@ -237,6 +238,40 @@ def test_upload_reports_server_rejections_per_file(
 
     assert results[0].outcome == "failed"
     assert "missing schema section" in results[0].detail
+
+
+def test_upload_sends_a_bounded_timeout(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_request(method, url, **kwargs):
+        seen.update(kwargs)
+        raise requests.ConnectTimeout("timed out")
+
+    monkeypatch.setattr("requests.request", fake_request)
+    client = BloodHoundJWT(token="t", base_uri="http://localhost:8080")
+
+    upload_schema_files(client, [write_schema(tmp_path / "schema.json")])
+
+    assert seen["timeout"] == (10, 120)
+
+
+def test_upload_reports_network_errors_and_continues(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_request(method, url, **kwargs):
+        calls.append(url)
+        raise requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr("requests.request", fake_request)
+    client = BloodHoundJWT(token="t", base_uri="http://localhost:8080")
+    first = write_schema(tmp_path / "a.json")
+    second = write_schema(tmp_path / "b.json")
+
+    results = upload_schema_files(client, [first, second])
+
+    assert [r.outcome for r in results] == ["failed", "failed"]
+    assert "connection refused" in results[0].detail
+    assert len(calls) == 2  # the second file was still attempted
 
 
 def test_dry_run_reads_files_but_sends_nothing(
