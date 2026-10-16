@@ -237,10 +237,11 @@ class OpenHound:
                     Method.write,
                     help=(
                         "write: save OpenGraph JSON files to the output path. "
-                        "ingest: send the data straight to BloodHound, using the "
-                        "destination.bloodhound settings for Community Edition or the "
-                        "destination.bloodhoundenterprise settings for Enterprise; the "
-                        "output path is then not used"
+                        "ingest: send the data straight to BloodHound. Community Edition "
+                        "uses the destination.bloodhound settings, or "
+                        "destination.bloodhoundenterprise when those hold no credentials; "
+                        "Enterprise uses destination.bloodhoundenterprise. The output path "
+                        "is then not used"
                     ),
                 ),
             ) -> LoadInfo:

@@ -168,7 +168,8 @@ The default, `--method write`, saves OpenGraph JSON files to the output folder.
 OpenHound asks the configured BloodHound which edition it is and sends the data the way that edition
 expects:
 
-- **Community Edition**: the settings come from `destination.bloodhound` (see
+- **Community Edition**: the settings come from `destination.bloodhound`, or from
+  `destination.bloodhoundenterprise` when `destination.bloodhound` holds no credentials (see
   [Configure where BloodHound is](#configure-where-bloodhound-is)). The run opens one BloodHound
   file-upload job, attaches every batch of 1,000 converted items to it as a gzip-compressed OpenGraph
   file, and ends the job. Each file carries the collector's source kind in its `metadata` section, so
@@ -177,8 +178,8 @@ expects:
   BloodHound runs its analysis once, after the job ends. If the conversion fails part-way, the job is
   ended anyway, so BloodHound processes whatever arrived.
 - **Enterprise**: the data goes to `/api/v2/ingest` using the `destination.bloodhoundenterprise`
-  settings. OpenHound also takes this route when the edition cannot be determined, for example because
-  no `destination.bloodhound` settings exist or BloodHound cannot be reached.
+  settings. OpenHound also takes this route when the edition cannot be determined: neither section
+  holds credentials, or BloodHound cannot be reached or does not answer the question.
 
 The Enterprise scheduler service always takes the Enterprise route.
 

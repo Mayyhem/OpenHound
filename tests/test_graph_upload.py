@@ -10,6 +10,7 @@ import gzip
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -19,7 +20,11 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from openhound.cli.graph import graph as graph_cli
-from openhound.core.clients.bloodhound import BloodHoundJWT
+from openhound.core.clients.bloodhound import (
+    FILE_ATTACH_TIMEOUT_SECONDS,
+    QUICK_REQUEST_TIMEOUT_SECONDS,
+    BloodHoundJWT,
+)
 from openhound.core.clients.models import FileUploadJobStatus
 from openhound.core.graph_upload import (
     CONTENT_TYPE_JSON,
@@ -60,6 +65,8 @@ def mock_bloodhound_api():
     app = FastAPI()
     app.state.jobs = {}
     app.state.next_job_id = 100
+    # Set to True to make the fake refuse every request to end a job.
+    app.state.refuse_to_end_jobs = False
 
     def job_record(job_id: int) -> dict:
         job = app.state.jobs[job_id]
@@ -108,6 +115,8 @@ def mock_bloodhound_api():
         job = app.state.jobs.get(job_id)
         if job is None:
             return Response(status_code=404, content="no such job")
+        if app.state.refuse_to_end_jobs:
+            return Response(status_code=500, content="could not end the job")
         job["ended"] = True
         job["status"] = int(FileUploadJobStatus.INGESTING)
         return Response(status_code=200)
@@ -486,6 +495,62 @@ def test_cli_no_wait_points_at_the_ingest_page(
     assert result.exit_code == 0, result.output
     assert "File Ingest" in result.output
     assert "Job 100 is" not in result.output
+
+
+def test_cli_does_not_wait_for_a_job_that_could_not_be_ended(
+    mock_bh_requests, mock_bloodhound_api, bearer_credentials, tmp_path, monkeypatch
+):
+    mock_bloodhound_api.app.state.refuse_to_end_jobs = True
+    waited = []
+    monkeypatch.setattr(
+        "openhound.cli.graph.wait_for_job", lambda *args, **kwargs: waited.append(1)
+    )
+    document = write_document(tmp_path / "a.json")
+
+    result = CliRunner().invoke(graph_cli, ["upload", str(document)])
+
+    assert result.exit_code == 1
+    assert "could not be ended" in result.output
+    assert waited == [], (
+        "an open job is never processed, so there is nothing to wait for"
+    )
+    assert "Watch its progress" not in result.output
+
+
+def test_every_job_request_has_a_time_limit(monkeypatch):
+    """A server that accepts the connection and then stays silent must not block forever."""
+    time_limits = {}
+    replies = {
+        "/api/version": {"data": {"product_edition": "community"}},
+        "/api/v2/file-upload/start": {"data": {"id": 1, "status": 1}},
+        "/api/v2/file-upload": {"data": []},
+    }
+
+    def record(method, url, **kwargs):
+        path = urlsplit(url).path
+        time_limits[(method, path)] = kwargs.get("timeout")
+        return SimpleNamespace(
+            status_code=200, text="", json=lambda: replies.get(path, {})
+        )
+
+    monkeypatch.setattr("requests.request", record)
+    client = make_client()
+
+    client.product_edition()
+    client.start_file_upload_job()
+    client.upload_file_to_job(
+        job_id=1, body=b"{}", content_type="application/json", file_name="a.json"
+    )
+    client.end_file_upload_job(1)
+    client.file_upload_job(1)
+
+    assert time_limits == {
+        ("GET", "/api/version"): QUICK_REQUEST_TIMEOUT_SECONDS,
+        ("POST", "/api/v2/file-upload/start"): QUICK_REQUEST_TIMEOUT_SECONDS,
+        ("POST", "/api/v2/file-upload/1"): FILE_ATTACH_TIMEOUT_SECONDS,
+        ("POST", "/api/v2/file-upload/1/end"): QUICK_REQUEST_TIMEOUT_SECONDS,
+        ("GET", "/api/v2/file-upload"): QUICK_REQUEST_TIMEOUT_SECONDS,
+    }
 
 
 def test_cli_dry_run_needs_no_credentials(

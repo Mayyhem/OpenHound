@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 EXTENSION_UPLOAD_CONNECT_TIMEOUT_SECONDS = 10
 EXTENSION_UPLOAD_READ_TIMEOUT_SECONDS = 120
 
+# The same two kinds of limit, in seconds, for the edition question and the file-upload job calls
+# used by `graph upload` and `convert --method ingest`. Attaching a file gets a longer reply limit,
+# because BloodHound answers only after it has received and stored the whole file. Without these,
+# a server that accepts the connection and then stops replying would block either command forever.
+QUICK_REQUEST_TIMEOUT_SECONDS = (10, 60)
+FILE_ATTACH_TIMEOUT_SECONDS = (10, 300)
+
 
 class BloodHoundHTTPError(DltException):
     def __init__(self, reason: str, code: int):
@@ -179,7 +186,9 @@ class BloodHoundClient(ABC):
         The answer comes from the ``product_edition`` field of ``GET /api/version``, which
         both editions provide to any signed-in caller.
         """
-        response = self.request(method="GET", path="/api/version")
+        response = self.request(
+            method="GET", path="/api/version", timeout=QUICK_REQUEST_TIMEOUT_SECONDS
+        )
         return response.json()["data"]["product_edition"]
 
     def start_file_upload_job(self) -> FileUploadJob:
@@ -190,7 +199,9 @@ class BloodHoundClient(ABC):
         job is ended.
         """
         path = "/api/v2/file-upload/start"
-        response = self.request(method="POST", path=path)
+        response = self.request(
+            method="POST", path=path, timeout=QUICK_REQUEST_TIMEOUT_SECONDS
+        )
         return FileUploadJobResponse.model_validate(response.json()).data
 
     def upload_file_to_job(
@@ -225,17 +236,20 @@ class BloodHoundClient(ABC):
             path=path,
             body=body,
             extra_headers=extra_headers,
+            timeout=FILE_ATTACH_TIMEOUT_SECONDS,
         )
 
     def end_file_upload_job(self, job_id: int) -> None:
         """Close a job so BloodHound starts reading the attached files."""
         path = f"/api/v2/file-upload/{job_id}/end"
-        self.request(method="POST", path=path)
+        self.request(method="POST", path=path, timeout=QUICK_REQUEST_TIMEOUT_SECONDS)
 
     def file_upload_job(self, job_id: int) -> FileUploadJob | None:
         """Fetch the current state of one job, or None when BloodHound no longer lists it."""
         path = f"/api/v2/file-upload?id=eq:{job_id}"
-        response = self.request(method="GET", path=path)
+        response = self.request(
+            method="GET", path=path, timeout=QUICK_REQUEST_TIMEOUT_SECONDS
+        )
         jobs = FileUploadJobsResponse.model_validate(response.json()).data
         return jobs[0] if jobs else None
 

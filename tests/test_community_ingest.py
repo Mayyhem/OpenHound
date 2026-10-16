@@ -22,7 +22,6 @@ from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from openhound.core import community_ingest
 from openhound.core.clients.bloodhound import BloodHoundJWT
 from openhound.core.community_ingest import (
     build_document,
@@ -364,22 +363,63 @@ def test_a_failure_to_end_the_job_does_not_hide_the_original_error(
         )
 
 
-def test_scheduler_style_ingest_never_asks_for_the_edition(monkeypatch, tmp_path):
-    """The Enterprise scheduler calls the converter without a client and must not change."""
-    asked = []
+@pytest.fixture
+def record_edition_checks_and_skip_conversion(monkeypatch):
+    """Record every edition check and every converter, and skip the conversion itself.
+
+    The edition check is replaced where ``app.py`` looks it up, because ``app.py`` imports it
+    by name; replacing it in ``community_ingest`` would not be seen there.
+
+    Returns:
+        dict: ``edition_checks`` counts the checks; ``converters`` holds each converter that ran.
+    """
+    record = {"edition_checks": 0, "converters": []}
+
+    def check_edition():
+        # Returning nothing means "take the Enterprise route", like a real Enterprise answer.
+        record["edition_checks"] += 1
+
+    def skip_conversion(self, source_object, graph_resources, extra_context, **kwargs):
+        record["converters"].append(self)
+        return "skipped"
+
     monkeypatch.setattr(
-        community_ingest, "community_edition_client_for_ingest", lambda: asked.append(1)
+        "openhound.core.app.community_edition_client_for_ingest", check_edition
+    )
+    monkeypatch.setattr(Converter, "run", skip_conversion)
+    return record
+
+
+def test_the_scheduler_path_never_asks_for_the_edition(
+    record_edition_checks_and_skip_conversion, collected_faker_data
+):
+    """The Enterprise scheduler calls the collector's converter directly, like this."""
+    collected, lookup_file, _ = collected_faker_data
+    extension = next(
+        collector
+        for collector in CollectorManager.from_entrypoint().collectors
+        if collector.name == "faker"  # pyright: ignore[reportAttributeAccessIssue]
     )
 
-    converter = Converter(
-        name="test",
-        input_path=tmp_path,
-        lookup=None,
-        output_path=tmp_path / "unused",
-        source_kind="TestBase",
-        progress=Progress.log,
+    extension.converter(
+        input_path=collected,
+        lookup_file=lookup_file,
         method=Method.ingest,
+        progress=Progress.log,
     )
 
-    assert converter.sends_to_community_edition is False
-    assert asked == []
+    record = record_edition_checks_and_skip_conversion
+    assert record["edition_checks"] == 0
+    assert record["converters"][0].sends_to_community_edition is False
+
+
+def test_the_command_line_asks_for_the_edition(
+    record_edition_checks_and_skip_conversion, collected_faker_data, tmp_path
+):
+    """The control for the test above: the command line does ask, so the check is watched."""
+    collected, lookup_file, _ = collected_faker_data
+
+    result = run_convert_command(collected, lookup_file, tmp_path, "--method", "ingest")
+
+    assert result.exit_code == 0, result.output
+    assert record_edition_checks_and_skip_conversion["edition_checks"] == 1

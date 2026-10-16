@@ -122,7 +122,9 @@ def upload(
     if result.job_id is not None:
         typer.echo(f"BloodHound file-upload job: {result.job_id}")
 
-        if wait and client is not None:
+        # Wait only for a job that was ended: BloodHound never processes one left open, so
+        # waiting would only use up the whole --timeout before reporting the failure.
+        if wait and client is not None and result.job_ended:
             try:
                 job = wait_for_job(client, result.job_id, timeout_seconds=timeout)
             except (BloodHoundHTTPError, requests.RequestException) as error:
@@ -168,7 +170,7 @@ def upload(
                     typer.secho(summary, fg=typer.colors.RED, err=True)
                 else:
                     typer.secho(summary, fg=typer.colors.GREEN)
-        else:
+        elif result.job_ended:
             typer.echo(
                 "Watch its progress under Administration > File Ingest in BloodHound."
             )

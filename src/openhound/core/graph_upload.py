@@ -82,12 +82,15 @@ class GraphUploadResult:
         files: One result per file, in upload order.
         job: The job's final state when the caller waited for it; otherwise None.
         detail: Explanation when the job itself could not be started or ended.
+        job_ended: True once BloodHound accepted the request to end the job. BloodHound only
+            starts processing a job after it ends, so there is nothing to wait for otherwise.
     """
 
     job_id: int | None
     files: list[FileResult] = field(default_factory=list)
     job: FileUploadJob | None = None
     detail: str = ""
+    job_ended: bool = False
 
     @property
     def all_files_succeeded(self) -> bool:
@@ -337,6 +340,7 @@ def upload_collection_files(
 
     try:
         client.end_file_upload_job(job.id)
+        result.job_ended = True
     except (BloodHoundHTTPError, requests.RequestException) as error:
         reason = error.reason if isinstance(error, BloodHoundHTTPError) else str(error)
         result.detail = f"Files were attached but the job could not be ended: {reason}"
